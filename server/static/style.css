@@ -226,3 +226,119 @@ table.props td:last-child { color: #d6d6d6; word-break: break-all; }
 }
 .hint { color: #777; }
 audio { margin-top: 12px; }
+
+/* Right-click export menu. Positioned at the cursor by JS. */
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 220px;
+  background: #2b2d31;
+  border: 1px solid #1a1b1d;
+  border-radius: 4px;
+  padding: 4px 0;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  font-size: 12px;
+}
+.context-menu[hidden] { display: none !important; }
+.context-menu .menu-label {
+  padding: 4px 12px 6px;
+  color: #888;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  border-bottom: 1px solid #1a1b1d;
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+.context-menu .menu-item {
+  padding: 6px 14px;
+  cursor: pointer;
+  user-select: none;
+  color: #d6d6d6;
+}
+.context-menu .menu-item:hover { background: #3a4d6f; color: #fff; }
+.context-menu .menu-sep {
+  height: 1px;
+  background: #1a1b1d;
+  margin: 4px 0;
+}
+
+/* Progress modal for the per-image JSON bundle export. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-card {
+  background: #2b2d31;
+  border: 1px solid #1a1b1d;
+  border-radius: 6px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  padding: 18px 20px 14px;
+  width: 460px;
+  max-width: calc(100vw - 32px);
+}
+.modal-title {
+  color: #e8b96b;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.modal-sub {
+  color: #aaa;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  margin-bottom: 12px;
+}
+.progress-bar {
+  height: 10px;
+  background: #1a1b1d;
+  border-radius: 5px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.progress-fill {
+  width: 0%;
+  height: 100%;
+  background: linear-gradient(90deg, #5a7fb0, #7a9bd1);
+  transition: width 120ms linear;
+}
+.progress-fill.done { background: linear-gradient(90deg, #4d8a5e, #6cb37e); }
+.progress-fill.error { background: linear-gradient(90deg, #8a4d4d, #b36c6c); }
+.modal-stats {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 12px;
+  color: #d6d6d6;
+}
+.modal-current {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  color: #888;
+  margin-top: 4px;
+  min-height: 14px;
+  word-break: break-all;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.modal-buttons {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+.modal-buttons button {
+  background: #3a3d44;
+  color: #d6d6d6;
+  border: 1px solid #1a1b1d;
+  border-radius: 3px;
+  padding: 4px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+.modal-buttons button:hover:not(:disabled) { background: #494d56; }
+.modal-buttons button:disabled { opacity: 0.6; cursor: default; }

@@ -1,20 +1,37 @@
 """Flask web UI for browsing a WZ file.
 
 Routes:
-  /                   - tree browser shell (HTML)
-  /api/tree/<path>    - JSON listing of a directory or .img subtree
-  /api/property/<p>   - JSON value for a leaf property
-  /api/canvas/<p>.png - rendered PNG bytes for a Canvas property
-  /api/sound/<p>      - raw audio bytes for a Sound property
+  /                                  - tree browser shell (HTML)
+  /api/tree/<path>                   - JSON listing of a directory / .img subtree
+  /api/property/<p>                  - JSON value for a leaf property
+  /api/canvas/<p>.png                - rendered PNG bytes for a Canvas property
+  /api/sound/<p>                     - raw audio bytes for a Sound property
+  /api/export/json/<p>               - JSON dump of the subtree
+  /api/export/xml/<p>                - XML dump of the subtree
+  /api/export/images/<p>?layout=...  - ZIP of every Canvas under <p>
 """
 
 from __future__ import annotations
 
 import io
+import json
+import os
 import re
+import tempfile
+import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+import uuid
+import zipfile
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import unquote
+from xml.sax.saxutils import escape as xml_escape, quoteattr
+
+
+# In-memory job tracker for long-running bundle exports. Keyed by job_id.
+# Each entry: {status, progress, total, current, label, file_path?, error?, cancel?}.
+# A single mutex guards all access — jobs are short-lived and contention is low.
+_JOBS: Dict[str, Dict[str, Any]] = {}
+_JOBS_LOCK = threading.Lock()
 
 
 _NUMBER_RE = re.compile(r"(\d+)")
@@ -24,17 +41,238 @@ def _natural_key(s: str):
     """Sort key that orders ``"2.img"`` before ``"10.img"`` and ``"0"`` before ``"10"``."""
     return [int(p) if p.isdigit() else p.lower() for p in _NUMBER_RE.split(s)]
 
+
+# ── recursive serializers used by the export routes ─────────────────────
+# Canvas pixel data and Sound bytes are NOT inlined: they'd bloat the dump
+# from kilobytes to gigabytes for a typical Mob/Map export. Use the dedicated
+# /api/canvas + /api/sound routes (or /api/export/images) for the binaries.
+
+from wzpy.json_export import node_to_dict as _node_to_dict, property_to_dict as _property_to_dict
+
+
+# Property type names → XML tag names. Mirrors the convention used by the
+# C# HaSuite XML exporter so the output is recognizable to MapleStory tooling.
+_XML_TAG_BY_TYPE = {
+    "Null": "null",
+    "Short": "short",
+    "Int": "int",
+    "Long": "long",
+    "Float": "float",
+    "Double": "double",
+    "String": "string",
+    "Vector": "vector",
+    "SubProperty": "imgdir",
+    "Canvas": "canvas",
+    "Sound": "sound",
+    "UOL": "uol",
+    "Convex": "extended",
+}
+
+
+def _xml_tag(prop) -> str:
+    return _XML_TAG_BY_TYPE.get(prop.type_name, "property")
+
+
+def _property_to_xml(prop, indent: int = 0) -> str:
+    from wzpy.properties import (
+        WzCanvasProperty, WzConvexProperty, WzNullProperty, WzSoundProperty,
+        WzSubProperty, WzUolProperty, WzVectorProperty,
+    )
+    pad = "  " * indent
+    tag = _xml_tag(prop)
+    name_attr = f"name={quoteattr(prop.name)}"
+
+    if isinstance(prop, WzNullProperty):
+        return f"{pad}<{tag} {name_attr}/>"
+    if isinstance(prop, WzVectorProperty):
+        return f'{pad}<{tag} {name_attr} x="{prop.x}" y="{prop.y}"/>'
+    if isinstance(prop, WzCanvasProperty):
+        attrs = (f'{name_attr} width="{prop.width}" height="{prop.height}" '
+                 f'format="{prop.format + prop.format2}"')
+        if not prop.has_children():
+            return f"{pad}<{tag} {attrs}/>"
+        body = "\n".join(_property_to_xml(c, indent + 1) for c in prop.children())
+        return f"{pad}<{tag} {attrs}>\n{body}\n{pad}</{tag}>"
+    if isinstance(prop, WzSoundProperty):
+        return (f'{pad}<{tag} {name_attr} length_ms="{prop.length_ms}" '
+                f'bytes="{prop.value}"/>')
+    if isinstance(prop, WzConvexProperty):
+        body = "\n".join(
+            f'{pad}  <vector x="{p.x}" y="{p.y}"/>' for p in prop.points
+        )
+        return f"{pad}<{tag} {name_attr}>\n{body}\n{pad}</{tag}>"
+    if isinstance(prop, WzUolProperty):
+        return f"{pad}<{tag} {name_attr} target={quoteattr(str(prop.value))}/>"
+    if isinstance(prop, WzSubProperty):
+        if not prop.has_children():
+            return f"{pad}<{tag} {name_attr}/>"
+        body = "\n".join(_property_to_xml(c, indent + 1) for c in prop.children())
+        return f"{pad}<{tag} {name_attr}>\n{body}\n{pad}</{tag}>"
+    # Scalar fallback.
+    try:
+        v = prop.value
+    except Exception:
+        v = ""
+    return f"{pad}<{tag} {name_attr} value={quoteattr(str(v))}/>"
+
+
+def _node_to_xml(node) -> str:
+    from wzpy.properties import WzProperty
+    from wzpy.wz_file import WzDirectory
+    from wzpy.wz_image import WzImage
+    if isinstance(node, WzDirectory):
+        body_parts = []
+        for n, d in node.subdirs.items():
+            body_parts.append(_node_to_xml(d))
+        for n, i in node.images.items():
+            body_parts.append(_node_to_xml(i))
+        body = "\n".join(body_parts)
+        return f"<directory name={quoteattr(node.name or '')}>\n{body}\n</directory>"
+    if isinstance(node, WzImage):
+        node.parse()
+        body = "\n".join(_property_to_xml(c, 1) for c in node.children())
+        return f"<imgdir name={quoteattr(node.name)}>\n{body}\n</imgdir>"
+    if isinstance(node, WzProperty):
+        return _property_to_xml(node)
+    return f"<unknown name={quoteattr(getattr(node, 'name', '') or '')}/>"
+
+
+def _walk_canvases(node, current_path: str = "") -> Iterator[Tuple[str, Any]]:
+    """Yield every (path, WzCanvasProperty) with pixels in the subtree."""
+    from wzpy.properties import WzCanvasProperty, WzProperty
+    from wzpy.wz_file import WzDirectory
+    from wzpy.wz_image import WzImage
+    if isinstance(node, WzCanvasProperty):
+        if node.has_pixels():
+            yield current_path, node
+        for c in node.children():
+            yield from _walk_canvases(c, f"{current_path}/{c.name}")
+        return
+    if isinstance(node, WzDirectory):
+        children = list(node.subdirs.items()) + list(node.images.items())
+        for name, child in children:
+            yield from _walk_canvases(child, f"{current_path}/{name}" if current_path else name)
+        return
+    if isinstance(node, WzImage):
+        node.parse()
+        for c in node.children():
+            yield from _walk_canvases(c, f"{current_path}/{c.name}" if current_path else c.name)
+        return
+    if isinstance(node, WzProperty):
+        for c in node.children():
+            yield from _walk_canvases(c, f"{current_path}/{c.name}" if current_path else c.name)
+
+
+def _walk_images(node, current_path: str = "") -> Iterator[Tuple[str, Any]]:
+    """Yield ``(relative_path, WzImage)`` for every .img reachable from ``node``.
+
+    ``relative_path`` includes the image filename (e.g. ``"Map/400000000.img"``)
+    so callers can use it directly as a zip entry name.
+    """
+    from wzpy.wz_file import WzDirectory
+    from wzpy.wz_image import WzImage
+    if isinstance(node, WzImage):
+        yield current_path or node.name, node
+        return
+    if isinstance(node, WzDirectory):
+        for name, sub in node.subdirs.items():
+            yield from _walk_images(sub, f"{current_path}/{name}" if current_path else name)
+        for name, img in node.images.items():
+            yield from _walk_images(img, f"{current_path}/{name}" if current_path else name)
+
+
+def _run_json_bundle_job(job_id: str, target, label: str, reader_lock: threading.Lock):
+    """Background worker: serialize each .img under ``target`` into its own
+    JSON file inside a temp ZIP, updating the job entry as it progresses."""
+    from wzpy.wz_image import WzImage
+    images: List[Tuple[str, Any]] = list(_walk_images(target, label))
+    total = len(images)
+    with _JOBS_LOCK:
+        _JOBS[job_id]["total"] = total
+
+    fd, zip_path = tempfile.mkstemp(suffix=".zip", prefix="wzpy_export_")
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for i, (rel, img) in enumerate(images):
+                with _JOBS_LOCK:
+                    j = _JOBS[job_id]
+                    if j.get("cancel"):
+                        j["status"] = "cancelled"
+                        return
+                    j["progress"] = i
+                    j["current"] = rel
+                # Reader has shared state (file position + cipher) — serialize
+                # one image at a time so we don't fight tree/canvas requests.
+                try:
+                    with reader_lock:
+                        if isinstance(img, WzImage):
+                            img.parse()
+                        body = json.dumps(_node_to_dict(img), indent=2, ensure_ascii=False)
+                except Exception as e:
+                    body = json.dumps(
+                        {"error": str(e), "name": getattr(img, "name", "")},
+                        indent=2,
+                    )
+                zf.writestr(f"{rel}.json", body)
+
+        with _JOBS_LOCK:
+            _JOBS[job_id]["progress"] = total
+            _JOBS[job_id]["file_path"] = zip_path
+            _JOBS[job_id]["status"] = "done"
+    except Exception as e:
+        with _JOBS_LOCK:
+            _JOBS[job_id]["status"] = "error"
+            _JOBS[job_id]["error"] = str(e)
+        try:
+            os.remove(zip_path)
+        except OSError:
+            pass
+
+
+def _build_image_zip(node, layout: str, region: str) -> bytes:
+    """Decode every Canvas under ``node`` and pack into a ZIP."""
+    buf = io.BytesIO()
+    seen_names: Dict[str, int] = {}
+    count = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for path, canvas in _walk_canvases(node):
+            try:
+                img = decode_canvas(canvas, region=region)
+            except Exception:
+                continue  # skip undecodable canvases (e.g., outlinked)
+            png_buf = io.BytesIO()
+            img.save(png_buf, format="PNG", optimize=False)
+            if layout == "flat":
+                # Avoid collisions by suffixing with a counter when we've seen
+                # the same final filename before.
+                name = path.replace("/", "_") + ".png"
+            else:
+                name = f"{path}.png"
+            # Defensive deduplication (paths *should* be unique but be safe).
+            if name in seen_names:
+                seen_names[name] += 1
+                stem, ext = name.rsplit(".", 1)
+                name = f"{stem}_{seen_names[name]}.{ext}"
+            else:
+                seen_names[name] = 0
+            zf.writestr(name, png_buf.getvalue())
+            count += 1
+    return buf.getvalue() if count else b""
+
 from flask import Flask, Response, abort, jsonify, render_template, request
 from PIL import Image, ImageDraw
 
 from wzpy import (
     WzCanvasProperty,
+    WzConvexProperty,
     WzFile,
     WzImage,
     WzNullProperty,
     WzProperty,
     WzSoundProperty,
     WzSubProperty,
+    WzUolProperty,
     WzVectorProperty,
 )
 from wzpy.canvas import decode_canvas
@@ -46,6 +284,10 @@ def create_app(wz_path: str, region: str = "GMS", version: Optional[int] = None)
     wz = WzFile.open(wz_path, region=region, version=version)
     app.config["WZ"] = wz
     app.config["WZ_REGION"] = region
+    # Background bundle exports parse images on a worker thread; the WZ reader
+    # carries shared file-position + cipher state, so we mediate access with
+    # this lock. Currently only the bundle worker acquires it.
+    app.config["WZ_READER_LOCK"] = threading.Lock()
 
     # ── helpers ──────────────────────────────────────────────────────
     def _resolve(path: str) -> Tuple[Any, str]:
@@ -243,6 +485,143 @@ def create_app(wz_path: str, region: str = "GMS", version: Optional[int] = None)
         data = r.read(prop._data_length)
         r.seek(keep)
         return Response(data, mimetype="audio/mpeg")
+
+    # ── export endpoints ─────────────────────────────────────────────
+    def _resolve_target(subpath: str):
+        """Like ``_resolve`` but returns whatever node the caller asked for —
+        for an .img mid-path it descends into the property tree."""
+        node, remaining = _resolve(unquote(subpath))
+        if isinstance(node, WzImage):
+            node.parse()
+            if remaining:
+                prop = node.get(remaining)
+                if prop is None:
+                    abort(404)
+                return prop
+        return node
+
+    def _safe_filename(subpath: str, ext: str) -> str:
+        base = subpath.replace("/", "_").replace("\\", "_") or "wz_root"
+        # Strip characters problematic on Windows.
+        base = re.sub(r'[<>:"|?*]', "_", base)
+        return f"{base}.{ext}"
+
+    @app.route("/api/export/json/", defaults={"subpath": ""})
+    @app.route("/api/export/json/<path:subpath>")
+    def api_export_json(subpath: str) -> Response:
+        target = _resolve_target(subpath)
+        body = json.dumps(_node_to_dict(target), indent=2, ensure_ascii=False)
+        return Response(
+            body,
+            mimetype="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{_safe_filename(subpath, "json")}"'},
+        )
+
+    @app.route("/api/export/json_bundle/start/", defaults={"subpath": ""}, methods=["POST"])
+    @app.route("/api/export/json_bundle/start/<path:subpath>", methods=["POST"])
+    def api_export_json_bundle_start(subpath: str) -> Response:
+        target = _resolve_target(unquote(subpath))
+        if not isinstance(target, WzDirectory):
+            abort(400, "json_bundle requires a directory target")
+        job_id = uuid.uuid4().hex
+        label = unquote(subpath).strip("/") or "wz_root"
+        with _JOBS_LOCK:
+            _JOBS[job_id] = {
+                "status": "running",
+                "progress": 0,
+                "total": 0,
+                "current": "",
+                "label": label,
+            }
+        t = threading.Thread(
+            target=_run_json_bundle_job,
+            args=(job_id, target, label, app.config["WZ_READER_LOCK"]),
+            daemon=True,
+        )
+        t.start()
+        return jsonify({"job_id": job_id})
+
+    @app.route("/api/export/json_bundle/status/<job_id>")
+    def api_export_json_bundle_status(job_id: str) -> Response:
+        with _JOBS_LOCK:
+            j = _JOBS.get(job_id)
+            if not j:
+                abort(404)
+            # Strip server-only fields before returning to the client.
+            return jsonify({k: v for k, v in j.items() if k not in ("file_path",)})
+
+    @app.route("/api/export/json_bundle/cancel/<job_id>", methods=["POST"])
+    def api_export_json_bundle_cancel(job_id: str) -> Response:
+        with _JOBS_LOCK:
+            j = _JOBS.get(job_id)
+            if not j:
+                abort(404)
+            j["cancel"] = True
+        return jsonify({"ok": True})
+
+    @app.route("/api/export/json_bundle/download/<job_id>")
+    def api_export_json_bundle_download(job_id: str) -> Response:
+        with _JOBS_LOCK:
+            j = _JOBS.get(job_id)
+            if not j or j.get("status") != "done":
+                abort(404)
+            zip_path = j["file_path"]
+            label = j["label"]
+
+        def stream_and_cleanup():
+            try:
+                with open(zip_path, "rb") as f:
+                    while True:
+                        chunk = f.read(64 * 1024)
+                        if not chunk:
+                            break
+                        yield chunk
+            finally:
+                try:
+                    os.remove(zip_path)
+                except OSError:
+                    pass
+                with _JOBS_LOCK:
+                    _JOBS.pop(job_id, None)
+
+        return Response(
+            stream_and_cleanup(),
+            mimetype="application/zip",
+            headers={
+                "Content-Disposition":
+                    f'attachment; filename="{_safe_filename(label, "json_bundle.zip")}"',
+            },
+        )
+
+    @app.route("/api/export/xml/", defaults={"subpath": ""})
+    @app.route("/api/export/xml/<path:subpath>")
+    def api_export_xml(subpath: str) -> Response:
+        target = _resolve_target(subpath)
+        body = '<?xml version="1.0" encoding="UTF-8"?>\n' + _node_to_xml(target)
+        return Response(
+            body,
+            mimetype="application/xml",
+            headers={"Content-Disposition": f'attachment; filename="{_safe_filename(subpath, "xml")}"'},
+        )
+
+    @app.route("/api/export/images/", defaults={"subpath": ""})
+    @app.route("/api/export/images/<path:subpath>")
+    def api_export_images(subpath: str) -> Response:
+        target = _resolve_target(subpath)
+        layout = request.args.get("layout", "nested")
+        if layout not in ("nested", "flat"):
+            abort(400, "layout must be 'nested' or 'flat'")
+        zip_bytes = _build_image_zip(target, layout=layout, region=app.config["WZ_REGION"])
+        if not zip_bytes:
+            abort(404, "no decodable images in this subtree")
+        return Response(
+            zip_bytes,
+            mimetype="application/zip",
+            headers={
+                "Content-Disposition":
+                    f'attachment; filename="{_safe_filename(subpath, "images_" + layout + ".zip")}"',
+            },
+        )
 
     return app
 

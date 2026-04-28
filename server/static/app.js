@@ -204,6 +204,94 @@ async function expandLi(li, fullPath) {
 
 treeRoot.addEventListener("click", onTreeClick);
 
+// ── right-click export menu ─────────────────────────────────────────
+const contextMenuEl = document.getElementById("context-menu");
+
+function hideContextMenu() {
+  contextMenuEl.hidden = true;
+  contextMenuEl.innerHTML = "";
+}
+
+function showContextMenuFor(x, y, labelPath, fullPath, kind) {
+  contextMenuEl.innerHTML = "";
+
+  const label = document.createElement("div");
+  label.className = "menu-label";
+  label.textContent = labelPath || "(root)";
+  contextMenuEl.appendChild(label);
+
+  const triggerDownload = (url, suggestedName) => {
+    const a = document.createElement("a");
+    a.href = url;
+    if (suggestedName) a.download = suggestedName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const addItem = (text, onClick) => {
+    const it = document.createElement("div");
+    it.className = "menu-item";
+    it.textContent = text;
+    it.onclick = (e) => { e.stopPropagation(); hideContextMenu(); onClick(); };
+    contextMenuEl.appendChild(it);
+  };
+  const addSep = () => {
+    const sep = document.createElement("div");
+    sep.className = "menu-sep";
+    contextMenuEl.appendChild(sep);
+  };
+
+  const enc = encodeURI(fullPath);
+  // Directory targets get the per-image bundle route — exporting a whole WZ
+  // root as one giant JSON would balloon to gigabytes for typical Map/Mob
+  // files. For non-directory targets the single-file export is still right.
+  const isDir = (kind || "").toLowerCase() === "directory";
+  if (isDir) {
+    addItem("Export data as JSON (one file per .img)",
+      () => runJsonBundleExport(fullPath, labelPath));
+  } else {
+    addItem("Export data as JSON", () => triggerDownload(`/api/export/json/${enc}`));
+  }
+  addItem("Export data as XML", () => triggerDownload(`/api/export/xml/${enc}`));
+  addSep();
+  addItem("Export images (keep tree structure)",
+    () => triggerDownload(`/api/export/images/${enc}?layout=nested`));
+  addItem("Export images (flatten into one folder)",
+    () => triggerDownload(`/api/export/images/${enc}?layout=flat`));
+
+  // Position; clamp to viewport so the menu doesn't get clipped at edges.
+  contextMenuEl.hidden = false;
+  const rect = contextMenuEl.getBoundingClientRect();
+  const maxX = window.innerWidth - rect.width - 4;
+  const maxY = window.innerHeight - rect.height - 4;
+  contextMenuEl.style.left = Math.min(x, maxX) + "px";
+  contextMenuEl.style.top = Math.min(y, maxY) + "px";
+}
+
+treeRoot.addEventListener("contextmenu", (ev) => {
+  const nodeEl = ev.target.closest(".node");
+  if (!nodeEl || !treeRoot.contains(nodeEl)) return;
+  const li = nodeEl.parentElement;
+  if (!li || li._meta === undefined) return;
+  ev.preventDefault();
+  // labelPath is what we show at the top of the menu — full visible path.
+  // fullPath is what the server route gets (synthetic root LI uses "").
+  const fullPath = li._fullPath || "";
+  const meta = li._meta;
+  const label = fullPath || meta.name || "(root)";
+  showContextMenuFor(ev.clientX, ev.clientY, label, fullPath, meta.kind);
+});
+
+// Click anywhere else (or Escape) closes the menu.
+document.addEventListener("click", (ev) => {
+  if (!contextMenuEl.contains(ev.target)) hideContextMenu();
+});
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape") hideContextMenu();
+});
+window.addEventListener("blur", hideContextMenu);
+
 function makeCrumbs(path) {
   crumbsEl.innerHTML = "";
   const parts = path.split("/").filter(Boolean);
@@ -567,6 +655,152 @@ function notifyAncestorVirtualResize(li) {
   const meta = li._meta;
   if (!meta || !meta._virtualList) return;
   requestAnimationFrame(() => meta._virtualList.childResized(meta));
+}
+
+// ── per-image JSON bundle export (with progress modal) ─────────────
+// Backend serializes each .img into its own JSON inside a temp ZIP on a
+// worker thread; we poll status every 250 ms and surface progress here.
+
+async function runJsonBundleExport(fullPath, labelPath) {
+  const modal = createProgressModal(labelPath || "(root)");
+  document.body.appendChild(modal.root);
+
+  let jobId;
+  try {
+    const startResp = await fetch(`/api/export/json_bundle/start/${encodeURI(fullPath)}`, {
+      method: "POST",
+    });
+    if (!startResp.ok) throw new Error(`start failed: ${startResp.status} ${startResp.statusText}`);
+    ({ job_id: jobId } = await startResp.json());
+  } catch (err) {
+    modal.error(err.message);
+    return;
+  }
+
+  modal.onCancel(async () => {
+    try {
+      await fetch(`/api/export/json_bundle/cancel/${jobId}`, { method: "POST" });
+    } catch (_) {}
+  });
+
+  const poll = async () => {
+    let st;
+    try {
+      const r = await fetch(`/api/export/json_bundle/status/${jobId}`);
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      st = await r.json();
+    } catch (err) {
+      modal.error(err.message);
+      return;
+    }
+    modal.update(st);
+    if (st.status === "running") {
+      setTimeout(poll, 250);
+    } else if (st.status === "done") {
+      // Trigger download. The browser navigation handles the streaming
+      // ZIP response; the server cleans up the temp file once it's read.
+      const a = document.createElement("a");
+      a.href = `/api/export/json_bundle/download/${jobId}`;
+      a.download = "";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      modal.done();
+    } else if (st.status === "cancelled") {
+      modal.cancelled();
+    } else if (st.status === "error") {
+      modal.error(st.error || "unknown error");
+    }
+  };
+  poll();
+}
+
+function createProgressModal(labelText) {
+  const root = document.createElement("div");
+  root.className = "modal-backdrop";
+
+  const card = document.createElement("div");
+  card.className = "modal-card";
+  root.appendChild(card);
+
+  const title = document.createElement("div");
+  title.className = "modal-title";
+  title.textContent = "Exporting JSON";
+  card.appendChild(title);
+
+  const sub = document.createElement("div");
+  sub.className = "modal-sub";
+  sub.textContent = labelText;
+  card.appendChild(sub);
+
+  const barOuter = document.createElement("div");
+  barOuter.className = "progress-bar";
+  const barInner = document.createElement("div");
+  barInner.className = "progress-fill";
+  barOuter.appendChild(barInner);
+  card.appendChild(barOuter);
+
+  const stats = document.createElement("div");
+  stats.className = "modal-stats";
+  stats.textContent = "Preparing…";
+  card.appendChild(stats);
+
+  const current = document.createElement("div");
+  current.className = "modal-current";
+  card.appendChild(current);
+
+  const buttons = document.createElement("div");
+  buttons.className = "modal-buttons";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.textContent = "Cancel";
+  buttons.appendChild(cancelBtn);
+  const closeBtn = document.createElement("button");
+  closeBtn.textContent = "Close";
+  closeBtn.style.display = "none";
+  buttons.appendChild(closeBtn);
+  card.appendChild(buttons);
+
+  let cancelHandler = null;
+  cancelBtn.onclick = () => {
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = "Cancelling…";
+    if (cancelHandler) cancelHandler();
+  };
+  closeBtn.onclick = () => root.remove();
+
+  return {
+    root,
+    onCancel(fn) { cancelHandler = fn; },
+    update(st) {
+      const total = st.total || 0;
+      const done = st.progress || 0;
+      const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+      barInner.style.width = `${pct}%`;
+      stats.textContent = total > 0
+        ? `${done} / ${total} (${pct}%)`
+        : "Discovering images…";
+      current.textContent = st.current || "";
+    },
+    done() {
+      title.textContent = "Export complete";
+      stats.textContent = `${stats.textContent} — download started`;
+      cancelBtn.style.display = "none";
+      closeBtn.style.display = "";
+      barInner.classList.add("done");
+    },
+    cancelled() {
+      title.textContent = "Export cancelled";
+      cancelBtn.style.display = "none";
+      closeBtn.style.display = "";
+    },
+    error(msg) {
+      title.textContent = "Export failed";
+      stats.textContent = msg;
+      cancelBtn.style.display = "none";
+      closeBtn.style.display = "";
+      barInner.classList.add("error");
+    },
+  };
 }
 
 async function init() {
