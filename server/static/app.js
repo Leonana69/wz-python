@@ -12,9 +12,10 @@ const treePanel = document.getElementById("tree-panel");
 // drops it to O(visible).
 const VIRTUALIZE_THRESHOLD = 200;
 
-// SubProperty/Property/Image have an expand twisty in front; using the same
-// "▸" character as the kind icon would render two arrows side-by-side where
-// only one rotates. Leave those kinds icon-less.
+// Empty string = render no icon for this kind; the twisty already cues that
+// SubProperty/Property/Image are containers, and a duplicate ▸ would just
+// look like two arrows side-by-side. Missing key = unknown type → fallback
+// to "•" so something visibly shows up rather than going silent.
 const KIND_ICONS = {
   directory: "📁", Directory: "📁",
   image: "", Image: "",
@@ -30,7 +31,9 @@ const KIND_ICONS = {
 };
 
 function iconFor(kind) {
-  return KIND_ICONS[kind] || "•";
+  // ?? rather than || so a deliberate empty-string mapping stays empty
+  // and we know not to create the icon span at all.
+  return KIND_ICONS[kind] ?? "•";
 }
 
 function joinPath(base, name) {
@@ -56,10 +59,13 @@ function makeNode(child, parentPath) {
   twisty.textContent = child.leaf ? "" : "▸";
   node.appendChild(twisty);
 
-  const icon = document.createElement("span");
-  icon.className = "icon";
-  icon.textContent = iconFor(child.kind);
-  node.appendChild(icon);
+  const iconText = iconFor(child.kind);
+  if (iconText) {
+    const icon = document.createElement("span");
+    icon.className = "icon";
+    icon.textContent = iconText;
+    node.appendChild(icon);
+  }
 
   const name = document.createElement("span");
   name.className = "name";
