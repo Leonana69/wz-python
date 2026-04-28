@@ -246,7 +246,9 @@ function showContextMenuFor(x, y, labelPath, fullPath, kind) {
   // Directory targets get the per-image bundle route — exporting a whole WZ
   // root as one giant JSON would balloon to gigabytes for typical Map/Mob
   // files. For non-directory targets the single-file export is still right.
-  const isDir = (kind || "").toLowerCase() === "directory";
+  const k = (kind || "").toLowerCase();
+  const isDir = k === "directory";
+  const isImg = k === "image";
   if (isDir) {
     addItem("Export data as JSON (one file per .img)",
       () => runJsonBundleExport(fullPath, labelPath));
@@ -254,6 +256,18 @@ function showContextMenuFor(x, y, labelPath, fullPath, kind) {
     addItem("Export data as JSON", () => triggerDownload(`/api/export/json/${enc}`));
   }
   addItem("Export data as XML", () => triggerDownload(`/api/export/xml/${enc}`));
+  if (isImg || isDir) {
+    addSep();
+    if (isImg) {
+      // Raw on-disk .img bytes — the same blob HaRepacker's "Save Image"
+      // would (try to) write, suitable for re-opening as a loose .img.
+      addItem("Export as .img (raw bytes)",
+        () => triggerDownload(`/api/export/img/${enc}`));
+    } else {
+      addItem("Export .img bundle (.zip)",
+        () => triggerDownload(`/api/export/img/${enc}`));
+    }
+  }
   addSep();
   addItem("Export images (keep tree structure)",
     () => triggerDownload(`/api/export/images/${enc}?layout=nested`));

@@ -635,6 +635,47 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             headers={"Content-Disposition": f'attachment; filename="{_safe_filename(subpath, "xml")}"'},
         )
 
+    @app.route("/api/export/img/", defaults={"subpath": ""})
+    @app.route("/api/export/img/<path:subpath>")
+    def api_export_img(subpath: str) -> Response:
+        """Raw .img bytes (the on-disk WZ slice for this image, or a ZIP
+        of every image under a directory). Useful for round-tripping into
+        HaRepacker, which can open a loose .img directly."""
+        target = _resolve_target(subpath)
+
+        def _read_img_bytes(img: WzImage) -> bytes:
+            r = wz.reader
+            with app.config["WZ_READER_LOCK"]:
+                keep = r.position
+                r.seek(img.offset)
+                data = r.read(img.size)
+                r.seek(keep)
+            return data
+
+        if isinstance(target, WzImage):
+            return Response(
+                _read_img_bytes(target),
+                mimetype="application/octet-stream",
+                headers={"Content-Disposition":
+                    f'attachment; filename="{target.name}"'},
+            )
+
+        if isinstance(target, WzDirectory):
+            buf = io.BytesIO()
+            # ZIP_STORED — the bytes are XOR-encrypted and won't compress
+            # any further; storing skips a CPU-heavy deflate pass.
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+                for rel, img in target.walk_images():
+                    zf.writestr(rel, _read_img_bytes(img))
+            return Response(
+                buf.getvalue(),
+                mimetype="application/zip",
+                headers={"Content-Disposition":
+                    f'attachment; filename="{_safe_filename(subpath, "img.zip")}"'},
+            )
+
+        abort(400, "img export only supports image or directory targets")
+
     @app.route("/api/export/images/", defaults={"subpath": ""})
     @app.route("/api/export/images/<path:subpath>")
     def api_export_images(subpath: str) -> Response:
