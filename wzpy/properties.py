@@ -238,19 +238,45 @@ def _parse_extended_or_basic(
     if tag == 0:
         return WzNullProperty(name, parent)
     if tag in (2, 11):
-        return WzShortProperty(name, reader.read_i16(), parent)
+        # Short: always 2 bytes after the tag — straightforward to patch.
+        v_off = reader.position
+        prop = WzShortProperty(name, reader.read_i16(), parent)
+        prop._value_offset, prop._value_length = v_off, 2
+        return prop
     if tag in (3, 19):
-        return WzIntProperty(name, reader.read_compressed_int(), parent)
+        # Int: compressed format — 1 byte if value fits in i8, else 5 bytes
+        # (0x80 sentinel + 4-byte i32). Save the byte range so a later
+        # write knows whether the new value still fits.
+        v_off = reader.position
+        prop = WzIntProperty(name, reader.read_compressed_int(), parent)
+        prop._value_offset, prop._value_length = v_off, reader.position - v_off
+        return prop
     if tag == 20:
-        return WzLongProperty(name, reader.read_compressed_long(), parent)
+        v_off = reader.position
+        prop = WzLongProperty(name, reader.read_compressed_long(), parent)
+        prop._value_offset, prop._value_length = v_off, reader.position - v_off
+        return prop
     if tag == 4:
+        # Float: 1-byte sub-tag (0x00 = exactly 0.0, 0x80 = 4 floats follow).
+        # ``_value_offset`` always points at the sub-tag itself so writes
+        # cover the full encoded form.
+        v_off = reader.position
         sub = reader.read_byte()
         if sub == 0x80:
-            return WzFloatProperty(name, reader.read_f32(), parent)
-        return WzFloatProperty(name, 0.0, parent)
+            prop = WzFloatProperty(name, reader.read_f32(), parent)
+        else:
+            prop = WzFloatProperty(name, 0.0, parent)
+        prop._value_offset, prop._value_length = v_off, reader.position - v_off
+        return prop
     if tag == 5:
-        return WzDoubleProperty(name, reader.read_f64(), parent)
+        v_off = reader.position
+        prop = WzDoubleProperty(name, reader.read_f64(), parent)
+        prop._value_offset, prop._value_length = v_off, 8
+        return prop
     if tag == 8:
+        # Strings use a string-block (inline or indirected) — not a fixed
+        # byte range, so we don't claim ``_value_offset`` here; in-place
+        # writes for strings are rejected.
         return WzStringProperty(name, reader.read_string_block(base_offset), parent)
     if tag == 9:
         block_size = reader.read_u32()

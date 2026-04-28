@@ -312,7 +312,9 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         region = _auto_detect_region(wz_path, version)
         print(f"  -> using region: {region}")
     app = Flask(__name__, template_folder="templates", static_folder="static")
-    wz = WzFile.open(wz_path, region=region, version=version)
+    # writable=True mmaps the WZ with ACCESS_WRITE so /api/save can patch
+    # scalar values in-place without copying the entire archive.
+    wz = WzFile.open(wz_path, region=region, version=version, writable=True)
     app.config["WZ"] = wz
     app.config["WZ_REGION"] = region
     # Background bundle exports parse images on a worker thread; the WZ reader
@@ -694,6 +696,95 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
                     f'attachment; filename="{_safe_filename(subpath, "images_" + layout + ".zip")}"',
             },
         )
+
+    # ── save (in-place value patching) ───────────────────────────────
+    # In-place strategy: encode the new value, accept the edit only if
+    # the resulting bytes have the same length as the original. Anything
+    # that would shift downstream offsets (compressed-int crossing the
+    # 1↔5 byte boundary, float zero↔non-zero, string length change) is
+    # rejected with a clear reason. A real WZ rewriter is out of scope.
+    _SAVE_LOCK = threading.Lock()
+
+    def _encode_value_for(prop, new_value):
+        """Encode ``new_value`` in the on-wire form for ``prop``'s type.
+        Returns ``(bytes, normalized_value)`` or raises ``ValueError``."""
+        from wzpy.properties import (
+            WzShortProperty, WzIntProperty, WzLongProperty,
+            WzFloatProperty, WzDoubleProperty,
+        )
+        from wzpy import writer as _w
+        if isinstance(prop, WzShortProperty):
+            v = int(new_value)
+            if not (-(1 << 15) <= v < (1 << 15)):
+                raise ValueError(f"Short out of range: {v}")
+            return _w.encode_short(v), v
+        if isinstance(prop, WzIntProperty):
+            v = int(new_value)
+            if not (-(1 << 31) <= v < (1 << 31)):
+                raise ValueError(f"Int out of range: {v}")
+            return _w.encode_compressed_int(v), v
+        if isinstance(prop, WzLongProperty):
+            v = int(new_value)
+            if not (-(1 << 63) <= v < (1 << 63)):
+                raise ValueError(f"Long out of range: {v}")
+            return _w.encode_compressed_long(v), v
+        if isinstance(prop, WzFloatProperty):
+            v = float(new_value)
+            return _w.encode_float(v), v
+        if isinstance(prop, WzDoubleProperty):
+            v = float(new_value)
+            return _w.encode_double(v), v
+        raise ValueError(f"{prop.type_name} is not editable in place")
+
+    @app.route("/api/save", methods=["POST"])
+    def api_save() -> Response:
+        """Apply a batch of value edits in place. Body: ``{edits: {path: value, ...}}``.
+
+        Returns one ``{path, status, ...}`` row per edit, plus a top-level
+        ``ok`` count. Edits whose new encoded length differs from the
+        original are rejected (the WZ would need a full rewrite).
+        """
+        body = request.get_json(silent=True) or {}
+        edits = body.get("edits") or {}
+        if not isinstance(edits, dict):
+            abort(400, "body.edits must be an object {path: value}")
+
+        results = []
+        ok = 0
+        with _SAVE_LOCK, app.config["WZ_READER_LOCK"]:
+            for path, new_value in edits.items():
+                target = _resolve_target(path)
+                if not isinstance(target, WzProperty):
+                    results.append({"path": path, "status": "error",
+                                    "reason": "target is not a property"})
+                    continue
+                v_off = getattr(target, "_value_offset", None)
+                v_len = getattr(target, "_value_length", None)
+                if v_off is None or v_len is None:
+                    results.append({"path": path, "status": "error",
+                                    "reason": f"{target.type_name} values are not "
+                                              f"editable in place"})
+                    continue
+                try:
+                    encoded, normalized = _encode_value_for(target, new_value)
+                except (ValueError, TypeError) as e:
+                    results.append({"path": path, "status": "error",
+                                    "reason": str(e)})
+                    continue
+                if len(encoded) != v_len:
+                    results.append({"path": path, "status": "error",
+                                    "reason": (f"encoded length changed "
+                                               f"({v_len} → {len(encoded)} bytes); "
+                                               f"in-place edit would shift downstream "
+                                               f"offsets")})
+                    continue
+                wz.patch_bytes(v_off, encoded)
+                target._value = normalized
+                results.append({"path": path, "status": "ok",
+                                "value": normalized})
+                ok += 1
+            wz.flush()
+        return jsonify({"ok": ok, "total": len(results), "results": results})
 
     return app
 

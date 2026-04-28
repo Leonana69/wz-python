@@ -94,10 +94,12 @@ class WzFile:
     (it's small) but image properties are parsed lazily on access.
     """
 
-    def __init__(self, path: str, region: str = "GMS", version: Optional[int] = None):
+    def __init__(self, path: str, region: str = "GMS",
+                 version: Optional[int] = None, writable: bool = False):
         self.path = path
         self.region = region
         self.version = version  # may be None until detected
+        self.writable = writable
         self.header: Optional[WzHeader] = None
         self.root = WzDirectory(name="")
         self._fp = None
@@ -105,13 +107,16 @@ class WzFile:
 
     # ── lifecycle ───────────────────────────────────────────────────
     @classmethod
-    def open(cls, path: str, region: str = "GMS", version: Optional[int] = None) -> "WzFile":
-        wz = cls(path, region=region, version=version)
+    def open(cls, path: str, region: str = "GMS",
+             version: Optional[int] = None, writable: bool = False) -> "WzFile":
+        wz = cls(path, region=region, version=version, writable=writable)
         wz._load()
         return wz
 
     def close(self) -> None:
         if getattr(self, "_mmap", None) is not None:
+            if self.writable:
+                self._mmap.flush()
             self._mmap.close()
             self._mmap = None
         if self._fp is not None:
@@ -131,14 +136,43 @@ class WzFile:
         assert self._reader is not None
         return self._reader
 
+    # ── writes (in-place value patches; see ``wzpy.writer``) ────────
+    def patch_bytes(self, offset: int, data: bytes) -> None:
+        """Overwrite ``len(data)`` bytes starting at file ``offset``.
+
+        Requires ``writable=True`` at open time. Writes go through the
+        memory map so subsequent reads through :pyattr:`reader` see the
+        new bytes immediately. The caller is responsible for bounds and
+        for keeping the encoded length unchanged — see
+        :func:`wzpy.writer.encode_compressed_int` and friends, plus the
+        ``_value_offset``/``_value_length`` recorded by the parser.
+        """
+        if not self.writable:
+            raise RuntimeError(
+                "WzFile was opened read-only; pass writable=True to enable patching"
+            )
+        end = offset + len(data)
+        if offset < 0 or end > len(self._mmap):
+            raise ValueError(
+                f"patch range {offset}..{end} out of bounds (file is {len(self._mmap)} bytes)"
+            )
+        self._mmap[offset:end] = data
+
+    def flush(self) -> None:
+        """Flush any in-flight mmap writes to disk."""
+        if getattr(self, "_mmap", None) is not None and self.writable:
+            self._mmap.flush()
+
     # ── parsing ─────────────────────────────────────────────────────
     def _load(self) -> None:
         import mmap
-        self._fp = open(self.path, "rb")
+        self._fp = open(self.path, "r+b" if self.writable else "rb")
         # Memory-map the whole file so seeks are O(1). Critical for tree
         # browsing of multi-GB _Canvas files where each .img parse does
-        # thousands of small seek+read calls.
-        self._mmap = mmap.mmap(self._fp.fileno(), 0, access=mmap.ACCESS_READ)
+        # thousands of small seek+read calls. ACCESS_WRITE makes writes
+        # go straight through to the file (mmap and disk stay coherent).
+        access = mmap.ACCESS_WRITE if self.writable else mmap.ACCESS_READ
+        self._mmap = mmap.mmap(self._fp.fileno(), 0, access=access)
         key = WzKey.for_region(self.region)
         r = WzBinaryReader(self._mmap, key)
         self._reader = r

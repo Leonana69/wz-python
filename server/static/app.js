@@ -36,6 +36,98 @@ function iconFor(kind) {
   return KIND_ICONS[kind] ?? "•";
 }
 
+// Property kinds the server's /api/save can patch in place. Strings,
+// Vectors, Convex, Sound, Canvas, etc. would change byte length and
+// require a full WZ rewrite, which we don't do.
+const EDITABLE_KINDS = new Set(["Short", "Int", "Long", "Float", "Double"]);
+
+// Pending edits keyed by full property path. Cleared after a successful
+// /api/save round-trip so the user sees the saved state, not their old
+// staged input.
+const pendingEdits = new Map();
+
+function makeValueEditor(path, child, currentValue) {
+  const input = document.createElement("input");
+  input.className = "value-input";
+  // Numeric inputs benefit from native validation + spinners; strings
+  // will land here once the writer learns to re-pack them.
+  const numeric = ["Short", "Int", "Long", "Float", "Double"].includes(child.kind);
+  input.type = numeric ? "number" : "text";
+  if (child.kind === "Float" || child.kind === "Double") {
+    input.step = "any";
+  }
+  // Show the staged edit if the user already changed this field once,
+  // otherwise the on-disk value.
+  input.value = pendingEdits.has(path) ? pendingEdits.get(path) : currentValue;
+  input.dataset.original = String(currentValue);
+  input.addEventListener("input", () => {
+    const raw = input.value;
+    if (raw === input.dataset.original) {
+      pendingEdits.delete(path);
+      input.classList.remove("dirty");
+    } else {
+      const parsed = numeric ? Number(raw) : raw;
+      pendingEdits.set(path, parsed);
+      input.classList.add("dirty");
+    }
+    updateSaveButton();
+  });
+  return input;
+}
+
+const saveButton = document.createElement("button");
+saveButton.className = "save-btn";
+saveButton.textContent = "Save";
+saveButton.disabled = true;
+saveButton.addEventListener("click", runSave);
+
+function updateSaveButton() {
+  const n = pendingEdits.size;
+  saveButton.textContent = n ? `Save (${n})` : "Save";
+  saveButton.disabled = n === 0;
+}
+
+async function runSave() {
+  const edits = Object.fromEntries(pendingEdits);
+  saveButton.disabled = true;
+  saveButton.textContent = "Saving…";
+  let resp;
+  try {
+    const r = await fetch("/api/save", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({edits}),
+    });
+    resp = await r.json();
+  } catch (err) {
+    alert(`save failed: ${err.message}`);
+    updateSaveButton();
+    return;
+  }
+  // Drop the OK ones from the pending map so the input chrome refreshes,
+  // and surface any rejections.
+  const failed = [];
+  for (const row of resp.results || []) {
+    if (row.status === "ok") {
+      pendingEdits.delete(row.path);
+    } else {
+      failed.push(`  • ${row.path}: ${row.reason}`);
+    }
+  }
+  // If the currently-displayed node had an edit, redraw it so the input's
+  // "dirty" badge clears and dataset.original reflects the new on-disk value.
+  document.querySelectorAll(".value-input.dirty").forEach((el) => {
+    el.classList.remove("dirty");
+  });
+  updateSaveButton();
+  if (failed.length) {
+    alert(`Saved ${resp.ok}/${resp.total}. Rejected:\n${failed.join("\n")}`);
+  } else {
+    saveButton.textContent = `Saved ${resp.ok}`;
+    setTimeout(updateSaveButton, 1500);
+  }
+}
+
 function joinPath(base, name) {
   return base ? `${base}/${name}` : name;
 }
@@ -363,7 +455,12 @@ function showDetail(path, child) {
     if (v === null || v === undefined) continue;
     const tr = document.createElement("tr");
     const td1 = document.createElement("td"); td1.textContent = k;
-    const td2 = document.createElement("td"); td2.textContent = JSON.stringify(v);
+    const td2 = document.createElement("td");
+    if (k === "value" && EDITABLE_KINDS.has(child.kind)) {
+      td2.appendChild(makeValueEditor(path, child, v));
+    } else {
+      td2.textContent = JSON.stringify(v);
+    }
     tr.appendChild(td1); tr.appendChild(td2);
     tbl.appendChild(tr);
   }
@@ -824,6 +921,11 @@ function createProgressModal(labelText) {
 }
 
 async function init() {
+  // Mount the global Save button into the header slot. It stays disabled
+  // until the user makes at least one editable-value change.
+  const saveSlot = document.getElementById("save-slot");
+  if (saveSlot) saveSlot.appendChild(saveButton);
+
   // Wrap the WZ file's root inside a single synthetic LI showing the file
   // name. Without this wrapper the root <ul id="tree"> is populated
   // directly and bypasses VirtualList — so a 64-bit WZ where the root

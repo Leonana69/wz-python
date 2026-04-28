@@ -25,6 +25,34 @@ header .badge {
   font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
 }
 header .path { font-family: ui-monospace, "Cascadia Mono", Menlo, monospace; color: #aaa; }
+#save-slot { margin-left: auto; }
+.save-btn {
+  background: #3a4d6f;
+  color: #d6d6d6;
+  border: 1px solid #1a1b1d;
+  border-radius: 3px;
+  padding: 4px 14px;
+  font: inherit;
+  cursor: pointer;
+}
+.save-btn:hover:not(:disabled) { background: #4d6592; }
+.save-btn:disabled { opacity: 0.45; cursor: default; }
+.value-input {
+  background: #1a1b1d;
+  color: #d6d6d6;
+  border: 1px solid #3a3d44;
+  border-radius: 3px;
+  padding: 2px 6px;
+  font: inherit;
+  font-family: ui-monospace, Menlo, monospace;
+  width: 240px;
+  max-width: 100%;
+}
+.value-input:focus { outline: none; border-color: #5a7fb0; }
+.value-input.dirty {
+  border-color: #e8b96b;
+  background: #2a261d;
+}
 
 main { display: flex; flex: 1; overflow: hidden; }
 
