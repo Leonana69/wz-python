@@ -156,6 +156,24 @@ async function onTreeClick(ev) {
     }
     return;
   }
+  try {
+    const { tFetch, tDom, count } = await expandLi(li, fullPath);
+    if (count >= 50 || tFetch > 30 || tDom > 30 || tDetail > 30) {
+      console.log(
+        `[click fetch] ${fullPath}: ${count} children  ` +
+        `detail=${tDetail.toFixed(0)}ms fetch=${tFetch.toFixed(0)}ms dom=${tDom.toFixed(0)}ms  ` +
+        `total=${treeRoot.getElementsByClassName("node").length} nodes`,
+      );
+    }
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+// Fetch ``/api/tree/<fullPath>`` and append the result as a child UL of
+// ``li`` — virtualizing if the response is large. Shared by the click
+// handler and the initial root auto-expansion.
+async function expandLi(li, fullPath) {
   li._twisty.textContent = "…";
   try {
     const t0 = performance.now();
@@ -176,20 +194,11 @@ async function onTreeClick(ev) {
     li._childUl = ul;
     li._loaded = true;
     li._twisty.textContent = "▾";
-    // Notify ancestor virtual list (if any) that our height grew.
     notifyAncestorVirtualResize(li);
-    const tDom = performance.now() - t1;
-    // Always log when something noticeable could be happening.
-    if (data.children.length >= 50 || tFetch > 30 || tDom > 30 || tDetail > 30) {
-      console.log(
-        `[click fetch] ${fullPath}: ${data.children.length} children  ` +
-        `detail=${tDetail.toFixed(0)}ms fetch=${tFetch.toFixed(0)}ms dom=${tDom.toFixed(0)}ms  ` +
-        `total=${treeRoot.getElementsByClassName("node").length} nodes`,
-      );
-    }
+    return { tFetch, tDom: performance.now() - t1, count: data.children.length };
   } catch (err) {
     li._twisty.textContent = "▸";
-    console.error(err);
+    throw err;
   }
 }
 
@@ -561,9 +570,19 @@ function notifyAncestorVirtualResize(li) {
 }
 
 async function init() {
+  // Wrap the WZ file's root inside a single synthetic LI showing the file
+  // name. Without this wrapper the root <ul id="tree"> is populated
+  // directly and bypasses VirtualList — so a 64-bit WZ where the root
+  // itself has hundreds of entries would never get virtualized.
+  const wzPath = document.body.dataset.wzName || "WZ file";
+  const baseName = wzPath.split(/[/\\]/).pop() || wzPath;
+  const fileMeta = { name: baseName, kind: "Directory", leaf: false };
+  const fileLi = makeNode(fileMeta, "");
+  // Children of the WZ root live at path "" on the server, not "<filename>/".
+  fileLi._fullPath = "";
+  treeRoot.appendChild(fileLi);
   try {
-    const data = await fetchJson("/api/tree");
-    for (const c of data.children) treeRoot.appendChild(makeNode(c, ""));
+    await expandLi(fileLi, "");
   } catch (err) {
     treeRoot.innerHTML = `<li style="color:#c47878">load error: ${err.message}</li>`;
   }
