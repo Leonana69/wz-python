@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ wz_name }} — wzpy</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header>
+    <h1>wzpy</h1>
+    <div class="meta">
+      <span class="badge">{{ wz_region }}</span>
+      <span class="badge">v{{ wz_version }}</span>
+      <span class="path">{{ wz_name }}</span>
+    </div>
+  </header>
+
+  <main>
+    <aside id="tree-panel">
+      <ul id="tree" class="tree"></ul>
+    </aside>
+    <section id="detail-panel">
+      <div id="breadcrumbs" class="breadcrumbs"></div>
+      <div id="detail">
+        <p class="hint">Click a node on the left to inspect it.</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
