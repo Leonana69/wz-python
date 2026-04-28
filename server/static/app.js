@@ -153,13 +153,7 @@ function showDetail(path, child) {
   detailEl.appendChild(tbl);
 
   if (child.kind === "Canvas" && child.renderable) {
-    const wrap = document.createElement("div");
-    wrap.className = "canvas-preview";
-    const img = document.createElement("img");
-    img.src = `/api/canvas/${encodeURI(path)}.png`;
-    img.alt = child.name;
-    wrap.appendChild(img);
-    detailEl.appendChild(wrap);
+    detailEl.appendChild(makeCanvasViewer(path, child));
   }
   if (child.kind === "Sound") {
     const audio = document.createElement("audio");
@@ -167,6 +161,138 @@ function showDetail(path, child) {
     audio.src = `/api/sound/${encodeURI(path)}`;
     detailEl.appendChild(audio);
   }
+}
+
+// ── zoomable canvas viewer ───────────────────────────────────────────
+// Wheel zooms toward the cursor, drag pans, +/- and 0 keys work while the
+// viewer is focused, and image-rendering: pixelated keeps sprites crisp.
+
+function makeCanvasViewer(path, meta) {
+  const root = document.createElement("div");
+  root.className = "canvas-viewer";
+  root.tabIndex = 0;
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "viewer-toolbar";
+  const btn = (label, title, fn) => {
+    const b = document.createElement("button");
+    b.textContent = label; b.title = title;
+    b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
+    return b;
+  };
+  const zoomLabel = document.createElement("span");
+  zoomLabel.className = "zoom-label";
+  toolbar.appendChild(btn("−", "Zoom out (−)", () => zoomBy(1 / 1.25)));
+  toolbar.appendChild(btn("+", "Zoom in (+)", () => zoomBy(1.25)));
+  toolbar.appendChild(btn("Fit", "Fit to viewport", () => fitToViewport()));
+  toolbar.appendChild(btn("1:1", "Actual size (0)", () => setZoom(1)));
+  toolbar.appendChild(btn("4×", "4× actual size", () => setZoom(4)));
+  toolbar.appendChild(zoomLabel);
+  root.appendChild(toolbar);
+
+  const viewport = document.createElement("div");
+  viewport.className = "viewer-viewport";
+  // The transform layer is positioned at the viewport center; we translate
+  // and scale it to move the image around.
+  const layer = document.createElement("div");
+  layer.className = "viewer-layer";
+  const img = document.createElement("img");
+  img.src = `/api/canvas/${encodeURI(path)}.png`;
+  img.alt = meta.name;
+  img.draggable = false;
+  layer.appendChild(img);
+  viewport.appendChild(layer);
+  root.appendChild(viewport);
+
+  // Viewer state — translation is in viewport pixels relative to its center.
+  let scale = 1;
+  let tx = 0, ty = 0;
+
+  function applyTransform() {
+    layer.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+    zoomLabel.textContent = `${Math.round(scale * 100)}%`;
+  }
+
+  function setZoom(newScale, anchorX, anchorY) {
+    newScale = Math.max(0.05, Math.min(64, newScale));
+    if (anchorX !== undefined) {
+      // Keep the point under the cursor stationary in viewport coordinates.
+      const rect = viewport.getBoundingClientRect();
+      const cx = anchorX - rect.left - rect.width / 2;
+      const cy = anchorY - rect.top - rect.height / 2;
+      const factor = newScale / scale;
+      tx = cx + (tx - cx) * factor;
+      ty = cy + (ty - cy) * factor;
+    }
+    scale = newScale;
+    applyTransform();
+  }
+
+  function zoomBy(factor) {
+    setZoom(scale * factor);
+  }
+
+  function fitToViewport() {
+    const rect = viewport.getBoundingClientRect();
+    const w = meta.width || img.naturalWidth || 1;
+    const h = meta.height || img.naturalHeight || 1;
+    const margin = 24;
+    const fitScale = Math.min(
+      (rect.width - margin) / w,
+      (rect.height - margin) / h,
+    );
+    tx = 0; ty = 0;
+    setZoom(Math.max(0.1, fitScale));
+  }
+
+  // Initial scale: tiny sprites look better starting at 4×; large ones fit.
+  img.addEventListener("load", () => {
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const rect = viewport.getBoundingClientRect();
+    if (w * 4 <= rect.width - 24 && h * 4 <= rect.height - 24) {
+      setZoom(Math.max(1, Math.min(8, Math.floor((rect.width - 24) / w))));
+    } else {
+      fitToViewport();
+    }
+  });
+
+  // Wheel zoom
+  viewport.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const factor = Math.exp(-e.deltaY * 0.0015);
+    setZoom(scale * factor, e.clientX, e.clientY);
+  }, { passive: false });
+
+  // Drag to pan
+  let dragging = false, startX = 0, startY = 0, startTx = 0, startTy = 0;
+  viewport.addEventListener("mousedown", (e) => {
+    dragging = true; startX = e.clientX; startY = e.clientY;
+    startTx = tx; startTy = ty;
+    viewport.classList.add("grabbing");
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    tx = startTx + (e.clientX - startX);
+    ty = startTy + (e.clientY - startY);
+    applyTransform();
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    viewport.classList.remove("grabbing");
+  });
+
+  // Keyboard
+  root.addEventListener("keydown", (e) => {
+    if (e.key === "+" || e.key === "=") { zoomBy(1.25); e.preventDefault(); }
+    else if (e.key === "-" || e.key === "_") { zoomBy(1 / 1.25); e.preventDefault(); }
+    else if (e.key === "0") { setZoom(1); e.preventDefault(); }
+    else if (e.key.toLowerCase() === "f") { fitToViewport(); e.preventDefault(); }
+  });
+
+  applyTransform();
+  return root;
 }
 
 async function init() {

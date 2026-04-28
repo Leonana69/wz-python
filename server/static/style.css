@@ -112,17 +112,74 @@ table.props td { padding: 3px 10px 3px 0; vertical-align: top; }
 table.props td:first-child { color: #888; width: 130px; }
 table.props td:last-child { color: #d6d6d6; word-break: break-all; }
 
-.canvas-preview {
+.canvas-viewer {
   margin: 12px 0;
-  padding: 10px;
   background: #2b2d31;
   border-radius: 4px;
-  display: inline-block;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 1200px;
+  outline: none;
 }
-.canvas-preview img {
-  background: repeating-conic-gradient(#333 0% 25%, #444 0% 50%) 0 / 16px 16px;
+.canvas-viewer:focus-within { box-shadow: 0 0 0 1px #5a7fb0 inset; }
+
+.viewer-toolbar {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  padding: 6px 8px;
+  border-bottom: 1px solid #1a1b1d;
+}
+.viewer-toolbar button {
+  background: #3a3d44;
+  color: #d6d6d6;
+  border: 1px solid #1a1b1d;
+  border-radius: 3px;
+  padding: 3px 9px;
+  font: inherit;
+  cursor: pointer;
+}
+.viewer-toolbar button:hover { background: #494d56; }
+.viewer-toolbar button:active { background: #2f3137; }
+.viewer-toolbar .zoom-label {
+  margin-left: auto;
+  color: #999;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 12px;
+}
+
+.viewer-viewport {
+  position: relative;
+  height: 60vh;
+  min-height: 320px;
+  overflow: hidden;
+  cursor: grab;
+  background:
+    repeating-conic-gradient(#2a2b2e 0% 25%, #34363a 0% 50%) 0 0 / 20px 20px;
+  border-radius: 0 0 4px 4px;
+}
+.viewer-viewport.grabbing { cursor: grabbing; }
+
+.viewer-layer {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform-origin: center center;
+  /* Translate by half the image size so the layer's own center sits on the
+     viewport's center; then the JS-driven translate moves from there. */
+  margin: 0;
+  will-change: transform;
+}
+.viewer-layer img {
+  display: block;
+  /* Crisp pixels at any scale. */
   image-rendering: pixelated;
-  max-width: 80vw;
+  image-rendering: crisp-edges;
+  /* Center the image inside the layer. */
+  transform: translate(-50%, -50%);
+  user-select: none;
+  -webkit-user-drag: none;
 }
 .hint { color: #777; }
 audio { margin-top: 12px; }
