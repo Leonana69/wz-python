@@ -35,6 +35,9 @@ class WzImage:
         self._wz_file = wz_file
         self._parsed = False
         self._root: Optional[WzSubProperty] = None
+        # Set by parse_property_list when it hits EOF mid-property — tells the
+        # caller the parse returned partial results and the file is truncated.
+        self.truncated: bool = False
 
     @property
     def wz_file(self) -> "WzFile":

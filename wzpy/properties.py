@@ -201,12 +201,28 @@ def parse_property_list(
     parent: WzProperty,
     wz_image: "WzImage",
 ) -> List[WzProperty]:
-    """Parse the children of a SubProperty/Canvas container."""
-    count = reader.read_compressed_int()
+    """Parse the children of a SubProperty/Canvas container.
+
+    If the file is truncated mid-property (HaRepacker's "save image"
+    feature has been observed to cut exports off at the original .img's
+    in-WZ offset), we stop cleanly at the first EOFError and mark the
+    image so the caller can surface a warning. The properties already
+    parsed are returned in full."""
+    try:
+        count = reader.read_compressed_int()
+    except EOFError:
+        if wz_image is not None:
+            wz_image.truncated = True
+        return []
     items: List[WzProperty] = []
     for _ in range(count):
-        name = reader.read_string_block(base_offset)
-        prop = _parse_extended_or_basic(reader, base_offset, name, parent, wz_image)
+        try:
+            name = reader.read_string_block(base_offset)
+            prop = _parse_extended_or_basic(reader, base_offset, name, parent, wz_image)
+        except EOFError:
+            if wz_image is not None:
+                wz_image.truncated = True
+            break
         items.append(prop)
     return items
 
@@ -241,7 +257,9 @@ def _parse_extended_or_basic(
         end_pos = reader.position + block_size
         ext_type = reader.read_string_block(base_offset)
         prop = _parse_extended(reader, base_offset, name, ext_type, parent, wz_image, end_pos)
-        # Defensive: skip any trailing payload (Canvas reads up to a known PNG end)
+        # Defensive: skip any trailing payload (Canvas reads up to a known PNG end).
+        # ``seek`` past EOF is silent; the next read elsewhere is what raises,
+        # which our outer try/except in ``parse_property_list`` then catches.
         if reader.position < end_pos:
             reader.seek(end_pos)
         return prop

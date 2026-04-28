@@ -191,6 +191,9 @@ def _dump_image(img: WzImage, out_path: str) -> None:
     body = json.dumps(node_to_dict(img), indent=2, ensure_ascii=False)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(body)
+    if getattr(img, "truncated", False):
+        print(f"  WARNING: {img.name} appears truncated; emitted partial JSON",
+              file=sys.stderr)
 
 
 def _convert_wz(wz_path: str, region: str, version, entry, out: str) -> int:
