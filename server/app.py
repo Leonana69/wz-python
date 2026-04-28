@@ -279,7 +279,56 @@ from wzpy.canvas import decode_canvas
 from wzpy.wz_file import WzDirectory
 
 
-def create_app(wz_path: str, region: str = "GMS", version: Optional[int] = None) -> Flask:
+def _score_root_printability(wz: "WzFile") -> float:
+    """Fraction of bytes in root directory entry names that look like
+    printable ASCII. With the right region key, names like ``"Map"`` /
+    ``"Mob_000"`` decode cleanly and the score is ~1.0; with the wrong
+    region the same bytes XOR through to high-bit gibberish and the
+    score collapses to near zero. Dependable enough as a region oracle."""
+    names = list(wz.root.subdirs.keys()) + list(wz.root.images.keys())
+    if not names:
+        return 0.0
+    total = 0
+    printable = 0
+    for n in names:
+        for c in n:
+            total += 1
+            if 0x20 <= ord(c) < 0x7F:
+                printable += 1
+    return printable / max(1, total)
+
+
+def _auto_detect_region(wz_path: str, version: Optional[int]) -> str:
+    """Try each known region and return the one that decodes the root
+    directory most cleanly. Open + parse-root is cheap for memory-mapped
+    files even on multi-GB WZs, so doing it three times is fine."""
+    best: Optional[Tuple[str, float]] = None
+    for r in ("BMS", "GMS", "EMS"):
+        try:
+            wz = WzFile.open(wz_path, region=r, version=version)
+        except Exception as e:
+            print(f"  {r}: open failed ({e})")
+            continue
+        score = _score_root_printability(wz)
+        wz.close()
+        print(f"  {r}: root printability = {score * 100:.1f}%")
+        if best is None or score > best[1]:
+            best = (r, score)
+    # Below this threshold every candidate looks like noise, so the WZ is
+    # using a key we don't have built in.
+    if best is None or best[1] < 0.5:
+        raise SystemExit(
+            f"could not auto-detect region for {wz_path}. "
+            f"Pass --region GMS/EMS/BMS explicitly."
+        )
+    return best[0]
+
+
+def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None) -> Flask:
+    if region == "auto":
+        print(f"auto-detecting region for {wz_path}:")
+        region = _auto_detect_region(wz_path, version)
+        print(f"  -> using region: {region}")
     app = Flask(__name__, template_folder="templates", static_folder="static")
     wz = WzFile.open(wz_path, region=region, version=version)
     app.config["WZ"] = wz
@@ -631,8 +680,10 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Browse a MapleStory .wz file in your browser")
     parser.add_argument("wz", help="path to the .wz file")
-    parser.add_argument("--region", default="GMS", choices=["GMS", "EMS", "BMS"],
-                        help="MapleStory region (default: GMS)")
+    parser.add_argument("--region", default="auto",
+                        choices=["auto", "GMS", "EMS", "BMS"],
+                        help="MapleStory region (default: auto — pick the "
+                             "one that decodes the root directory cleanly)")
     parser.add_argument("--version", type=int, default=None,
                         help="MapleStory patch version (skip auto-detection)")
     parser.add_argument("--host", default="127.0.0.1")
