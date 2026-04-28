@@ -12,13 +12,17 @@ from __future__ import annotations
 
 import io
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
 
+_NUMBER_RE = re.compile(r"(\d+)")
+
+
 def _natural_key(s: str):
     """Sort key that orders ``"2.img"`` before ``"10.img"`` and ``"0"`` before ``"10"``."""
-    return [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", s)]
+    return [int(p) if p.isdigit() else p.lower() for p in _NUMBER_RE.split(s)]
 
 from flask import Flask, Response, abort, jsonify, render_template, request
 from PIL import Image, ImageDraw
@@ -96,11 +100,14 @@ def create_app(wz_path: str, region: str = "GMS", version: Optional[int] = None)
     def _describe_property(p: WzProperty) -> Dict[str, Any]:
         d: Dict[str, Any] = {"name": p.name, "kind": p.type_name, "leaf": True}
         if isinstance(p, WzSubProperty):
-            d["leaf"] = not p.children()
-            if p.children():
-                d["leaf"] = False
+            # ``has_children`` is O(1); calling ``children()`` would allocate
+            # a fresh list of every child purely to check emptiness.
+            has = p.has_children()
+            d["leaf"] = not has
+            if has:
+                d["count"] = p.child_count()
         if isinstance(p, WzCanvasProperty):
-            d["leaf"] = False  # canvas can have child properties (origin, etc.)
+            d["leaf"] = False
             d["width"] = p.width
             d["height"] = p.height
             d["format"] = p.format + p.format2
@@ -134,29 +141,31 @@ def create_app(wz_path: str, region: str = "GMS", version: Optional[int] = None)
     @app.route("/api/tree/")
     @app.route("/api/tree/<path:subpath>")
     def api_tree(subpath: str = "") -> Response:
+        t0 = time.perf_counter()
         node, remaining = _resolve(unquote(subpath))
-        # If we ran into an image in the middle of the path, descend into it
         if isinstance(node, WzImage) and remaining:
             prop = node.get(remaining)
             if prop is None:
                 abort(404)
-            return jsonify({
-                "path": subpath,
-                "kind": prop.type_name,
-                "children": _children_of(prop),
-            })
-        if isinstance(node, WzImage):
+            children = _children_of(prop)
+            kind = prop.type_name
+        elif isinstance(node, WzImage):
             node.parse()
-            return jsonify({
-                "path": subpath,
-                "kind": "Image",
-                "children": _children_of(node),
-            })
-        return jsonify({
-            "path": subpath,
-            "kind": "Directory" if isinstance(node, WzDirectory) else node.type_name,
-            "children": _children_of(node),
-        })
+            children = _children_of(node)
+            kind = "Image"
+        else:
+            children = _children_of(node)
+            kind = "Directory" if isinstance(node, WzDirectory) else node.type_name
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        # Log in the access stream so the user can see exactly where time goes
+        # without us having to redirect them to a profiler. ``flush`` matters
+        # because Flask's dev server access log goes to stderr; otherwise this
+        # line can buffer behind a chunk of access lines.
+        print(f"  [tree {elapsed_ms:6.1f} ms, {len(children):5d} children] /{subpath}", flush=True)
+        resp = jsonify({"path": subpath, "kind": kind, "children": children})
+        resp.headers["X-Server-Ms"] = f"{elapsed_ms:.1f}"
+        resp.headers["X-Children"] = str(len(children))
+        return resp
 
     @app.route("/api/property/<path:subpath>")
     def api_property(subpath: str) -> Response:

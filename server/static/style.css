@@ -36,6 +36,10 @@ main { display: flex; flex: 1; overflow: hidden; }
   background: #232428;
   border-right: 1px solid #1a1b1d;
   padding: 8px 6px;
+  /* Stops the browser from "anchoring" scroll position when an item above
+     the viewport changes height — every fold/expand otherwise causes a tiny
+     scroll-correction jank pass. */
+  overflow-anchor: none;
 }
 
 #detail-panel {
@@ -48,9 +52,22 @@ ul.tree, ul.tree ul {
   list-style: none;
   margin: 0;
   padding-left: 14px;
+  /* Helps the browser skip layout cost for items the user can't see. */
+  contain: layout style;
 }
 ul.tree { padding-left: 0; }
-ul.tree li { margin: 1px 0; }
+ul.tree li {
+  margin: 1px 0;
+  /* The big perf win: with 1500+ siblings, off-screen items skip layout
+     and paint entirely. Each LI advertises a ~22px intrinsic height so the
+     scrollbar still sizes correctly; "auto" caches the actual height after
+     first measurement so subsequent scrolls don't jump. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 22px;
+  /* Belt and suspenders — prevent paint of one LI from invalidating its
+     siblings' paint regions. */
+  contain: layout paint;
+}
 
 .node {
   display: inline-flex;

@@ -145,6 +145,13 @@ class WzSubProperty(WzProperty):
     def children(self) -> List[WzProperty]:
         return list(self._children.values())
 
+    def has_children(self) -> bool:
+        """O(1) emptiness check; avoids allocating the children list."""
+        return bool(self._children)
+
+    def child_count(self) -> int:
+        return len(self._children)
+
 
 class WzCanvasProperty(WzSubProperty):
     type_name = "Canvas"

@@ -4,10 +4,13 @@ const treeRoot = document.getElementById("tree");
 const detailEl = document.getElementById("detail");
 const crumbsEl = document.getElementById("breadcrumbs");
 
+// SubProperty/Property/Image have an expand twisty in front; using the same
+// "▸" character as the kind icon would render two arrows side-by-side where
+// only one rotates. Leave those kinds icon-less.
 const KIND_ICONS = {
   directory: "📁", Directory: "📁",
-  image: "🖼", Image: "🖼",
-  SubProperty: "▸", Property: "▸",
+  image: "", Image: "",
+  SubProperty: "", Property: "",
   Canvas: "▦",
   Sound: "♪",
   Vector: "⊹",
@@ -72,41 +75,98 @@ function makeNode(child, parentPath) {
     preview.className = "preview";
     preview.textContent = `${child.width}×${child.height} fmt=${child.format}`;
     node.appendChild(preview);
+  } else if (typeof child.count === "number") {
+    const preview = document.createElement("span");
+    preview.className = "preview";
+    preview.textContent = `(${child.count})`;
+    node.appendChild(preview);
   }
 
   li.appendChild(node);
 
-  let childUl = null;
-  let loaded = false;
-
-  node.addEventListener("click", async (ev) => {
-    ev.stopPropagation();
-    document.querySelectorAll(".node.selected").forEach((n) => n.classList.remove("selected"));
-    node.classList.add("selected");
-    showDetail(fullPath, child);
-
-    if (child.leaf) return;
-    if (childUl) {
-      childUl.style.display = childUl.style.display === "none" ? "" : "none";
-      twisty.textContent = childUl.style.display === "none" ? "▸" : "▾";
-      return;
-    }
-    twisty.textContent = "…";
-    try {
-      const data = await fetchJson(`/api/tree/${encodeURI(fullPath)}`);
-      childUl = document.createElement("ul");
-      for (const c of data.children) childUl.appendChild(makeNode(c, fullPath));
-      li.appendChild(childUl);
-      loaded = true;
-      twisty.textContent = "▾";
-    } catch (err) {
-      twisty.textContent = "▸";
-      console.error(err);
-    }
-  });
+  // Stash all per-node state on the LI itself so the single delegated click
+  // handler on ``treeRoot`` can recover it without us creating a closure
+  // (and a retained reference to ``child``) per node.
+  li._meta = child;
+  li._fullPath = fullPath;
+  li._parentPath = parentPath;
+  li._twisty = twisty;
+  li._childUl = null;
+  li._loaded = false;
 
   return li;
 }
+
+// Single delegated click handler for the entire tree. One listener total
+// instead of one-per-node — drastically lower memory + faster click delivery
+// on big trees.
+let currentlySelected = null;
+
+async function onTreeClick(ev) {
+  const nodeEl = ev.target.closest(".node");
+  if (!nodeEl || !treeRoot.contains(nodeEl)) return;
+  const li = nodeEl.parentElement;
+  const child = li._meta;
+  const fullPath = li._fullPath;
+  if (!child) return;
+
+  ev.stopPropagation();
+  const tClickStart = performance.now();
+  if (currentlySelected) currentlySelected.classList.remove("selected");
+  nodeEl.classList.add("selected");
+  currentlySelected = nodeEl;
+  showDetail(fullPath, child);
+  const tDetail = performance.now() - tClickStart;
+
+  if (child.leaf) {
+    if (tDetail > 30) console.log(`[click leaf] ${fullPath}  detail=${tDetail.toFixed(0)}ms`);
+    return;
+  }
+  if (li._childUl) {
+    const tToggleStart = performance.now();
+    const hidden = li._childUl.style.display === "none";
+    li._childUl.style.display = hidden ? "" : "none";
+    li._twisty.textContent = hidden ? "▾" : "▸";
+    const tToggle = performance.now() - tToggleStart;
+    if (tToggle > 30 || tDetail > 30) {
+      console.log(
+        `[click toggle ${hidden ? "expand" : "collapse"}] ${fullPath}  ` +
+        `detail=${tDetail.toFixed(0)}ms toggle=${tToggle.toFixed(0)}ms  ` +
+        `dom=${treeRoot.getElementsByClassName("node").length} nodes`,
+      );
+    }
+    return;
+  }
+  li._twisty.textContent = "…";
+  try {
+    const t0 = performance.now();
+    const data = await fetchJson(`/api/tree/${encodeURI(fullPath)}`);
+    const tFetch = performance.now() - t0;
+    const t1 = performance.now();
+    const ul = document.createElement("ul");
+    const frag = document.createDocumentFragment();
+    for (const c of data.children) frag.appendChild(makeNode(c, fullPath));
+    ul.appendChild(frag);
+    li.appendChild(ul);
+    li._childUl = ul;
+    li._loaded = true;
+    li._twisty.textContent = "▾";
+    const tDom = performance.now() - t1;
+    // Always log when something noticeable could be happening.
+    if (data.children.length >= 50 || tFetch > 30 || tDom > 30 || tDetail > 30) {
+      console.log(
+        `[click fetch] ${fullPath}: ${data.children.length} children  ` +
+        `detail=${tDetail.toFixed(0)}ms fetch=${tFetch.toFixed(0)}ms dom=${tDom.toFixed(0)}ms  ` +
+        `total=${treeRoot.getElementsByClassName("node").length} nodes`,
+      );
+    }
+  } catch (err) {
+    li._twisty.textContent = "▸";
+    console.error(err);
+  }
+}
+
+treeRoot.addEventListener("click", onTreeClick);
 
 function makeCrumbs(path) {
   crumbsEl.innerHTML = "";
@@ -126,7 +186,16 @@ function makeCrumbs(path) {
   }
 }
 
+// Active canvas viewer's AbortController — invoked before we replace
+// detailEl so the previous viewer's window-level mousemove/mouseup
+// listeners are removed instead of accumulating forever.
+let activeViewerAbort = null;
+
 function showDetail(path, child) {
+  if (activeViewerAbort) {
+    activeViewerAbort.abort();
+    activeViewerAbort = null;
+  }
   makeCrumbs(path);
   detailEl.innerHTML = "";
 
@@ -168,6 +237,8 @@ function showDetail(path, child) {
 // viewer is focused, and image-rendering: pixelated keeps sprites crisp.
 
 function makeCanvasViewer(path, meta) {
+  const ac = new AbortController();
+  activeViewerAbort = ac;
   const root = document.createElement("div");
   root.className = "canvas-viewer";
   root.tabIndex = 0;
@@ -256,40 +327,39 @@ function makeCanvasViewer(path, meta) {
     }
   });
 
-  // Wheel zoom
+  // All listeners are scoped to ``ac.signal`` so they're auto-removed when
+  // the viewer is destroyed (replaced by another detail panel).
   viewport.addEventListener("wheel", (e) => {
     e.preventDefault();
     const factor = Math.exp(-e.deltaY * 0.0015);
     setZoom(scale * factor, e.clientX, e.clientY);
-  }, { passive: false });
+  }, { passive: false, signal: ac.signal });
 
-  // Drag to pan
   let dragging = false, startX = 0, startY = 0, startTx = 0, startTy = 0;
   viewport.addEventListener("mousedown", (e) => {
     dragging = true; startX = e.clientX; startY = e.clientY;
     startTx = tx; startTy = ty;
     viewport.classList.add("grabbing");
     e.preventDefault();
-  });
+  }, { signal: ac.signal });
   window.addEventListener("mousemove", (e) => {
     if (!dragging) return;
     tx = startTx + (e.clientX - startX);
     ty = startTy + (e.clientY - startY);
     applyTransform();
-  });
+  }, { signal: ac.signal });
   window.addEventListener("mouseup", () => {
     if (!dragging) return;
     dragging = false;
     viewport.classList.remove("grabbing");
-  });
+  }, { signal: ac.signal });
 
-  // Keyboard
   root.addEventListener("keydown", (e) => {
     if (e.key === "+" || e.key === "=") { zoomBy(1.25); e.preventDefault(); }
     else if (e.key === "-" || e.key === "_") { zoomBy(1 / 1.25); e.preventDefault(); }
     else if (e.key === "0") { setZoom(1); e.preventDefault(); }
     else if (e.key.toLowerCase() === "f") { fitToViewport(); e.preventDefault(); }
-  });
+  }, { signal: ac.signal });
 
   applyTransform();
   return root;
