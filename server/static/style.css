@@ -69,6 +69,31 @@ ul.tree li {
   contain: layout paint;
 }
 
+/* Virtualized lists keep all item LIs in normal flow (so the existing
+   ``ul.tree ul { padding-left: 14px }`` indents them automatically and
+   click handling / nested expansion just work). The two spacer LIs at
+   the top and bottom take up the height of the unrendered items.
+   These selectors deliberately don't require ``ul.tree`` because nested
+   virtual ULs (added at runtime) don't carry that class — only the root
+   ``<ul id="tree" class="tree">`` does. Without these overrides the
+   default ``ul.tree li { content-visibility: auto }`` rule would clamp
+   the spacers to a fake 22px intrinsic height when they're off-screen,
+   silently breaking the virtual scroll positions. */
+ul.virtual-list > .v-spacer {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  pointer-events: none;
+  content-visibility: visible;
+  contain: none;
+  contain-intrinsic-size: auto;
+}
+ul.virtual-list > li:not(.v-spacer) {
+  content-visibility: visible;
+  contain: layout paint;
+  contain-intrinsic-size: auto;
+}
+
 .node {
   display: inline-flex;
   align-items: center;
@@ -190,9 +215,10 @@ table.props td:last-child { color: #d6d6d6; word-break: break-all; }
 }
 .viewer-layer img {
   display: block;
-  /* Crisp pixels at any scale. */
-  image-rendering: pixelated;
+  /* Crisp pixels at any scale. Pixelated last so Chrome (which honors both
+     but treats crisp-edges more loosely) lands on nearest-neighbor. */
   image-rendering: crisp-edges;
+  image-rendering: pixelated;
   /* Center the image inside the layer. */
   transform: translate(-50%, -50%);
   user-select: none;

@@ -3,6 +3,14 @@
 const treeRoot = document.getElementById("tree");
 const detailEl = document.getElementById("detail");
 const crumbsEl = document.getElementById("breadcrumbs");
+const treePanel = document.getElementById("tree-panel");
+
+// Above this child count, switch the rendering of a UL to true virtualization
+// — only the LIs visible in the scroll viewport exist in the DOM. With ~1500
+// siblings (e.g. 0400.img in Item.wz), keeping all of them in the DOM makes
+// every click inside that UL pay an O(siblings) browser cost; virtualizing
+// drops it to O(visible).
+const VIRTUALIZE_THRESHOLD = 200;
 
 // SubProperty/Property/Image have an expand twisty in front; using the same
 // "▸" character as the kind icon would render two arrows side-by-side where
@@ -104,6 +112,16 @@ let currentlySelected = null;
 
 async function onTreeClick(ev) {
   const nodeEl = ev.target.closest(".node");
+  // Debug — tells us why a click might silently no-op. Filter via console
+  // text "[click hit]" to see only these.
+  if (!nodeEl || !treeRoot.contains(nodeEl) || !nodeEl.parentElement._meta) {
+    console.log("[click hit]", {
+      target: ev.target.tagName + "." + ev.target.className,
+      foundNode: !!nodeEl,
+      inTree: nodeEl ? treeRoot.contains(nodeEl) : null,
+      hasMeta: nodeEl ? !!nodeEl.parentElement._meta : null,
+    });
+  }
   if (!nodeEl || !treeRoot.contains(nodeEl)) return;
   const li = nodeEl.parentElement;
   const child = li._meta;
@@ -127,6 +145,7 @@ async function onTreeClick(ev) {
     const hidden = li._childUl.style.display === "none";
     li._childUl.style.display = hidden ? "" : "none";
     li._twisty.textContent = hidden ? "▾" : "▸";
+    notifyAncestorVirtualResize(li);
     const tToggle = performance.now() - tToggleStart;
     if (tToggle > 30 || tDetail > 30) {
       console.log(
@@ -144,13 +163,21 @@ async function onTreeClick(ev) {
     const tFetch = performance.now() - t0;
     const t1 = performance.now();
     const ul = document.createElement("ul");
-    const frag = document.createDocumentFragment();
-    for (const c of data.children) frag.appendChild(makeNode(c, fullPath));
-    ul.appendChild(frag);
+    if (data.children.length >= VIRTUALIZE_THRESHOLD) {
+      const v = new VirtualList(ul, data.children, fullPath);
+      v.mount();
+      ul._virtual = v;
+    } else {
+      const frag = document.createDocumentFragment();
+      for (const c of data.children) frag.appendChild(makeNode(c, fullPath));
+      ul.appendChild(frag);
+    }
     li.appendChild(ul);
     li._childUl = ul;
     li._loaded = true;
     li._twisty.textContent = "▾";
+    // Notify ancestor virtual list (if any) that our height grew.
+    notifyAncestorVirtualResize(li);
     const tDom = performance.now() - t1;
     // Always log when something noticeable could be happening.
     if (data.children.length >= 50 || tFetch > 30 || tDom > 30 || tDetail > 30) {
@@ -212,6 +239,10 @@ function showDetail(path, child) {
   tbl.className = "props";
   for (const [k, v] of Object.entries(child)) {
     if (["name", "kind", "leaf"].includes(k)) continue;
+    // Skip internal state keys we attach client-side. ``_li`` in
+    // particular holds the DOM element back-pointing to ``child._meta``,
+    // which would crash JSON.stringify with a circular-structure error.
+    if (k.startsWith("_")) continue;
     if (v === null || v === undefined) continue;
     const tr = document.createElement("tr");
     const td1 = document.createElement("td"); td1.textContent = k;
@@ -316,10 +347,16 @@ function makeCanvasViewer(path, meta) {
     setZoom(Math.max(0.1, fitScale));
   }
 
-  // Initial scale: tiny sprites look better starting at 4×; large ones fit.
-  img.addEventListener("load", () => {
-    const w = img.naturalWidth, h = img.naturalHeight;
+  // Set initial zoom in rAF (not img.load) so the first paint is already at
+  // the final scale. Otherwise the will-change layer rasterizes a scale-1
+  // texture before the image loads, then GPU-bilinear-scales it on zoom-up —
+  // pixelated on <img> doesn't override the compositor's filter for the
+  // parent layer. Using meta dimensions lets us skip waiting on the network.
+  requestAnimationFrame(() => {
+    const w = meta.width || img.naturalWidth || 1;
+    const h = meta.height || img.naturalHeight || 1;
     const rect = viewport.getBoundingClientRect();
+    if (rect.width === 0) return;
     if (w * 4 <= rect.width - 24 && h * 4 <= rect.height - 24) {
       setZoom(Math.max(1, Math.min(8, Math.floor((rect.width - 24) / w))));
     } else {
@@ -363,6 +400,164 @@ function makeCanvasViewer(path, meta) {
 
   applyTransform();
   return root;
+}
+
+// ── true DOM virtualization (spacer-based) ──────────────────────────
+// Only the LIs in the scroll viewport (plus a small overscan) exist in
+// the DOM. Items live in normal flow between two spacer LIs that take up
+// the height of the unrendered items above and below — so item LIs are
+// regular block elements that inherit the tree's padding-left indent
+// and accept clicks/expansion/nested ULs without any positioning hacks.
+//
+// We keep ``c._li`` references alive after detaching, so an item that
+// was expanded preserves its child UL when it scrolls back into view.
+
+class VirtualList {
+  constructor(ul, children, parentPath) {
+    this.ul = ul;
+    this.children = children;
+    this.parentPath = parentPath;
+    this.defaultHeight = 22;
+    this.overscan = 6;
+    for (const c of children) {
+      c._height = this.defaultHeight;
+      c._li = null;
+      c._cumTop = 0;
+      c._virtualList = this;
+    }
+    this.recompute();
+    this.ul.classList.add("virtual-list");
+
+    this.topSpacer = document.createElement("li");
+    this.topSpacer.className = "v-spacer";
+    this.bottomSpacer = document.createElement("li");
+    this.bottomSpacer.className = "v-spacer";
+    this.ul.appendChild(this.topSpacer);
+    this.ul.appendChild(this.bottomSpacer);
+    this._setSpacerHeights(0, this.totalHeight);
+
+    this.startIdx = 0;
+    this.endIdx = 0;
+    this._scheduled = false;
+    this._update = this._update.bind(this);
+    this.requestUpdate = this.requestUpdate.bind(this);
+  }
+
+  recompute() {
+    let acc = 0;
+    for (const c of this.children) {
+      c._cumTop = acc;
+      acc += c._height;
+    }
+    this.totalHeight = acc;
+  }
+
+  _setSpacerHeights(top, bottom) {
+    this.topSpacer.style.height = `${top}px`;
+    this.bottomSpacer.style.height = `${bottom}px`;
+  }
+
+  // Binary search: first index whose end (cumTop + height) > y.
+  _findIdxByTop(y) {
+    let lo = 0, hi = this.children.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      const c = this.children[mid];
+      if (c._cumTop + c._height <= y) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  mount() {
+    treePanel.addEventListener("scroll", this.requestUpdate, { passive: true });
+    window.addEventListener("resize", this.requestUpdate);
+    this._update();
+  }
+
+  requestUpdate() {
+    if (this._scheduled) return;
+    this._scheduled = true;
+    requestAnimationFrame(() => {
+      this._scheduled = false;
+      this._update();
+    });
+  }
+
+  _update() {
+    const ulRect = this.ul.getBoundingClientRect();
+    const panelRect = treePanel.getBoundingClientRect();
+    const visibleTop = Math.max(0, panelRect.top - ulRect.top);
+    const visibleBot = Math.min(this.totalHeight, panelRect.bottom - ulRect.top);
+
+    let startIdx, endIdx;
+    if (visibleBot <= 0 || visibleTop >= this.totalHeight) {
+      startIdx = endIdx = 0;
+    } else {
+      startIdx = Math.max(0, this._findIdxByTop(visibleTop) - this.overscan);
+      endIdx = Math.min(
+        this.children.length,
+        this._findIdxByTop(visibleBot) + 1 + this.overscan,
+      );
+    }
+    this._renderRange(startIdx, endIdx);
+  }
+
+  _renderRange(startIdx, endIdx) {
+    // Detach any currently-rendered items between the spacers; we'll
+    // re-insert the in-range ones in order. Detaching keeps the JS
+    // reference alive, so an expanded item's child UL survives.
+    let cur = this.topSpacer.nextSibling;
+    while (cur && cur !== this.bottomSpacer) {
+      const next = cur.nextSibling;
+      cur.remove();
+      cur = next;
+    }
+    for (let i = startIdx; i < endIdx; i++) {
+      const c = this.children[i];
+      if (!c._li) c._li = makeNode(c, this.parentPath);
+      this.bottomSpacer.before(c._li);
+    }
+
+    const topH = startIdx > 0 ? this.children[startIdx]._cumTop : 0;
+    const bottomCumStart = endIdx < this.children.length
+      ? this.children[endIdx]._cumTop
+      : this.totalHeight;
+    this._setSpacerHeights(topH, this.totalHeight - bottomCumStart);
+
+    this.startIdx = startIdx;
+    this.endIdx = endIdx;
+  }
+
+  // Called when a child LI's height changes (it expanded or collapsed).
+  childResized(child) {
+    const idx = this.children.indexOf(child);
+    if (idx < 0 || !child._li) return;
+    const newH = child._li.offsetHeight || this.defaultHeight;
+    if (Math.abs(newH - child._height) < 1) return;
+    child._height = newH;
+    let acc = child._cumTop + newH;
+    for (let i = idx + 1; i < this.children.length; i++) {
+      this.children[i]._cumTop = acc;
+      acc += this.children[i]._height;
+    }
+    this.totalHeight = acc;
+    // Update the bottom spacer to reflect the new total.
+    const bottomCumStart = this.endIdx < this.children.length
+      ? this.children[this.endIdx]._cumTop
+      : this.totalHeight;
+    this.bottomSpacer.style.height = `${this.totalHeight - bottomCumStart}px`;
+    this.requestUpdate();
+  }
+}
+
+// Walk up from ``li`` to the nearest VirtualList-owned UL and inform it
+// that one of its items changed height. Done via rAF so the new layout
+// has actually been applied before we measure ``offsetHeight``.
+function notifyAncestorVirtualResize(li) {
+  const meta = li._meta;
+  if (!meta || !meta._virtualList) return;
+  requestAnimationFrame(() => meta._virtualList.childResized(meta));
 }
 
 async function init() {

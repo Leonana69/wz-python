@@ -1,4 +1,4 @@
-"""wzpy — Python reader for MapleStory WZ archives.
+"""wzpy - Python reader for MapleStory WZ archives.
 
 Based on the format documentation in
 ``Harepacker-resurrected/docs/wz-format``.
