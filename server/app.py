@@ -163,29 +163,11 @@ def _walk_canvases(node, current_path: str = "") -> Iterator[Tuple[str, Any]]:
             yield from _walk_canvases(c, f"{current_path}/{c.name}" if current_path else c.name)
 
 
-def _walk_images(node, current_path: str = "") -> Iterator[Tuple[str, Any]]:
-    """Yield ``(relative_path, WzImage)`` for every .img reachable from ``node``.
-
-    ``relative_path`` includes the image filename (e.g. ``"Map/400000000.img"``)
-    so callers can use it directly as a zip entry name.
-    """
-    from wzpy.wz_file import WzDirectory
-    from wzpy.wz_image import WzImage
-    if isinstance(node, WzImage):
-        yield current_path or node.name, node
-        return
-    if isinstance(node, WzDirectory):
-        for name, sub in node.subdirs.items():
-            yield from _walk_images(sub, f"{current_path}/{name}" if current_path else name)
-        for name, img in node.images.items():
-            yield from _walk_images(img, f"{current_path}/{name}" if current_path else name)
-
-
 def _run_json_bundle_job(job_id: str, target, label: str, reader_lock: threading.Lock):
     """Background worker: serialize each .img under ``target`` into its own
     JSON file inside a temp ZIP, updating the job entry as it progresses."""
     from wzpy.wz_image import WzImage
-    images: List[Tuple[str, Any]] = list(_walk_images(target, label))
+    images: List[Tuple[str, Any]] = list(target.walk_images(label))
     total = len(images)
     with _JOBS_LOCK:
         _JOBS[job_id]["total"] = total

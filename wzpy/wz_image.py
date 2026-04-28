@@ -7,6 +7,7 @@ access since some WZ files contain thousands of images.
 
 from __future__ import annotations
 
+import io
 from typing import TYPE_CHECKING, List, Optional
 
 from .properties import (
@@ -16,7 +17,22 @@ from .properties import (
 )
 
 if TYPE_CHECKING:
+    from .crypto import WzKey
     from .wz_file import WzDirectory, WzFile
+
+
+class _StandaloneWzFile:
+    """Minimal stand-in for :class:`WzFile` used by :meth:`WzImage.from_bytes`.
+
+    The .img parser only ever reaches for ``self._wz_file.reader`` while
+    parsing, so a tiny shim suffices and we avoid pretending to be a full
+    parsed WZ container.
+    """
+
+    __slots__ = ("reader",)
+
+    def __init__(self, reader):
+        self.reader = reader
 
 
 class WzImage:
@@ -38,6 +54,23 @@ class WzImage:
         # Set by parse_property_list when it hits EOF mid-property — tells the
         # caller the parse returned partial results and the file is truncated.
         self.truncated: bool = False
+
+    @classmethod
+    def from_bytes(cls, data: bytes, *, key: "WzKey",
+                   name: str = "image.img") -> "WzImage":
+        """Create a standalone :class:`WzImage` from raw bytes.
+
+        Useful for ``.img`` files extracted from a WZ container by tools
+        like HaRepacker. Inside an ``.img`` the property-list offsets are
+        local to the image's start (``base_offset = 0``) and the WZ-level
+        ``version_hash``/``header_fstart`` are unused, so only the cipher
+        ``key`` matters. Pick one with :meth:`WzKey.for_region`,
+        :class:`StaticWzKey`, or :func:`detect_region_from_img`.
+        """
+        from .reader import WzBinaryReader
+        reader = WzBinaryReader(io.BytesIO(data), key)
+        return cls(name=name, parent=None, offset=0, size=len(data),
+                   wz_file=_StandaloneWzFile(reader))
 
     @property
     def wz_file(self) -> "WzFile":

@@ -108,6 +108,68 @@ class WzKey:
         return bytes(self._data[:length])
 
 
+class StaticWzKey(WzKey):
+    """A ``WzKey`` whose keystream bytes are supplied verbatim and never
+    extended via AES.
+
+    Useful when the file uses a non-standard cipher and the caller has
+    recovered (some prefix of) the raw keystream from known plaintext —
+    for example via :func:`derive_keystream_from_property`. ``ensure(N)``
+    zero-extends past the supplied length: short strings decode
+    correctly, longer ones get garbage bytes past the boundary which
+    the caller can spot in the output.
+    """
+
+    __slots__ = ()
+
+    def __init__(self, data: bytes):
+        super().__init__(b"\x00\x00\x00\x00")
+        self._data = bytearray(data)
+
+    def ensure(self, size: int) -> None:
+        if size > len(self._data):
+            self._data = self._data + bytearray(size - len(self._data))
+
+
+def derive_keystream_from_property(data: bytes) -> bytes:
+    """Recover the first 8 keystream bytes from an .img header.
+
+    Every standard WZ image starts with ``0x73`` (Property tag) followed by
+    a sign byte ``0xF8`` (= -8, ASCII length) and 8 cipher-encoded bytes
+    that decrypt to ``"Property"``. With known plaintext we can solve for
+    keystream[i] = raw[i] XOR (0xAA + i) XOR "Property"[i].
+
+    Raises :class:`ValueError` if the buffer doesn't look like a Property
+    image header.
+    """
+    if len(data) < 10 or data[0] != 0x73 or data[1] != 0xF8:
+        raise ValueError(
+            "not a Property .img header (expected byte 0=0x73, byte 1=0xF8)"
+        )
+    return bytes(data[2 + i] ^ (0xAA + i) ^ b"Property"[i] for i in range(8))
+
+
+def detect_region_from_img(data: bytes):
+    """Return the region name whose key decodes the .img's type_name to
+    ``"Property"``, or ``None`` if no built-in region matches.
+
+    Used by callers that have raw .img bytes and want to pick a cipher
+    automatically. Cheap: only reads the first ~10 bytes per candidate.
+    """
+    import io
+    from .reader import WzBinaryReader
+    for region in WZ_IV.keys():
+        reader = WzBinaryReader(io.BytesIO(data), WzKey.for_region(region))
+        try:
+            tag = reader.read_byte()
+            type_name = reader.read_string()
+        except Exception:
+            continue
+        if tag == 0x73 and type_name == "Property":
+            return region
+    return None
+
+
 def compute_version_hash(version: int) -> int:
     """Compute the version hash from a MapleStory patch number."""
     h = 0

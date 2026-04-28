@@ -4,6 +4,12 @@ Based on the format documentation in
 ``Harepacker-resurrected/docs/wz-format``.
 """
 
+from .crypto import (
+    StaticWzKey,
+    WzKey,
+    derive_keystream_from_property,
+    detect_region_from_img,
+)
 from .wz_file import WzFile
 from .wz_image import WzImage
 from .properties import (
@@ -24,8 +30,10 @@ from .properties import (
 )
 
 __all__ = [
+    "StaticWzKey",
     "WzFile",
     "WzImage",
+    "WzKey",
     "WzProperty",
     "WzNullProperty",
     "WzShortProperty",
@@ -40,4 +48,6 @@ __all__ = [
     "WzSoundProperty",
     "WzUolProperty",
     "WzConvexProperty",
+    "derive_keystream_from_property",
+    "detect_region_from_img",
 ]

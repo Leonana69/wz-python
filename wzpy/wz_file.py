@@ -9,7 +9,7 @@ the same once unwrapped.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from .crypto import WzKey, WZ_IV, compute_version_hash, derive_version_check
 from .reader import WzBinaryReader
@@ -74,6 +74,16 @@ class WzDirectory(WzNode):
             if node is None:
                 return None
         return node
+
+    def walk_images(self, prefix: str = "") -> Iterator[Tuple[str, WzImage]]:
+        """Yield ``(relative_path, image)`` for every ``.img`` in this
+        directory and its subdirectories. Subdirs are walked first in
+        insertion order (matching the order they appear in the WZ
+        directory listing), then images at the current level."""
+        for name, sub in self.subdirs.items():
+            yield from sub.walk_images(f"{prefix}/{name}" if prefix else name)
+        for name, img in self.images.items():
+            yield (f"{prefix}/{name}" if prefix else name), img
 
 
 # ── parser ─────────────────────────────────────────────────────────────
