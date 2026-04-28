@@ -269,3 +269,147 @@ def decode_canvas(canvas: "WzCanvasProperty", region: str = "GMS") -> Image.Imag
     key = WzKey.for_region(region)
     raw = _decompress(canvas, key)
     return _decode_pixels(raw, canvas.width, canvas.height, fmt)
+
+
+# ── pixel encoders (inverse of _decode_pixels) ─────────────────────────
+# Used by the canvas-replacement save path. We support the same formats
+# that the decoder supports for ARGB/RGB565 family. DXT is intentionally
+# refused because re-encoding requires a full block compressor, which is
+# out of scope for v1.
+
+_DXT_FORMATS = (1026, 2050)
+
+
+def _encode_pixels(image: Image.Image, fmt: int, width: int, height: int) -> bytes:
+    """Pack ``image`` into the raw pixel-bytes representation that
+    :func:`_decode_pixels` would produce in reverse. Returns the bytes
+    that go into the zlib stream.
+    """
+    if fmt in _DXT_FORMATS:
+        raise ValueError(
+            f"writing canvas format {fmt} (DXT) is not supported; pick a "
+            f"different sprite or convert the format externally"
+        )
+    if image.size != (width, height):
+        # Caller may want to preserve resolution; resize bilinearly.
+        image = image.resize((width, height), Image.LANCZOS)
+    if image.mode != "RGBA":
+        image = image.convert("RGBA")
+
+    if fmt == 1:
+        # ARGB4444: 2 bytes per pixel. High nibble of each byte encodes
+        # the high 4 bits of the channel; low nibble the low 4. The
+        # decoder expands a 4-bit channel ``c`` to ``(c << 4) | c``, so
+        # we encode the ROUNDED top 4 bits ``(c + 8) >> 4`` clamped.
+        rgba = image.tobytes("raw", "RGBA")
+        out = bytearray(width * height * 2)
+        for i in range(width * height):
+            r = rgba[i * 4 + 0] >> 4
+            g = rgba[i * 4 + 1] >> 4
+            b = rgba[i * 4 + 2] >> 4
+            a = rgba[i * 4 + 3] >> 4
+            # Decoder: lo = b | (b << 4) for low nibble, hi nibble holds g
+            #          hi = r | (r << 4) for low nibble, hi nibble holds a
+            out[i * 2 + 0] = b | (g << 4)
+            out[i * 2 + 1] = r | (a << 4)
+        return bytes(out)
+
+    if fmt == 2:
+        # ARGB8888 stored as BGRA on disk. PIL's "raw" output with band
+        # order "BGRA" gives us exactly that.
+        return image.tobytes("raw", "BGRA")
+
+    if fmt == 3:
+        # Down-sampled BGRA8888: 4×4 source blocks collapse to one BGRA
+        # pixel each. The decoder unpacks via NEAREST upscale.
+        small_w = (width + 3) // 4
+        small_h = (height + 3) // 4
+        small = image.resize((small_w, small_h), Image.LANCZOS)
+        return small.tobytes("raw", "BGRA")
+
+    if fmt == 257:
+        # ARGB1555: 2 bytes per pixel. 1 alpha bit + 5 each for RGB.
+        rgba = image.tobytes("raw", "RGBA")
+        out = bytearray(width * height * 2)
+        for i in range(width * height):
+            r = rgba[i * 4 + 0] >> 3
+            g = rgba[i * 4 + 1] >> 3
+            b = rgba[i * 4 + 2] >> 3
+            a_bit = 0x8000 if rgba[i * 4 + 3] >= 128 else 0x0000
+            v = a_bit | (r << 10) | (g << 5) | b
+            out[i * 2 + 0] = v & 0xFF
+            out[i * 2 + 1] = (v >> 8) & 0xFF
+        return bytes(out)
+
+    if fmt == 513:
+        # RGB565: 5/6/5 bits — alpha discarded.
+        rgb = image.convert("RGB").tobytes("raw", "RGB")
+        out = bytearray(width * height * 2)
+        for i in range(width * height):
+            r = rgb[i * 3 + 0] >> 3
+            g = rgb[i * 3 + 1] >> 2
+            b = rgb[i * 3 + 2] >> 3
+            v = (r << 11) | (g << 5) | b
+            out[i * 2 + 0] = v & 0xFF
+            out[i * 2 + 1] = (v >> 8) & 0xFF
+        return bytes(out)
+
+    if fmt == 517:
+        # Down-sampled RGB565: 16×16 source blocks → one RGB565 pixel.
+        small_w = (width + 15) // 16
+        small_h = (height + 15) // 16
+        small = image.resize((small_w, small_h), Image.LANCZOS).convert("RGB")
+        rgb = small.tobytes("raw", "RGB")
+        out = bytearray(small_w * small_h * 2)
+        for i in range(small_w * small_h):
+            r = rgb[i * 3 + 0] >> 3
+            g = rgb[i * 3 + 1] >> 2
+            b = rgb[i * 3 + 2] >> 3
+            v = (r << 11) | (g << 5) | b
+            out[i * 2 + 0] = v & 0xFF
+            out[i * 2 + 1] = (v >> 8) & 0xFF
+        return bytes(out)
+
+    raise ValueError(f"unsupported canvas format {fmt} for write")
+
+
+def _encode_listwz(payload: bytes, key: WzKey, chunk_size: int = 4096) -> bytes:
+    """Wrap ``payload`` (already-zlib bytes) as a listWz blob: chunks of
+    ``chunk_size`` bytes XORed against the WZ keystream, each preceded by
+    a u32 little-endian length. Mirrors :func:`_try_listwz`.
+    """
+    out = bytearray()
+    for start in range(0, len(payload), chunk_size):
+        chunk = payload[start:start + chunk_size]
+        n = len(chunk)
+        key.ensure(n)
+        xored = (
+            int.from_bytes(chunk, "big")
+            ^ int.from_bytes(key.slice(n), "big")
+        )
+        out += n.to_bytes(4, "little")
+        out += xored.to_bytes(n, "big")
+    return bytes(out)
+
+
+def encode_canvas_payload(
+    image: Image.Image,
+    fmt: int,
+    width: int,
+    height: int,
+    *,
+    key: WzKey,
+    listwz: bool = False,
+    zlib_level: int = 6,
+) -> bytes:
+    """Full encode pipeline: pixels → zlib → optional listWz.
+
+    Returns the bytes that should land at ``WzCanvasProperty._png_offset``
+    (the caller is responsible for length-budget validation against
+    ``_png_length`` and zero-padding any unused tail).
+    """
+    raw = _encode_pixels(image, fmt, width, height)
+    compressed = zlib.compress(raw, zlib_level)
+    if listwz:
+        return _encode_listwz(compressed, key)
+    return compressed

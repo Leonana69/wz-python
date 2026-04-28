@@ -39,7 +39,19 @@ function iconFor(kind) {
 // Property kinds the server's /api/save can patch in place. Strings,
 // Vectors, Convex, Sound, Canvas, etc. would change byte length and
 // require a full WZ rewrite, which we don't do.
-const EDITABLE_KINDS = new Set(["Short", "Int", "Long", "Float", "Double"]);
+const EDITABLE_KINDS = new Set(["Short", "Int", "Long", "Float", "Double", "String"]);
+
+// Encoded byte count for a string in its WZ encoding. ASCII = CP1252,
+// 1 byte per char (fall back to UTF-8 length if there's a non-CP1252
+// code point, which the server will then reject anyway). Unicode =
+// UTF-16-LE, 2 bytes per BMP char.
+function encodedStringLength(s, encoding) {
+  if (encoding === "unicode") return s.length * 2;
+  // Use TextEncoder UTF-8 length as a conservative ASCII-byte count;
+  // any char that needs >1 UTF-8 byte certainly won't fit in cp1252
+  // and the server will reject the edit anyway.
+  return new TextEncoder().encode(s).length;
+}
 
 // Pending edits keyed by full property path. Cleared after a successful
 // /api/save round-trip so the user sees the saved state, not their old
@@ -47,19 +59,46 @@ const EDITABLE_KINDS = new Set(["Short", "Int", "Long", "Float", "Double"]);
 const pendingEdits = new Map();
 
 function makeValueEditor(path, child, currentValue) {
+  const wrap = document.createElement("span");
+  wrap.className = "value-editor";
   const input = document.createElement("input");
   input.className = "value-input";
-  // Numeric inputs benefit from native validation + spinners; strings
-  // will land here once the writer learns to re-pack them.
   const numeric = ["Short", "Int", "Long", "Float", "Double"].includes(child.kind);
+  const isString = child.kind === "String";
   input.type = numeric ? "number" : "text";
   if (child.kind === "Float" || child.kind === "Double") {
     input.step = "any";
   }
-  // Show the staged edit if the user already changed this field once,
-  // otherwise the on-disk value.
   input.value = pendingEdits.has(path) ? pendingEdits.get(path) : currentValue;
   input.dataset.original = String(currentValue);
+
+  // String-only: a live "N / max bytes" pill so the user knows when their
+  // text fits. The server still validates authoritatively — this is a
+  // hint, not a hard cap.
+  let budget = null;
+  if (isString && typeof child.payload_length === "number") {
+    budget = document.createElement("span");
+    budget.className = "budget";
+    const refreshBudget = () => {
+      const n = encodedStringLength(input.value, child.encoding || "ascii");
+      const max = child.payload_length;
+      budget.textContent = `${n} / ${max} bytes`;
+      budget.classList.toggle("over", n !== max);
+    };
+    refreshBudget();
+    input.addEventListener("input", refreshBudget);
+    if (child.indirected) {
+      // Soft-warn the user that this string is reached via offset
+      // indirection — editing it changes every other property pointing
+      // at the same payload offset.
+      const warn = document.createElement("span");
+      warn.className = "budget warn";
+      warn.title = "this string is reached via offset indirection — editing it may affect other properties that share the same string-table entry";
+      warn.textContent = "shared?";
+      wrap.appendChild(warn);
+    }
+  }
+
   input.addEventListener("input", () => {
     const raw = input.value;
     if (raw === input.dataset.original) {
@@ -72,7 +111,10 @@ function makeValueEditor(path, child, currentValue) {
     }
     updateSaveButton();
   });
-  return input;
+
+  wrap.appendChild(input);
+  if (budget) wrap.appendChild(budget);
+  return wrap;
 }
 
 const saveButton = document.createElement("button");
@@ -503,6 +545,49 @@ function makeCanvasViewer(path, meta) {
   toolbar.appendChild(btn("Fit", "Fit to viewport", () => fitToViewport()));
   toolbar.appendChild(btn("1:1", "Actual size (0)", () => setZoom(1)));
   toolbar.appendChild(btn("4×", "4× actual size", () => setZoom(4)));
+
+  // Hidden file picker; clicking the Replace button proxies to it. Keeps
+  // the toolbar layout uncluttered.
+  const filePicker = document.createElement("input");
+  filePicker.type = "file";
+  filePicker.accept = "image/*";
+  filePicker.style.display = "none";
+  toolbar.appendChild(filePicker);
+  const replaceBtn = btn("Replace…",
+    "Replace this canvas with an uploaded image (must fit the original byte slot)",
+    () => filePicker.click());
+  replaceBtn.classList.add("replace-btn");
+  toolbar.appendChild(replaceBtn);
+  filePicker.addEventListener("change", async () => {
+    const file = filePicker.files && filePicker.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append("image", file);
+    const orig = replaceBtn.textContent;
+    replaceBtn.textContent = "Replacing…";
+    replaceBtn.disabled = true;
+    try {
+      const r = await fetch(`/api/canvas/${encodeURI(path)}`,
+        { method: "POST", body: fd });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || body.ok === false) {
+        const reason = body.message || body.reason || r.statusText;
+        alert(`Replace failed: ${reason}`);
+      } else {
+        // Cache-bust so the viewer re-fetches the new PNG bytes.
+        img.src = `/api/canvas/${encodeURI(path)}.png?t=${Date.now()}`;
+        replaceBtn.textContent = `OK ${body.slot_used}/${body.slot_total}`;
+        setTimeout(() => { replaceBtn.textContent = orig; }, 1800);
+      }
+    } catch (err) {
+      alert(`Replace failed: ${err.message}`);
+    } finally {
+      replaceBtn.disabled = false;
+      if (replaceBtn.textContent === "Replacing…") replaceBtn.textContent = orig;
+      filePicker.value = "";
+    }
+  });
+
   toolbar.appendChild(zoomLabel);
   root.appendChild(toolbar);
 

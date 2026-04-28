@@ -53,6 +53,25 @@ header .path { font-family: ui-monospace, "Cascadia Mono", Menlo, monospace; col
   border-color: #e8b96b;
   background: #2a261d;
 }
+.value-editor { display: inline-flex; align-items: center; gap: 8px; }
+.budget {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  color: #6fa86f;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: #243024;
+}
+.budget.over { color: #e08585; background: #3a2424; }
+.budget.warn { color: #e8b96b; background: #2a261d; }
+
+.viewer-toolbar .replace-btn {
+  margin-left: 4px;
+  background: #2c4a32;
+  border-color: #1a2a1d;
+}
+.viewer-toolbar .replace-btn:hover { background: #3a5e42; }
+.viewer-toolbar .replace-btn:disabled { opacity: 0.5; cursor: default; }
 
 main { display: flex; flex: 1; overflow: hidden; }
 

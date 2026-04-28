@@ -387,6 +387,9 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             d["height"] = p.height
             d["format"] = p.format + p.format2
             d["renderable"] = p.has_pixels()
+            # Surfaced so the canvas viewer can show the slot budget for
+            # the "Replace…" button.
+            d["slot_total"] = p._png_length
         elif isinstance(p, WzSoundProperty):
             d["length_ms"] = p.length_ms
             d["bytes"] = p.value
@@ -400,6 +403,14 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
                 d["value"] = p.value
             except Exception:
                 d["value"] = None
+            # For strings, include the editor budget metadata so the
+            # client can show a live N / max indicator without a probe
+            # request per keystroke.
+            from wzpy.properties import WzStringProperty
+            if isinstance(p, WzStringProperty) and p._payload_length is not None:
+                d["encoding"] = p._encoding
+                d["payload_length"] = p._payload_length
+                d["indirected"] = p._indirected
         return d
 
     # ── routes ───────────────────────────────────────────────────────
@@ -710,7 +721,7 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         Returns ``(bytes, normalized_value)`` or raises ``ValueError``."""
         from wzpy.properties import (
             WzShortProperty, WzIntProperty, WzLongProperty,
-            WzFloatProperty, WzDoubleProperty,
+            WzFloatProperty, WzDoubleProperty, WzStringProperty,
         )
         from wzpy import writer as _w
         if isinstance(prop, WzShortProperty):
@@ -734,7 +745,25 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         if isinstance(prop, WzDoubleProperty):
             v = float(new_value)
             return _w.encode_double(v), v
+        if isinstance(prop, WzStringProperty):
+            s = str(new_value)
+            enc = prop._encoding or "ascii"
+            cipher = _w.re_encrypt_string(wz.reader, s, enc)
+            return cipher, s
         raise ValueError(f"{prop.type_name} is not editable in place")
+
+    def _patch_slot_for(prop):
+        """Return ``(offset, length, kind)`` describing where this property
+        accepts an in-place patch. ``kind`` is "scalar" or "string"
+        depending on which pair the slot came from."""
+        from wzpy.properties import WzStringProperty
+        if isinstance(prop, WzStringProperty):
+            return prop._payload_offset, prop._payload_length, "string"
+        return (
+            getattr(prop, "_value_offset", None),
+            getattr(prop, "_value_length", None),
+            "scalar",
+        )
 
     @app.route("/api/save", methods=["POST"])
     def api_save() -> Response:
@@ -758,8 +787,7 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
                     results.append({"path": path, "status": "error",
                                     "reason": "target is not a property"})
                     continue
-                v_off = getattr(target, "_value_offset", None)
-                v_len = getattr(target, "_value_length", None)
+                v_off, v_len, kind = _patch_slot_for(target)
                 if v_off is None or v_len is None:
                     results.append({"path": path, "status": "error",
                                     "reason": f"{target.type_name} values are not "
@@ -772,19 +800,122 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
                                     "reason": str(e)})
                     continue
                 if len(encoded) != v_len:
+                    if kind == "string":
+                        reason = (f"string would change size from {v_len} to "
+                                  f"{len(encoded)} bytes; in-place edit needs "
+                                  f"the same encoded length")
+                    else:
+                        reason = (f"encoded length changed ({v_len} → "
+                                  f"{len(encoded)} bytes); in-place edit would "
+                                  f"shift downstream offsets")
                     results.append({"path": path, "status": "error",
-                                    "reason": (f"encoded length changed "
-                                               f"({v_len} → {len(encoded)} bytes); "
-                                               f"in-place edit would shift downstream "
-                                               f"offsets")})
+                                    "reason": reason})
                     continue
                 wz.patch_bytes(v_off, encoded)
                 target._value = normalized
-                results.append({"path": path, "status": "ok",
-                                "value": normalized})
+                row: Dict[str, Any] = {"path": path, "status": "ok",
+                                       "value": normalized}
+                if kind == "string":
+                    # Warn the caller if other properties also reach this
+                    # exact payload via offset indirection — they will all
+                    # see the new value.
+                    shared = wz.reader.shared_count(v_off)
+                    # ``shared`` counts indirection sites only. The direct
+                    # owner (this property, if inline) doesn't count. So
+                    # ``shared >= 1`` always means at least one OTHER
+                    # property pointed at the same string.
+                    if shared > 0:
+                        row["shared_with_count"] = shared
                 ok += 1
+                results.append(row)
             wz.flush()
         return jsonify({"ok": ok, "total": len(results), "results": results})
+
+    @app.route("/api/canvas/<path:subpath>", methods=["POST"])
+    def api_canvas_replace(subpath: str) -> Response:
+        """Replace a Canvas property's PNG payload with the uploaded image.
+
+        Form field ``image`` should be any PIL-readable file (PNG, JPG,
+        BMP, ...). The server re-encodes it into the canvas's stored
+        pixel format, zlib-compresses, optionally re-wraps in listWz to
+        match the original payload's framing, and patches the file in
+        place. The new compressed payload must fit inside the existing
+        on-disk slot — the slot is determined by the extended-property
+        block boundary and cannot grow without rewriting the archive.
+        Any unused trailing bytes are zero-padded; zlib stops on its own
+        EOF marker so trailing junk is harmless on read.
+        """
+        from wzpy.properties import WzCanvasProperty
+        from wzpy.canvas import (
+            encode_canvas_payload, _read_canvas_bytes, _ZLIB_HEADERS,
+        )
+        from wzpy.crypto import WzKey
+
+        if "image" not in request.files:
+            abort(400, "missing 'image' form field")
+        upload = request.files["image"]
+
+        node, remaining = _resolve(unquote(subpath))
+        if not isinstance(node, WzImage) or not remaining:
+            abort(404, "path is not a Canvas inside an image")
+        prop = node.get(remaining)
+        if not isinstance(prop, WzCanvasProperty) or not prop.has_pixels():
+            abort(404, "target is not a Canvas with pixels")
+
+        try:
+            uploaded_image = Image.open(upload.stream)
+            uploaded_image.load()
+        except Exception as exc:
+            abort(400, f"cannot decode uploaded image: {exc}")
+
+        # Detect the original encoding form so we can write back in the
+        # same shape (avoids breaking listWz-readers that don't try the
+        # other path).
+        with app.config["WZ_READER_LOCK"]:
+            raw = _read_canvas_bytes(prop)
+        original_is_listwz = (
+            len(raw) >= 2
+            and (raw[0] | (raw[1] << 8)) not in _ZLIB_HEADERS
+        )
+
+        region = app.config["WZ_REGION"]
+        key = WzKey.for_region(region)
+        fmt = prop.format + prop.format2
+        try:
+            new_payload = encode_canvas_payload(
+                uploaded_image, fmt, prop.width, prop.height,
+                key=key, listwz=original_is_listwz,
+            )
+        except ValueError as exc:
+            abort(400, str(exc))
+
+        slot_total = prop._png_length
+        if len(new_payload) > slot_total:
+            abort(400,
+                  f"compressed payload {len(new_payload)} > slot {slot_total} "
+                  f"bytes; pick a simpler image, lower zlib level, or accept "
+                  f"some quality loss")
+
+        with _SAVE_LOCK, app.config["WZ_READER_LOCK"]:
+            wz.patch_bytes(prop._png_offset, new_payload)
+            # Zero-pad the unused tail so the next read doesn't see stale
+            # bytes interleaved with the new zlib stream.
+            pad = slot_total - len(new_payload)
+            if pad > 0:
+                wz.patch_bytes(prop._png_offset + len(new_payload), b"\x00" * pad)
+            # Drop the canvas's cached compressed bytes so subsequent
+            # GETs re-read the new payload.
+            prop._png_data = None
+            wz.flush()
+
+        return jsonify({
+            "ok": True,
+            "slot_used": len(new_payload),
+            "slot_total": slot_total,
+            "padded": slot_total - len(new_payload),
+            "format": fmt,
+            "listwz": original_is_listwz,
+        })
 
     return app
 

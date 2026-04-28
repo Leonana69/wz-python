@@ -97,6 +97,16 @@ class WzDoubleProperty(_Scalar):
 class WzStringProperty(_Scalar):
     type_name = "String"
 
+    def __init__(self, name: str, value: str, parent: Optional[WzProperty] = None):
+        super().__init__(name, value, parent)
+        # Set by the parser via :meth:`WzBinaryReader.read_string_block_with_location`
+        # so the editor can re-encrypt a same-length new value into the
+        # exact byte slot the original occupies.
+        self._payload_offset: Optional[int] = None
+        self._payload_length: Optional[int] = None
+        self._encoding: Optional[str] = None  # "ascii" | "unicode"
+        self._indirected: bool = False
+
 
 class WzVectorProperty(_Scalar):
     type_name = "Vector"
@@ -274,10 +284,16 @@ def _parse_extended_or_basic(
         prop._value_offset, prop._value_length = v_off, 8
         return prop
     if tag == 8:
-        # Strings use a string-block (inline or indirected) — not a fixed
-        # byte range, so we don't claim ``_value_offset`` here; in-place
-        # writes for strings are rejected.
-        return WzStringProperty(name, reader.read_string_block(base_offset), parent)
+        # Strings: capture where the encrypted payload bytes physically
+        # live (so the editor can patch them in place) plus the encoding
+        # so we can re-encrypt the new value identically.
+        text, p_off, p_len, enc, indirected = reader.read_string_block_with_location(base_offset)
+        prop = WzStringProperty(name, text, parent)
+        prop._payload_offset = p_off
+        prop._payload_length = p_len
+        prop._encoding = enc
+        prop._indirected = indirected
+        return prop
     if tag == 9:
         block_size = reader.read_u32()
         end_pos = reader.position + block_size

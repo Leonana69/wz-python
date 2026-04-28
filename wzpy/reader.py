@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import io
 import struct
-from typing import BinaryIO, Optional
+from typing import BinaryIO, Dict, Optional, Tuple
 
 from .crypto import WZ_OFFSET_CONSTANT, WzKey
 
@@ -33,6 +33,11 @@ class WzBinaryReader:
         # Built lazily because we don't know the longest string up front.
         self._ascii_combined: Optional[bytes] = None
         self._unicode_combined: Optional[bytes] = None
+        # Bookkeeping for the editor: how many properties reach each
+        # encrypted string payload via indirection (marker 0x01/0x1B).
+        # ``shared_count(off) > 1`` means editing that string will affect
+        # every property pointing at it.
+        self._string_indirections: Dict[int, int] = {}
 
     # ── basic positioning ──────────────────────────────────────────────
     @property
@@ -197,6 +202,77 @@ class WzBinaryReader:
             offset = self.read_u32()
             return self.read_string_at(base_offset + offset)
         raise ValueError(f"unknown string-block marker 0x{marker:02X}")
+
+    # ── location-aware string reads (used by the editor) ──────────────
+    def _measure_string_at(self, offset: int) -> Tuple[str, int, int, str]:
+        """Decode the inline string at ``offset`` and return
+        ``(text, payload_offset, payload_byte_count, encoding)``.
+
+        ``payload_offset`` is the absolute file position of the encrypted
+        payload bytes (after the sign byte and any length-extension i32);
+        ``payload_byte_count`` is the byte count for ``patch_bytes`` to
+        rewrite; ``encoding`` is ``"ascii"`` or ``"unicode"``.
+        """
+        keep = self.position
+        try:
+            self.seek(offset)
+            sign = self.read_sbyte()
+            if sign == 0:
+                # Empty string — no payload.
+                return "", self.position, 0, "ascii"
+            if sign < 0:
+                length = -sign
+                if length == 127:
+                    length = self.read_i32()
+                payload_off = self.position
+                if length <= 0:
+                    return "", payload_off, 0, "ascii"
+                text = self._decode_ascii(length)
+                return text, payload_off, length, "ascii"
+            length = sign
+            if length == 127:
+                length = self.read_i32()
+            payload_off = self.position
+            if length <= 0:
+                return "", payload_off, 0, "unicode"
+            text = self._decode_unicode(length)
+            return text, payload_off, length * 2, "unicode"
+        finally:
+            self.seek(keep)
+
+    def read_string_block_with_location(
+        self, base_offset: int
+    ) -> Tuple[str, int, int, str, bool]:
+        """Variant of :meth:`read_string_block` that also returns where the
+        encrypted payload bytes physically live, plus the encoding and a
+        flag telling whether this site reaches the payload via offset
+        indirection (so the caller knows other properties may share it).
+
+        Returns ``(text, payload_offset, payload_byte_count, encoding, indirected)``.
+        """
+        marker = self.read_byte()
+        if marker in (0x00, 0x73):
+            # Inline form. Snapshot the start of the inline body, measure
+            # it (the helper save/restores position), then advance past
+            # the whole form via the regular read.
+            inline_start = self.position
+            text, p_off, p_len, enc = self._measure_string_at(inline_start)
+            _ = self.read_string()
+            return text, p_off, p_len, enc, False
+        if marker in (0x01, 0x1B):
+            offset = self.read_u32()
+            actual = base_offset + offset
+            text, p_off, p_len, enc = self._measure_string_at(actual)
+            # Record this indirection so the editor can surface a shared-
+            # write warning ("editing this string will change N other
+            # properties that reference the same offset").
+            self._string_indirections[p_off] = self._string_indirections.get(p_off, 0) + 1
+            return text, p_off, p_len, enc, True
+        raise ValueError(f"unknown string-block marker 0x{marker:02X}")
+
+    def shared_count(self, payload_offset: int) -> int:
+        """How many indirection sites currently point at ``payload_offset``."""
+        return self._string_indirections.get(payload_offset, 0)
 
     # ── encrypted offsets (directory entries) ─────────────────────────
     def read_offset(self) -> int:
