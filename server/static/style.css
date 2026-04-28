@@ -37,6 +37,23 @@ header .path { font-family: ui-monospace, "Cascadia Mono", Menlo, monospace; col
 }
 .save-btn:hover:not(:disabled) { background: #4d6592; }
 .save-btn:disabled { opacity: 0.45; cursor: default; }
+.save-as-btn {
+  margin-left: 6px;
+  background: #2c4a32;
+  color: #d6d6d6;
+  border: 1px solid #1a2a1d;
+  border-radius: 3px;
+  padding: 4px 14px;
+  font: inherit;
+  cursor: pointer;
+}
+.save-as-btn:hover:not(:disabled) { background: #3a5e42; }
+.save-as-btn:disabled { opacity: 0.45; cursor: default; }
+.save-as-btn.dirty {
+  background: #6a4a1a;
+  border-color: #3a2c10;
+}
+.save-as-btn.dirty:hover:not(:disabled) { background: #8a6428; }
 .value-input {
   background: #1a1b1d;
   color: #d6d6d6;

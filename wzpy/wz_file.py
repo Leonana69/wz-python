@@ -163,6 +163,80 @@ class WzFile:
         if getattr(self, "_mmap", None) is not None and self.writable:
             self._mmap.flush()
 
+    # ── full archive re-serialization (variable-length edits) ────────
+    def save_as(
+        self,
+        output_path: str,
+        *,
+        dirty_paths: Optional[set] = None,
+        image_failures: Optional[List[str]] = None,
+    ) -> int:
+        """Re-serialize this WZ — including any edits made in memory —
+        into a new file at ``output_path``. Returns the byte count
+        written.
+
+        Use this when an edit changed the byte length of a value (longer
+        string, larger canvas, etc.) — those can't be patched in place
+        because every downstream offset would shift. The output is a
+        canonical legacy 32-bit WZ archive: same copyright, fstart,
+        version hash, and region IV as the input, so the same
+        ``WzFile.open(..., region=...)`` call that read the input also
+        reads the output.
+
+        Writes to ``output_path + '.tmp'`` first and then atomically
+        ``os.replace``s — so a crash mid-write doesn't corrupt the
+        target if it already exists.
+
+        ``dirty_paths`` (optional): a set of property paths that have
+        unsaved edits. Images containing any dirty path are
+        re-serialized from the parsed tree; everything else is copied
+        verbatim from the source mmap (faster + sidesteps any encoder
+        gaps). When ``dirty_paths`` is omitted, every image is
+        re-serialized — match the V1 behavior but slower and more
+        sensitive to encoder bugs.
+
+        ``image_failures`` (optional): if provided, populated with
+        ``"<path>: <reason>"`` strings for non-dirty images that
+        couldn't be re-serialized and were preserved by verbatim copy.
+        """
+        import os as _os
+        from . import writer as _writer
+
+        is_image_dirty = None
+        if dirty_paths is not None:
+            # Match by image-path prefix: an image whose name appears as
+            # a path component in a dirty entry has at least one staged
+            # edit underneath it.
+            def is_image_dirty(image_path: str) -> bool:
+                prefix = image_path + "/"
+                for d in dirty_paths:
+                    if d == image_path or d.startswith(prefix):
+                        return True
+                return False
+
+        # Force-parse every dirty image so its in-memory tree reflects
+        # staged edits. Non-dirty images are copied verbatim from the
+        # source mmap, so they don't need parsing at all.
+        if is_image_dirty is None:
+            for _, img in self.root.walk_images():
+                img.parse()
+        else:
+            for path, img in self.root.walk_images():
+                if is_image_dirty(path):
+                    img.parse()
+
+        data = _writer.encode_wz_file(
+            self,
+            is_image_dirty=is_image_dirty,
+            image_failures=image_failures,
+        )
+
+        tmp_path = output_path + ".tmp"
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+        _os.replace(tmp_path, output_path)
+        return len(data)
+
     # ── parsing ─────────────────────────────────────────────────────
     def _load(self) -> None:
         import mmap

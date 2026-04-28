@@ -230,8 +230,23 @@ def parse_property_list(
             name = reader.read_string_block(base_offset)
             prop = _parse_extended_or_basic(reader, base_offset, name, parent, wz_image)
         except EOFError:
+            # File ended mid-property — partial parse, mark and stop.
             if wz_image is not None:
                 wz_image.truncated = True
+            break
+        except ValueError as exc:
+            # Unknown marker / unknown tag / similar structural oddity in
+            # this property. Stop cleanly with what we have — the rest of
+            # the image's tree is unreachable from here without risking
+            # garbage bytes being interpreted as more properties. Real
+            # WZ archives sometimes carry novel tag types we haven't
+            # learned yet; degrading gracefully beats a 500 on the
+            # whole subtree.
+            if wz_image is not None:
+                wz_image.truncated = True
+                wz_image.parse_warnings.append(
+                    f"stopped parsing {parent.name or '?'}: {exc}"
+                )
             break
         items.append(prop)
     return items

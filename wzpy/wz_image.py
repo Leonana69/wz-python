@@ -54,6 +54,10 @@ class WzImage:
         # Set by parse_property_list when it hits EOF mid-property — tells the
         # caller the parse returned partial results and the file is truncated.
         self.truncated: bool = False
+        # Diagnostic messages from per-property parse failures that didn't
+        # raise (e.g. unknown markers we now degrade gracefully). The image
+        # is still usable; this just tells the UI a subtree is missing.
+        self.parse_warnings: List[str] = []
 
     @classmethod
     def from_bytes(cls, data: bytes, *, key: "WzKey",

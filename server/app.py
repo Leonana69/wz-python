@@ -17,6 +17,7 @@ import io
 import json
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -448,7 +449,14 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         # because Flask's dev server access log goes to stderr; otherwise this
         # line can buffer behind a chunk of access lines.
         print(f"  [tree {elapsed_ms:6.1f} ms, {len(children):5d} children] /{subpath}", flush=True)
-        resp = jsonify({"path": subpath, "kind": kind, "children": children})
+        payload: Dict[str, Any] = {"path": subpath, "kind": kind, "children": children}
+        # Bubble up partial-parse warnings so the UI can show a hint that
+        # the listing isn't complete.
+        if isinstance(node, WzImage) and (node.truncated or node.parse_warnings):
+            payload["truncated"] = node.truncated
+            if node.parse_warnings:
+                payload["parse_warnings"] = list(node.parse_warnings)
+        resp = jsonify(payload)
         resp.headers["X-Server-Ms"] = f"{elapsed_ms:.1f}"
         resp.headers["X-Children"] = str(len(children))
         return resp
@@ -915,6 +923,211 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             "padded": slot_total - len(new_payload),
             "format": fmt,
             "listwz": original_is_listwz,
+        })
+
+    # ── variable-length edits + Save As ──────────────────────────────
+    # ``/api/edit`` mutates the in-memory tree without touching the
+    # file. Used when the new value's encoded size differs from the
+    # original (and the in-place /api/save would reject it). The user
+    # then triggers ``/api/save_as`` to flush the modified tree to a
+    # fresh WZ on disk.
+    #
+    # We track which paths have unsaved-on-disk edits in
+    # ``app.config["WZ_DIRTY_PATHS"]`` so the UI can warn before
+    # navigation.
+    app.config["WZ_DIRTY_PATHS"] = set()
+
+    @app.route("/api/edit", methods=["POST"])
+    def api_edit() -> Response:
+        """Stage variable-length edits to the in-memory tree.
+
+        Body shape matches /api/save: ``{edits: {path: value, ...}}``.
+        Returns one row per edit. Unlike /api/save, this never patches
+        the file — call ``/api/save_as`` to materialize the changes.
+        """
+        from wzpy.properties import (
+            WzShortProperty, WzIntProperty, WzLongProperty,
+            WzFloatProperty, WzDoubleProperty, WzStringProperty,
+        )
+        body = request.get_json(silent=True) or {}
+        edits = body.get("edits") or {}
+        if not isinstance(edits, dict):
+            abort(400, "body.edits must be an object {path: value}")
+        results = []
+        ok = 0
+        dirty = app.config["WZ_DIRTY_PATHS"]
+        with app.config["WZ_READER_LOCK"]:
+            for path, new_value in edits.items():
+                target = _resolve_target(path)
+                if not isinstance(target, WzProperty):
+                    results.append({"path": path, "status": "error",
+                                    "reason": "target is not a property"})
+                    continue
+                try:
+                    if isinstance(target, (WzShortProperty, WzIntProperty,
+                                            WzLongProperty)):
+                        target._value = int(new_value)
+                    elif isinstance(target, (WzFloatProperty, WzDoubleProperty)):
+                        target._value = float(new_value)
+                    elif isinstance(target, WzStringProperty):
+                        target._value = str(new_value)
+                    else:
+                        results.append({"path": path, "status": "error",
+                                        "reason": f"{target.type_name} is not "
+                                                  f"editable via /api/edit"})
+                        continue
+                except (ValueError, TypeError) as exc:
+                    results.append({"path": path, "status": "error",
+                                    "reason": str(exc)})
+                    continue
+                dirty.add(path)
+                results.append({"path": path, "status": "ok",
+                                "value": target._value})
+                ok += 1
+        return jsonify({"ok": ok, "total": len(results), "results": results,
+                        "dirty_count": len(dirty)})
+
+    @app.route("/api/canvas/<path:subpath>/stage", methods=["POST"])
+    def api_canvas_stage(subpath: str) -> Response:
+        """Variable-size canvas replacement: re-encode the upload but
+        skip the slot-fit check, store the new compressed bytes on the
+        canvas property in memory, mark the path dirty. The next
+        ``/api/save_as`` will pick it up.
+
+        Same form field as /api/canvas: ``image``.
+        """
+        from wzpy.properties import WzCanvasProperty
+        from wzpy.canvas import encode_canvas_payload, _read_canvas_bytes, _ZLIB_HEADERS
+        from wzpy.crypto import WzKey
+
+        if "image" not in request.files:
+            abort(400, "missing 'image' form field")
+        upload = request.files["image"]
+        node, remaining = _resolve(unquote(subpath))
+        if not isinstance(node, WzImage) or not remaining:
+            abort(404, "path is not a Canvas inside an image")
+        prop = node.get(remaining)
+        if not isinstance(prop, WzCanvasProperty):
+            abort(404, "target is not a Canvas")
+
+        try:
+            uploaded_image = Image.open(upload.stream)
+            uploaded_image.load()
+        except Exception as exc:
+            abort(400, f"cannot decode uploaded image: {exc}")
+
+        # Match the original framing on write so other readers don't
+        # need the listWz fallback.
+        with app.config["WZ_READER_LOCK"]:
+            raw = _read_canvas_bytes(prop) if prop.has_pixels() else b""
+        original_is_listwz = (
+            len(raw) >= 2
+            and (raw[0] | (raw[1] << 8)) not in _ZLIB_HEADERS
+        )
+
+        # Allow resizing the canvas — width/height come from the upload
+        # if the user wants a different size.
+        new_w = int(request.form.get("width", uploaded_image.width))
+        new_h = int(request.form.get("height", uploaded_image.height))
+        # Format is preserved (encoder requires a known pixel format,
+        # and the existing one is the natural choice).
+        fmt = prop.format + prop.format2
+        try:
+            new_payload = encode_canvas_payload(
+                uploaded_image, fmt, new_w, new_h,
+                key=WzKey.for_region(app.config["WZ_REGION"]),
+                listwz=original_is_listwz,
+            )
+        except ValueError as exc:
+            abort(400, str(exc))
+
+        with app.config["WZ_READER_LOCK"]:
+            prop.width = new_w
+            prop.height = new_h
+            prop._png_data = new_payload
+            prop._png_length = len(new_payload)
+            app.config["WZ_DIRTY_PATHS"].add(subpath)
+
+        return jsonify({
+            "ok": True,
+            "staged": True,
+            "width": new_w,
+            "height": new_h,
+            "payload_bytes": len(new_payload),
+            "listwz": original_is_listwz,
+            "dirty_count": len(app.config["WZ_DIRTY_PATHS"]),
+        })
+
+    @app.route("/api/save_as", methods=["POST"])
+    def api_save_as() -> Response:
+        """Re-serialize the entire archive (including all in-memory
+        edits) to a new file. Body: ``{path: "..."}``.
+
+        Returns ``{ok, path, bytes, dirty_cleared}``. After success,
+        ``WZ_DIRTY_PATHS`` is reset.
+        """
+        import os as _os
+        body = request.get_json(silent=True) or {}
+        out_path = body.get("path")
+        if not out_path or not isinstance(out_path, str):
+            abort(400, "body.path is required (target output file)")
+        # Guard: no overwrite-original unless the request explicitly
+        # opts in. Saving over the live mmap from this process would
+        # corrupt the open file.
+        try:
+            same = _os.path.samefile(out_path, wz.path)
+        except FileNotFoundError:
+            same = False
+        if same and not body.get("overwrite_original"):
+            abort(400, "refusing to overwrite the open WZ file; pass "
+                       "overwrite_original=true to confirm")
+
+        with _SAVE_LOCK, app.config["WZ_READER_LOCK"]:
+            try:
+                # Pass the dirty-path set so unedited images get the
+                # fast (and bug-resistant) verbatim-copy path.
+                image_failures: List[str] = []
+                size = wz.save_as(
+                    out_path,
+                    dirty_paths=app.config["WZ_DIRTY_PATHS"],
+                    image_failures=image_failures,
+                )
+            except Exception as exc:
+                # Log the full traceback to the server stderr so the user
+                # can see exactly what failed; surface a JSON error with
+                # the message + abbreviated traceback so the browser
+                # console + Network tab show something useful.
+                import traceback as _tb
+                tb = _tb.format_exc()
+                print("[save_as] FAILED:", file=sys.stderr)
+                print(tb, file=sys.stderr, flush=True)
+                # Last 3 frames of the traceback are the most useful here.
+                short = "\n".join(tb.splitlines()[-12:])
+                resp = jsonify({
+                    "ok": False,
+                    "error": str(exc),
+                    "type": type(exc).__name__,
+                    "trace": short,
+                })
+                resp.status_code = 500
+                return resp
+            cleared = len(app.config["WZ_DIRTY_PATHS"])
+            app.config["WZ_DIRTY_PATHS"].clear()
+
+        return jsonify({
+            "ok": True,
+            "path": out_path,
+            "bytes": size,
+            "dirty_cleared": cleared,
+            "image_failures": image_failures,
+        })
+
+    @app.route("/api/dirty", methods=["GET"])
+    def api_dirty() -> Response:
+        """Tell the UI how many staged variable-length edits are pending."""
+        return jsonify({
+            "count": len(app.config["WZ_DIRTY_PATHS"]),
+            "paths": sorted(app.config["WZ_DIRTY_PATHS"]),
         })
 
     return app

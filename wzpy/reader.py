@@ -159,17 +159,30 @@ class WzBinaryReader:
             return plain.decode("utf-16-le", errors="replace")
 
     def read_string_with_length(self, sign: int) -> str:
-        """``sign`` < 0 → ASCII, ``sign`` > 0 → Unicode (UTF-16LE)."""
+        """``sign`` < 0 → ASCII, ``sign`` > 0 → Unicode (UTF-16LE).
+
+        The length-extension sentinels are the signed-byte extremes:
+        ``-128`` for ASCII and ``+127`` for Unicode. When the sign byte
+        equals the sentinel, an i32 length follows; otherwise the
+        absolute value of the sign byte IS the length. (Confusing
+        previously-buggy form: ``length = -sign`` then ``length == 127``
+        triggers for sign=-127, which is just a 127-char ASCII string,
+        not the extension — and misses sign=-128, which IS the
+        extension. This caused arbitrarily long ASCII descriptions to
+        decode as 128 bytes of garbage.)
+        """
         if sign < 0:
-            length = -sign
-            if length == 127:
+            if sign == -128:
                 length = self.read_i32()
+            else:
+                length = -sign
             if length <= 0:
                 return ""
             return self._decode_ascii(length)
-        length = sign
-        if length == 127:
+        if sign == 127:
             length = self.read_i32()
+        else:
+            length = sign
         if length <= 0:
             return ""
         return self._decode_unicode(length)
@@ -195,13 +208,16 @@ class WzBinaryReader:
         """Read either an inline string (``0x00``/``0x73``) or an indirected
         offset (``0x01``/``0x1B``). Used inside .img where the same string may
         appear repeatedly."""
+        marker_pos = self.position
         marker = self.read_byte()
         if marker in (0x00, 0x73):
             return self.read_string()
         if marker in (0x01, 0x1B):
             offset = self.read_u32()
             return self.read_string_at(base_offset + offset)
-        raise ValueError(f"unknown string-block marker 0x{marker:02X}")
+        raise ValueError(
+            f"unknown string-block marker 0x{marker:02X} at offset 0x{marker_pos:X}"
+        )
 
     # ── location-aware string reads (used by the editor) ──────────────
     def _measure_string_at(self, offset: int) -> Tuple[str, int, int, str]:
@@ -212,6 +228,10 @@ class WzBinaryReader:
         payload bytes (after the sign byte and any length-extension i32);
         ``payload_byte_count`` is the byte count for ``patch_bytes`` to
         rewrite; ``encoding`` is ``"ascii"`` or ``"unicode"``.
+
+        Length-extension sentinels are the signed-byte extremes
+        (``-128`` for ASCII, ``+127`` for Unicode); see
+        :meth:`read_string_with_length` for why.
         """
         keep = self.position
         try:
@@ -221,17 +241,19 @@ class WzBinaryReader:
                 # Empty string — no payload.
                 return "", self.position, 0, "ascii"
             if sign < 0:
-                length = -sign
-                if length == 127:
+                if sign == -128:
                     length = self.read_i32()
+                else:
+                    length = -sign
                 payload_off = self.position
                 if length <= 0:
                     return "", payload_off, 0, "ascii"
                 text = self._decode_ascii(length)
                 return text, payload_off, length, "ascii"
-            length = sign
-            if length == 127:
+            if sign == 127:
                 length = self.read_i32()
+            else:
+                length = sign
             payload_off = self.position
             if length <= 0:
                 return "", payload_off, 0, "unicode"
@@ -250,6 +272,7 @@ class WzBinaryReader:
 
         Returns ``(text, payload_offset, payload_byte_count, encoding, indirected)``.
         """
+        marker_pos = self.position
         marker = self.read_byte()
         if marker in (0x00, 0x73):
             # Inline form. Snapshot the start of the inline body, measure
@@ -268,7 +291,9 @@ class WzBinaryReader:
             # properties that reference the same offset").
             self._string_indirections[p_off] = self._string_indirections.get(p_off, 0) + 1
             return text, p_off, p_len, enc, True
-        raise ValueError(f"unknown string-block marker 0x{marker:02X}")
+        raise ValueError(
+            f"unknown string-block marker 0x{marker:02X} at offset 0x{marker_pos:X}"
+        )
 
     def shared_count(self, payload_offset: int) -> int:
         """How many indirection sites currently point at ``payload_offset``."""

@@ -146,27 +146,160 @@ async function runSave() {
     updateSaveButton();
     return;
   }
-  // Drop the OK ones from the pending map so the input chrome refreshes,
-  // and surface any rejections.
-  const failed = [];
+  // Drop the OK ones from the pending map. For rejections caused by
+  // length mismatch, automatically retry via /api/edit (which mutates
+  // the in-memory tree without touching the file). Anything else
+  // (range error, unknown property, etc.) we surface to the user.
+  const stageRetry = {};
+  const trueFailures = [];
   for (const row of resp.results || []) {
     if (row.status === "ok") {
       pendingEdits.delete(row.path);
+      continue;
+    }
+    const r = row.reason || "";
+    const lengthMismatch =
+      r.includes("encoded length changed") ||
+      r.includes("string would change size");
+    if (lengthMismatch) {
+      stageRetry[row.path] = edits[row.path];
     } else {
-      failed.push(`  • ${row.path}: ${row.reason}`);
+      trueFailures.push(`  • ${row.path}: ${r}`);
     }
   }
-  // If the currently-displayed node had an edit, redraw it so the input's
-  // "dirty" badge clears and dataset.original reflects the new on-disk value.
+
+  // Length-mismatch edits go to /api/edit (stage in memory; user must
+  // call Save As to commit to disk).
+  let stagedCount = 0;
+  if (Object.keys(stageRetry).length) {
+    try {
+      const sr = await fetch("/api/edit", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({edits: stageRetry}),
+      });
+      const sresp = await sr.json();
+      for (const row of sresp.results || []) {
+        if (row.status === "ok") {
+          pendingEdits.delete(row.path);
+          stagedCount += 1;
+        } else {
+          trueFailures.push(`  • ${row.path}: ${row.reason}`);
+        }
+      }
+      saveAsButton.dataset.dirty = String(sresp.dirty_count || 0);
+      updateSaveAsButton();
+    } catch (err) {
+      trueFailures.push(`  • /api/edit fallback: ${err.message}`);
+    }
+  }
+
   document.querySelectorAll(".value-input.dirty").forEach((el) => {
     el.classList.remove("dirty");
   });
   updateSaveButton();
-  if (failed.length) {
-    alert(`Saved ${resp.ok}/${resp.total}. Rejected:\n${failed.join("\n")}`);
+
+  if (trueFailures.length) {
+    alert(
+      `Saved in place ${resp.ok}/${resp.total}` +
+      (stagedCount ? `; staged ${stagedCount} for Save As` : "") +
+      `. Failed:\n${trueFailures.join("\n")}`,
+    );
+  } else if (stagedCount) {
+    saveButton.textContent = `Saved ${resp.ok}, staged ${stagedCount}`;
+    setTimeout(updateSaveButton, 2000);
   } else {
     saveButton.textContent = `Saved ${resp.ok}`;
     setTimeout(updateSaveButton, 1500);
+  }
+}
+
+// ── Save As — flush staged variable-length edits to a new WZ file ──
+const saveAsButton = document.createElement("button");
+saveAsButton.className = "save-as-btn";
+saveAsButton.textContent = "Save As…";
+saveAsButton.title =
+  "Re-serialize the entire archive (including any staged size-changing " +
+  "edits) into a new WZ file on disk.";
+saveAsButton.dataset.dirty = "0";
+saveAsButton.addEventListener("click", runSaveAs);
+
+function updateSaveAsButton() {
+  const n = Number(saveAsButton.dataset.dirty || 0);
+  saveAsButton.textContent = n ? `Save As… (${n})` : "Save As…";
+  saveAsButton.classList.toggle("dirty", n > 0);
+}
+
+// Refresh dirty count from the server on load (in case prior edits
+// were staged in another tab / session).
+fetch("/api/dirty").then((r) => r.json()).then((d) => {
+  saveAsButton.dataset.dirty = String(d.count || 0);
+  updateSaveAsButton();
+}).catch(() => {});
+
+async function runSaveAs() {
+  const wzPath = document.body.dataset.wzName || "";
+  const def = wzPath ? wzPath.replace(/(\.wz)?$/i, ".modified.wz") : "modified.wz";
+  const target = window.prompt(
+    "Save As — full output path on the server filesystem.\n\n" +
+    "All staged variable-length edits will be flushed.\n" +
+    "Pass the original path with overwrite_original=true to overwrite.",
+    def,
+  );
+  if (!target) return;
+  saveAsButton.disabled = true;
+  const orig = saveAsButton.textContent;
+  saveAsButton.textContent = "Saving…";
+  try {
+    let r = await fetch("/api/save_as", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({path: target}),
+    });
+    if (r.status === 400) {
+      const body = await r.text();
+      if (body.includes("refusing to overwrite") &&
+          confirm("That path is the live WZ file. Overwrite anyway? (Save As will close & re-open the file.)")) {
+        r = await fetch("/api/save_as", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({path: target, overwrite_original: true}),
+        });
+      } else {
+        alert(body);
+        return;
+      }
+    }
+    if (!r.ok) {
+      // Server returns JSON {ok:false, error, type, trace} on 500.
+      // Show the actual cause + abbreviated trace to the user.
+      let detail;
+      try {
+        const body = await r.json();
+        detail = `${body.type || "error"}: ${body.error || r.statusText}` +
+                 (body.trace ? `\n\n${body.trace}` : "");
+        console.error("[save_as]", body);
+      } catch {
+        detail = await r.text().catch(() => r.statusText);
+      }
+      alert(`Save As failed (${r.status}):\n\n${detail}`);
+      return;
+    }
+    const data = await r.json();
+    saveAsButton.dataset.dirty = "0";
+    updateSaveAsButton();
+    alert(
+      `Save As complete.\n\n` +
+      `  path: ${data.path}\n` +
+      `  bytes: ${data.bytes}\n` +
+      `  staged edits flushed: ${data.dirty_cleared}`,
+    );
+  } catch (err) {
+    alert(`Save As failed: ${err.message}`);
+  } finally {
+    saveAsButton.disabled = false;
+    saveAsButton.textContent = orig;
+    updateSaveAsButton();
   }
 }
 
@@ -567,14 +700,36 @@ function makeCanvasViewer(path, meta) {
     replaceBtn.textContent = "Replacing…";
     replaceBtn.disabled = true;
     try {
-      const r = await fetch(`/api/canvas/${encodeURI(path)}`,
+      // First try the in-place path. If the new image doesn't fit the
+      // original byte slot, fall back to the staged path which marks
+      // the canvas dirty for the next Save As.
+      let r = await fetch(`/api/canvas/${encodeURI(path)}`,
         { method: "POST", body: fd });
-      const body = await r.json().catch(() => ({}));
+      let body = await r.json().catch(() => ({}));
+      const slotTooSmall = !r.ok && (
+        (body.message || "").includes("compressed payload") ||
+        (body.reason || "").includes("compressed payload")
+      );
+      if (slotTooSmall) {
+        const fd2 = new FormData();
+        fd2.append("image", file);
+        r = await fetch(`/api/canvas/${encodeURI(path)}/stage`,
+          { method: "POST", body: fd2 });
+        body = await r.json().catch(() => ({}));
+        if (r.ok && body.staged) {
+          img.src = `/api/canvas/${encodeURI(path)}.png?t=${Date.now()}`;
+          saveAsButton.dataset.dirty = String(body.dirty_count || 0);
+          updateSaveAsButton();
+          replaceBtn.textContent = `Staged ${body.payload_bytes}b — Save As`;
+          setTimeout(() => { replaceBtn.textContent = orig; }, 2400);
+          return;
+        }
+      }
       if (!r.ok || body.ok === false) {
         const reason = body.message || body.reason || r.statusText;
         alert(`Replace failed: ${reason}`);
       } else {
-        // Cache-bust so the viewer re-fetches the new PNG bytes.
+        // In-place succeeded — cache-bust so the viewer re-fetches.
         img.src = `/api/canvas/${encodeURI(path)}.png?t=${Date.now()}`;
         replaceBtn.textContent = `OK ${body.slot_used}/${body.slot_total}`;
         setTimeout(() => { replaceBtn.textContent = orig; }, 1800);
@@ -1007,9 +1162,15 @@ function createProgressModal(labelText) {
 
 async function init() {
   // Mount the global Save button into the header slot. It stays disabled
-  // until the user makes at least one editable-value change.
+  // until the user makes at least one editable-value change. The Save As
+  // button next to it commits any size-changing edits that were staged
+  // (size-changing edits skip the in-place /api/save and land in
+  // /api/edit instead).
   const saveSlot = document.getElementById("save-slot");
-  if (saveSlot) saveSlot.appendChild(saveButton);
+  if (saveSlot) {
+    saveSlot.appendChild(saveButton);
+    saveSlot.appendChild(saveAsButton);
+  }
 
   // Wrap the WZ file's root inside a single synthetic LI showing the file
   // name. Without this wrapper the root <ul id="tree"> is populated
