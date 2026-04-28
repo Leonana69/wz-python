@@ -859,22 +859,33 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         )
         from wzpy.crypto import WzKey
 
+        # Helper: error responses that survive JSON parsing on the
+        # client. Flask's ``abort(400, "...")`` returns an HTML error
+        # page which the frontend can't introspect — and that's what
+        # was breaking the slot-too-small fallback to /stage.
+        def _err(status: int, reason: str, **extra: Any) -> Response:
+            payload = {"ok": False, "reason": reason}
+            payload.update(extra)
+            r = jsonify(payload)
+            r.status_code = status
+            return r
+
         if "image" not in request.files:
-            abort(400, "missing 'image' form field")
+            return _err(400, "missing 'image' form field")
         upload = request.files["image"]
 
         node, remaining = _resolve(unquote(subpath))
         if not isinstance(node, WzImage) or not remaining:
-            abort(404, "path is not a Canvas inside an image")
+            return _err(404, "path is not a Canvas inside an image")
         prop = node.get(remaining)
         if not isinstance(prop, WzCanvasProperty) or not prop.has_pixels():
-            abort(404, "target is not a Canvas with pixels")
+            return _err(404, "target is not a Canvas with pixels")
 
         try:
             uploaded_image = Image.open(upload.stream)
             uploaded_image.load()
         except Exception as exc:
-            abort(400, f"cannot decode uploaded image: {exc}")
+            return _err(400, f"cannot decode uploaded image: {exc}")
 
         # Detect the original encoding form so we can write back in the
         # same shape (avoids breaking listWz-readers that don't try the
@@ -895,14 +906,21 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
                 key=key, listwz=original_is_listwz,
             )
         except ValueError as exc:
-            abort(400, str(exc))
+            return _err(400, str(exc), code="encode_failed")
 
         slot_total = prop._png_length
         if len(new_payload) > slot_total:
-            abort(400,
-                  f"compressed payload {len(new_payload)} > slot {slot_total} "
-                  f"bytes; pick a simpler image, lower zlib level, or accept "
-                  f"some quality loss")
+            # The frontend keys off ``code: "slot_too_small"`` to fall
+            # back to the staged path automatically.
+            return _err(
+                400,
+                f"compressed payload {len(new_payload)} > slot {slot_total} "
+                f"bytes; pick a simpler image, lower zlib level, or accept "
+                f"some quality loss",
+                code="slot_too_small",
+                slot_used=len(new_payload),
+                slot_total=slot_total,
+            )
 
         with _SAVE_LOCK, app.config["WZ_READER_LOCK"]:
             wz.patch_bytes(prop._png_offset, new_payload)
@@ -1000,21 +1018,28 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         from wzpy.canvas import encode_canvas_payload, _read_canvas_bytes, _ZLIB_HEADERS
         from wzpy.crypto import WzKey
 
+        def _err(status: int, reason: str, **extra: Any) -> Response:
+            payload = {"ok": False, "reason": reason}
+            payload.update(extra)
+            r = jsonify(payload)
+            r.status_code = status
+            return r
+
         if "image" not in request.files:
-            abort(400, "missing 'image' form field")
+            return _err(400, "missing 'image' form field")
         upload = request.files["image"]
         node, remaining = _resolve(unquote(subpath))
         if not isinstance(node, WzImage) or not remaining:
-            abort(404, "path is not a Canvas inside an image")
+            return _err(404, "path is not a Canvas inside an image")
         prop = node.get(remaining)
         if not isinstance(prop, WzCanvasProperty):
-            abort(404, "target is not a Canvas")
+            return _err(404, "target is not a Canvas")
 
         try:
             uploaded_image = Image.open(upload.stream)
             uploaded_image.load()
         except Exception as exc:
-            abort(400, f"cannot decode uploaded image: {exc}")
+            return _err(400, f"cannot decode uploaded image: {exc}")
 
         # Match the original framing on write so other readers don't
         # need the listWz fallback.
@@ -1039,7 +1064,7 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
                 listwz=original_is_listwz,
             )
         except ValueError as exc:
-            abort(400, str(exc))
+            return _err(400, str(exc), code="encode_failed")
 
         with app.config["WZ_READER_LOCK"]:
             prop.width = new_w

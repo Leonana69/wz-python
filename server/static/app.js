@@ -700,34 +700,42 @@ function makeCanvasViewer(path, meta) {
     replaceBtn.textContent = "Replacing…";
     replaceBtn.disabled = true;
     try {
-      // First try the in-place path. If the new image doesn't fit the
-      // original byte slot, fall back to the staged path which marks
-      // the canvas dirty for the next Save As.
+      // Try the in-place path first. If the new payload doesn't fit
+      // the original byte slot — or for any other 4xx — fall back to
+      // the staged path which marks the canvas dirty for Save As.
+      // We treat *any* in-place 4xx as a fallback trigger because the
+      // legitimate user goal is "replace this image" and /stage will
+      // either succeed (slot overflow → staged for Save As) or report
+      // the real reason for failure (DXT format, bad image, etc.).
       let r = await fetch(`/api/canvas/${encodeURI(path)}`,
         { method: "POST", body: fd });
       let body = await r.json().catch(() => ({}));
-      const slotTooSmall = !r.ok && (
-        (body.message || "").includes("compressed payload") ||
-        (body.reason || "").includes("compressed payload")
-      );
-      if (slotTooSmall) {
+      let inPlaceReason = body.reason || body.message || "";
+
+      if (!r.ok && r.status >= 400 && r.status < 500) {
         const fd2 = new FormData();
         fd2.append("image", file);
-        r = await fetch(`/api/canvas/${encodeURI(path)}/stage`,
+        const r2 = await fetch(`/api/canvas/${encodeURI(path)}/stage`,
           { method: "POST", body: fd2 });
-        body = await r.json().catch(() => ({}));
-        if (r.ok && body.staged) {
+        const body2 = await r2.json().catch(() => ({}));
+        if (r2.ok && body2.staged) {
           img.src = `/api/canvas/${encodeURI(path)}.png?t=${Date.now()}`;
-          saveAsButton.dataset.dirty = String(body.dirty_count || 0);
+          saveAsButton.dataset.dirty = String(body2.dirty_count || 0);
           updateSaveAsButton();
-          replaceBtn.textContent = `Staged ${body.payload_bytes}b — Save As`;
+          replaceBtn.textContent = `Staged ${body2.payload_bytes}b — Save As`;
           setTimeout(() => { replaceBtn.textContent = orig; }, 2400);
           return;
         }
+        // Stage also failed — the JSON ``reason`` is the authoritative
+        // cause (e.g. "writing canvas format 1026 (DXT) is not
+        // supported"). Falls through to the alert below with whichever
+        // reason we have.
+        const stageReason = body2.reason || body2.message || r2.statusText;
+        alert(`Replace failed.\n\nIn-place: ${inPlaceReason || r.statusText}\nStaged:   ${stageReason}`);
+        return;
       }
       if (!r.ok || body.ok === false) {
-        const reason = body.message || body.reason || r.statusText;
-        alert(`Replace failed: ${reason}`);
+        alert(`Replace failed: ${inPlaceReason || r.statusText}`);
       } else {
         // In-place succeeded — cache-bust so the viewer re-fetches.
         img.src = `/api/canvas/${encodeURI(path)}.png?t=${Date.now()}`;
