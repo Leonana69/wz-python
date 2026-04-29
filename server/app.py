@@ -745,18 +745,57 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
 
     @app.route("/api/sound/<path:subpath>")
     def api_sound(subpath: str) -> Response:
+        """Serve a Sound property's audio bytes.
+
+        Honours HTTP ``Range`` requests with ``206 Partial Content`` —
+        without this the browser's <audio controls> hides the scrubber
+        and refuses to seek, because it can't tell whether the source
+        supports random access. Even on a single-shot full-file fetch
+        we set ``Accept-Ranges: bytes`` so the browser knows the
+        response is seekable on subsequent range requests.
+        """
         node, remaining = _resolve(unquote(subpath))
         if not isinstance(node, WzImage) or not remaining:
             abort(404)
         prop = node.get(remaining)
         if not isinstance(prop, WzSoundProperty):
             abort(404)
-        r = wz.reader
-        keep = r.position
-        r.seek(prop._data_offset)
-        data = r.read(prop._data_length)
-        r.seek(keep)
-        return Response(data, mimetype="audio/mpeg")
+        # Sounds added via /api/add/sound have no source-mmap bytes;
+        # their audio lives on ``prop._data``.
+        if getattr(prop, "_data", None) is not None:
+            data = prop._data
+        else:
+            r = wz.reader
+            keep = r.position
+            r.seek(prop._data_offset)
+            data = r.read(prop._data_length)
+            r.seek(keep)
+        total = len(data)
+
+        range_hdr = request.headers.get("Range", "")
+        # Match ``bytes=START-END`` with either side optional. Any
+        # other form (multipart, suffix-length, etc.) we just fall
+        # through to the full-body response, which is still legal.
+        m = re.match(r"^bytes=(\d*)-(\d*)$", range_hdr)
+        if m and (m.group(1) or m.group(2)):
+            start = int(m.group(1)) if m.group(1) else 0
+            end = int(m.group(2)) if m.group(2) else total - 1
+            if start >= total or start > end:
+                resp = Response("", status=416, mimetype="audio/mpeg")
+                resp.headers["Content-Range"] = f"bytes */{total}"
+                return resp
+            end = min(end, total - 1)
+            chunk = data[start:end + 1]
+            resp = Response(chunk, status=206, mimetype="audio/mpeg")
+            resp.headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+            resp.headers["Content-Length"] = str(len(chunk))
+            resp.headers["Accept-Ranges"] = "bytes"
+            return resp
+
+        resp = Response(data, mimetype="audio/mpeg")
+        resp.headers["Accept-Ranges"] = "bytes"
+        resp.headers["Content-Length"] = str(total)
+        return resp
 
     @app.route("/api/animation/<path:subpath>")
     def api_animation(subpath: str) -> Response:
