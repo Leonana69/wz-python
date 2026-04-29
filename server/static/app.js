@@ -536,6 +536,35 @@ function showContextMenuFor(x, y, labelPath, fullPath, kind) {
       runRemove(fullPath, labelPath);
     };
     contextMenuEl.appendChild(removeItem);
+  }
+
+  // Add — only meaningful for containers (Image, SubProperty, Canvas).
+  // Canvas IS a SubProperty subclass; the API accepts it.
+  if (["image", "subproperty", "property", "canvas"].includes(k)) {
+    const addEntry = document.createElement("div");
+    addEntry.className = "menu-item has-submenu";
+    addEntry.textContent = "Add ▸";
+    const sub = document.createElement("div");
+    sub.className = "submenu";
+    const types = [
+      "Int", "Short", "Long", "Float", "Double",
+      "String", "Vector", "SubProperty", "Null",
+    ];
+    for (const t of types) {
+      const it = document.createElement("div");
+      it.className = "menu-item";
+      it.textContent = t;
+      it.onclick = (e) => {
+        e.stopPropagation();
+        hideContextMenu();
+        runAdd(fullPath, t);
+      };
+      sub.appendChild(it);
+    }
+    addEntry.appendChild(sub);
+    contextMenuEl.appendChild(addEntry);
+  }
+  if (fullPath || ["image", "subproperty", "property", "canvas"].includes(k)) {
     addSep();
   }
   if (isDir) {
@@ -637,6 +666,72 @@ async function runRename(fullPath) {
   }
 }
 
+// Add — prompt for the new property's name + per-type extra inputs,
+// POST to /api/add, refresh the parent's tree so the new node shows.
+async function runAdd(parentPath, kind) {
+  const name = window.prompt(`Add ${kind} — name:`);
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  if (trimmed.includes("/") || trimmed.includes("\\")) {
+    alert("Name must not contain path separators.");
+    return;
+  }
+
+  const body = {parent_path: parentPath, name: trimmed, kind};
+
+  if (["Short", "Int", "Long"].includes(kind)) {
+    const raw = window.prompt(`${kind} value:`, "0");
+    if (raw === null) return;
+    const v = parseInt(raw, 10);
+    if (Number.isNaN(v)) { alert(`Invalid integer: ${raw}`); return; }
+    body.value = v;
+  } else if (["Float", "Double"].includes(kind)) {
+    const raw = window.prompt(`${kind} value:`, "0");
+    if (raw === null) return;
+    const v = parseFloat(raw);
+    if (Number.isNaN(v)) { alert(`Invalid number: ${raw}`); return; }
+    body.value = v;
+  } else if (kind === "String") {
+    const raw = window.prompt("String value:", "");
+    if (raw === null) return;
+    body.value = raw;
+  } else if (kind === "Vector") {
+    const xs = window.prompt("Vector x:", "0");
+    if (xs === null) return;
+    const ys = window.prompt("Vector y:", "0");
+    if (ys === null) return;
+    const x = parseInt(xs, 10), y = parseInt(ys, 10);
+    if (Number.isNaN(x) || Number.isNaN(y)) {
+      alert(`Invalid coordinates: x=${xs}, y=${ys}`); return;
+    }
+    body.x = x; body.y = y;
+  }
+  // Null and SubProperty have no extra inputs.
+
+  try {
+    const r = await fetch("/api/add", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    const result = await r.json().catch(() => ({}));
+    if (!r.ok || result.ok === false) {
+      alert(`Add failed: ${result.reason || r.statusText}`);
+      return;
+    }
+    saveAsButton.dataset.dirty = String(result.dirty_count || 0);
+    updateSaveAsButton();
+    // Use the expand-aware helper: if the parent was previously a
+    // leaf (no children → no twisty, no childUl), refreshChildrenAt
+    // would no-op. ``refreshOrExpandAt`` flips the leaf bit, draws
+    // the twisty, and force-expands so the new child appears.
+    await refreshOrExpandAt(parentPath);
+  } catch (err) {
+    alert(`Add failed: ${err.message}`);
+  }
+}
+
 // Remove — confirm, POST, and refresh the parent's tree so the node
 // disappears immediately.
 async function runRemove(fullPath, labelPath) {
@@ -672,6 +767,38 @@ async function runRemove(fullPath, labelPath) {
   } catch (err) {
     alert(`Remove failed: ${err.message}`);
   }
+}
+
+// Like ``refreshChildrenAt`` but also handles the case where the
+// target was previously a leaf — its LI has no twisty and no
+// ``_childUl``, so refreshChildrenAt would no-op. Used after Add
+// so that a SubProperty created with no children (rendered as a
+// leaf at the time) becomes expandable as soon as a child lands.
+async function refreshOrExpandAt(fullPath) {
+  let li = null;
+  for (const el of treeRoot.getElementsByClassName("node")) {
+    const candidate = el.parentElement;
+    if (candidate && candidate._fullPath === fullPath) {
+      li = candidate;
+      break;
+    }
+  }
+  if (!li) return;
+  // Tear down any existing children so expandLi will re-fetch.
+  if (li._childUl) {
+    li._childUl.remove();
+    li._childUl = null;
+    li._loaded = false;
+  }
+  // Promote a previously-leaf LI: flip the meta flag and paint a
+  // twisty so the click affordance appears even before expansion.
+  if (li._meta && li._meta.leaf) {
+    li._meta.leaf = false;
+    if (li._twisty && !li._twisty.textContent.trim()) {
+      li._twisty.textContent = "▸";
+    }
+  }
+  await expandLi(li, fullPath);
 }
 
 // Re-fetch the children of whichever node currently lives at
