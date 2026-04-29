@@ -170,93 +170,140 @@ def _decode_pixels(data: bytes, width: int, height: int, fmt: int) -> Image.Imag
 # ── DXT (BC2/BC3) block decoders ─────────────────────────────────────
 # Each block covers a 4×4 pixel tile. Format reference: Microsoft BCn docs
 # and ``MapleLib/WzLib/WzProperties/WzPngProperty.cs``.
+#
+# Vectorized via NumPy. The pure-Python implementations were ~580 ms on
+# a 1368×720 DXT5 (~62k blocks × 16 inner-loop iterations); NumPy moves
+# everything into C-level array math so the same image decodes in
+# tens of milliseconds.
 
-def _decode_dxt_color_block(block: bytes) -> list:
-    """Decode a 4×4 DXT1 color block into 16 (r,g,b) tuples."""
-    c0 = block[0] | (block[1] << 8)
-    c1 = block[2] | (block[3] << 8)
+import numpy as np
+
+
+def _decode_dxt_color_palette(color_block: np.ndarray) -> np.ndarray:
+    """Given an ``(N, 8)`` array of color blocks, return ``(N, 4, 3)``
+    of uint8 RGB palette entries. Mirrors the BC2/BC3 4-color table
+    (which is unconditional, unlike DXT1 where ``c0 <= c1`` swaps to
+    a 3-color + 1-bit-alpha mode)."""
+    c0 = color_block[:, 0].astype(np.int32) | (color_block[:, 1].astype(np.int32) << 8)
+    c1 = color_block[:, 2].astype(np.int32) | (color_block[:, 3].astype(np.int32) << 8)
 
     def unpack(c):
         r = ((c >> 11) & 0x1F) * 255 // 31
         g = ((c >> 5) & 0x3F) * 255 // 63
         b = (c & 0x1F) * 255 // 31
-        return (r, g, b)
+        return r, g, b
 
-    palette = [unpack(c0), unpack(c1)]
-    # In BC2/BC3 (DXT3/DXT5), the 4-color form is always used regardless of c0/c1 ordering.
-    palette.append(tuple((2 * a + b + 1) // 3 for a, b in zip(palette[0], palette[1])))
-    palette.append(tuple((a + 2 * b + 1) // 3 for a, b in zip(palette[0], palette[1])))
+    r0, g0, b0 = unpack(c0)
+    r1, g1, b1 = unpack(c1)
+    n = color_block.shape[0]
+    pal = np.empty((n, 4, 3), dtype=np.uint8)
+    pal[:, 0, 0] = r0; pal[:, 0, 1] = g0; pal[:, 0, 2] = b0
+    pal[:, 1, 0] = r1; pal[:, 1, 1] = g1; pal[:, 1, 2] = b1
+    pal[:, 2, 0] = (2 * r0 + r1 + 1) // 3
+    pal[:, 2, 1] = (2 * g0 + g1 + 1) // 3
+    pal[:, 2, 2] = (2 * b0 + b1 + 1) // 3
+    pal[:, 3, 0] = (r0 + 2 * r1 + 1) // 3
+    pal[:, 3, 1] = (g0 + 2 * g1 + 1) // 3
+    pal[:, 3, 2] = (b0 + 2 * b1 + 1) // 3
+    return pal
 
-    bits = block[4] | (block[5] << 8) | (block[6] << 16) | (block[7] << 24)
-    return [palette[(bits >> (2 * i)) & 0x3] for i in range(16)]
+
+def _dxt_color_pixels(color_block: np.ndarray) -> np.ndarray:
+    """``(N, 8)`` color blocks → ``(N, 16, 3)`` RGB pixels."""
+    pal = _decode_dxt_color_palette(color_block)  # (N, 4, 3)
+    bits = (
+        color_block[:, 4].astype(np.uint32)
+        | (color_block[:, 5].astype(np.uint32) << 8)
+        | (color_block[:, 6].astype(np.uint32) << 16)
+        | (color_block[:, 7].astype(np.uint32) << 24)
+    )
+    # 16 indices, 2 bits each, ordered (py, px) inside the 4×4 tile.
+    shifts = (np.arange(16, dtype=np.uint32) * 2)
+    indices = ((bits[:, None] >> shifts[None, :]) & 0x3).astype(np.intp)  # (N, 16)
+    n = color_block.shape[0]
+    rows = np.arange(n)[:, None]
+    return pal[rows, indices]  # (N, 16, 3)
+
+
+def _blocks_to_image(rgba_blocks: np.ndarray, width: int, height: int) -> Image.Image:
+    """Reshape ``(N, 16, 4)`` block-major RGBA pixels back into a
+    ``(height, width, 4)`` image, cropping to (width, height)."""
+    bh = (height + 3) // 4
+    bw = (width + 3) // 4
+    grid = rgba_blocks.reshape(bh, bw, 4, 4, 4)              # (bh, bw, py, px, ch)
+    img = grid.transpose(0, 2, 1, 3, 4).reshape(bh * 4, bw * 4, 4)
+    img = img[:height, :width]
+    return Image.frombytes("RGBA", (width, height), img.tobytes())
 
 
 def _decode_dxt3(data: bytes, width: int, height: int) -> Image.Image:
     bw = (width + 3) // 4
     bh = (height + 3) // 4
-    out = bytearray(width * height * 4)
-    pos = 0
-    for by in range(bh):
-        for bx in range(bw):
-            alpha_block = data[pos:pos + 8]
-            color_block = data[pos + 8:pos + 16]
-            pos += 16
-            colors = _decode_dxt_color_block(color_block)
-            for py in range(4):
-                row = alpha_block[py * 2] | (alpha_block[py * 2 + 1] << 8)
-                for px in range(4):
-                    x = bx * 4 + px
-                    y = by * 4 + py
-                    if x >= width or y >= height:
-                        continue
-                    a4 = (row >> (4 * px)) & 0xF
-                    a = (a4 << 4) | a4  # expand 4-bit alpha to 8-bit
-                    r, g, b = colors[py * 4 + px]
-                    o = (y * width + x) * 4
-                    out[o:o + 4] = bytes([r, g, b, a])
-    return Image.frombytes("RGBA", (width, height), bytes(out))
+    n = bh * bw
+    blocks = np.frombuffer(data, dtype=np.uint8, count=n * 16).reshape(n, 16)
+
+    # Color (8 bytes) → 16 RGB pixels per block
+    rgb = _dxt_color_pixels(blocks[:, 8:16])  # (N, 16, 3)
+
+    # Alpha (8 bytes) — 4 bits per pixel, low nibble of byte 2*py is the
+    # left-most pixel of row py.
+    alpha_bytes = blocks[:, 0:8]                                # (N, 8)
+    # Each pair of bytes encodes a row of 4 pixels: bits low→high.
+    rows = alpha_bytes.astype(np.uint16).reshape(n, 4, 2)
+    row_packed = rows[..., 0] | (rows[..., 1] << 8)             # (N, 4)
+    px_shifts = (np.arange(4, dtype=np.uint16) * 4)
+    alpha4 = (row_packed[..., None] >> px_shifts[None, None, :]) & 0xF   # (N, 4, 4)
+    alpha = ((alpha4 << 4) | alpha4).astype(np.uint8).reshape(n, 16)
+
+    rgba = np.empty((n, 16, 4), dtype=np.uint8)
+    rgba[..., :3] = rgb
+    rgba[..., 3] = alpha
+    return _blocks_to_image(rgba, width, height)
 
 
 def _decode_dxt5(data: bytes, width: int, height: int) -> Image.Image:
     bw = (width + 3) // 4
     bh = (height + 3) // 4
-    out = bytearray(width * height * 4)
-    pos = 0
-    for by in range(bh):
-        for bx in range(bw):
-            a0 = data[pos]
-            a1 = data[pos + 1]
-            alpha_palette = [a0, a1]
-            if a0 > a1:
-                for i in range(1, 7):
-                    alpha_palette.append(((7 - i) * a0 + i * a1 + 3) // 7)
-            else:
-                for i in range(1, 5):
-                    alpha_palette.append(((5 - i) * a0 + i * a1 + 2) // 5)
-                alpha_palette.append(0)
-                alpha_palette.append(255)
+    n = bh * bw
+    blocks = np.frombuffer(data, dtype=np.uint8, count=n * 16).reshape(n, 16)
 
-            # 48-bit alpha index field
-            ai = 0
-            for k in range(6):
-                ai |= data[pos + 2 + k] << (8 * k)
+    a0 = blocks[:, 0].astype(np.int32)
+    a1 = blocks[:, 1].astype(np.int32)
 
-            color_block = data[pos + 8:pos + 16]
-            pos += 16
-            colors = _decode_dxt_color_block(color_block)
+    # Build the 8-entry alpha palette per block. The "8-color" mode
+    # (a0 > a1) interpolates 6 intermediate values; the "6-color" mode
+    # interpolates 4 + plus 0 and 255 sentinels.
+    alpha_pal = np.empty((n, 8), dtype=np.int32)
+    alpha_pal[:, 0] = a0
+    alpha_pal[:, 1] = a1
+    mask8 = a0 > a1                                              # (N,)
+    for i in range(1, 7):
+        alpha_pal[:, 1 + i] = np.where(
+            mask8,
+            ((7 - i) * a0 + i * a1 + 3) // 7,
+            alpha_pal[:, 1 + i],     # ignored on this branch — overwritten below
+        )
+    for i in range(1, 5):
+        v = ((5 - i) * a0 + i * a1 + 2) // 5
+        alpha_pal[~mask8, 1 + i] = v[~mask8]
+    alpha_pal[~mask8, 6] = 0
+    alpha_pal[~mask8, 7] = 255
+    alpha_pal_u8 = alpha_pal.astype(np.uint8)
 
-            for py in range(4):
-                for px in range(4):
-                    x = bx * 4 + px
-                    y = by * 4 + py
-                    if x >= width or y >= height:
-                        continue
-                    idx = py * 4 + px
-                    a = alpha_palette[(ai >> (3 * idx)) & 0x7]
-                    r, g, b = colors[idx]
-                    o = (y * width + x) * 4
-                    out[o:o + 4] = bytes([r, g, b, a])
-    return Image.frombytes("RGBA", (width, height), bytes(out))
+    # 48-bit alpha index field as one uint64 per block.
+    ai = np.zeros(n, dtype=np.uint64)
+    for k in range(6):
+        ai |= blocks[:, 2 + k].astype(np.uint64) << (np.uint64(8 * k))
+    px_shifts = (np.arange(16, dtype=np.uint64) * np.uint64(3))
+    alpha_idx = ((ai[:, None] >> px_shifts[None, :]) & np.uint64(0x7)).astype(np.intp)
+    alpha = np.take_along_axis(alpha_pal_u8, alpha_idx, axis=1)  # (N, 16)
+
+    rgb = _dxt_color_pixels(blocks[:, 8:16])
+
+    rgba = np.empty((n, 16, 4), dtype=np.uint8)
+    rgba[..., :3] = rgb
+    rgba[..., 3] = alpha
+    return _blocks_to_image(rgba, width, height)
 
 
 def decode_canvas(canvas: "WzCanvasProperty", region: str = "GMS") -> Image.Image:

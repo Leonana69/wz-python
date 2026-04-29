@@ -650,6 +650,19 @@ function showDetail(path, child) {
     audio.src = `/api/sound/${encodeURI(path)}`;
     detailEl.appendChild(audio);
   }
+  // Animation hint: when a SubProperty's children include numbered
+  // Canvases (the WZ pattern for animation frames), offer a Play
+  // button. Detection happens after the tree fetch via
+  // ``maybeOfferAnimation`` — at this point we don't yet know the
+  // grandchildren's kinds. The placeholder gets replaced once the
+  // grandchildren are listed.
+  if (child.kind === "SubProperty" || child.kind === "Property") {
+    const slot = document.createElement("div");
+    slot.className = "animation-slot";
+    slot.dataset.path = path;
+    detailEl.appendChild(slot);
+    maybeOfferAnimation(path, slot);
+  }
 }
 
 // ── zoomable canvas viewer ───────────────────────────────────────────
@@ -761,7 +774,37 @@ function makeCanvasViewer(path, meta) {
   const layer = document.createElement("div");
   layer.className = "viewer-layer";
   const img = document.createElement("img");
-  img.src = `/api/canvas/${encodeURI(path)}.png`;
+  // Time the load so we can see (in the browser console) when an image
+  // takes a long time end-to-end. The server's Server-Timing header
+  // shows the per-phase split — read here via the Resource Timing API.
+  const url = `/api/canvas/${encodeURI(path)}.png`;
+  const tFetchStart = performance.now();
+  img.addEventListener("load", () => {
+    const total = performance.now() - tFetchStart;
+    if (total < 100) return;          // ignore fast loads to keep noise down
+    // Pull server timings + sizes from the Resource Timing entry (only
+    // populated for cross-origin requests if Timing-Allow-Origin is set,
+    // but same-origin always works).
+    let st = null;
+    for (const e of performance.getEntriesByType("resource")) {
+      if (e.name.endsWith(url) || e.name.endsWith(url + "?t=" + tFetchStart.toString())) {
+        st = e; break;
+      }
+    }
+    const transfer = st ? `${(st.transferSize || 0) | 0}b` : "?";
+    console.log(
+      `[canvas ${total.toFixed(0)}ms] ${path}  transfer=${transfer}` +
+      (st && st.serverTiming ?
+        ("  server={" +
+         st.serverTiming.map((t) => `${t.name}=${t.duration.toFixed(0)}`).join(" ") +
+         "}") : ""),
+    );
+  });
+  img.addEventListener("error", () => {
+    const total = performance.now() - tFetchStart;
+    console.warn(`[canvas LOAD-FAIL ${total.toFixed(0)}ms] ${path}`);
+  });
+  img.src = url;
   img.alt = meta.name;
   img.draggable = false;
   layer.appendChild(img);
@@ -1164,6 +1207,324 @@ function createProgressModal(labelText) {
       cancelBtn.style.display = "none";
       closeBtn.style.display = "";
       barInner.classList.add("error");
+    },
+  };
+}
+
+// ── animation player ─────────────────────────────────────────────────
+// WZ stores animations as a SubProperty whose children are numbered
+// Canvases (0, 1, 2, ...). Each frame typically has a ``delay`` Int
+// (ms) and an ``origin`` Vector (anchor) as siblings of the bitmap.
+// /api/animation/<path> rolls all that into one response so the player
+// only needs a single round-trip to start playing.
+
+async function maybeOfferAnimation(path, slot) {
+  let data;
+  try {
+    const r = await fetch(`/api/animation/${encodeURI(path)}`);
+    if (!r.ok) return;          // 404 = not an animation; nothing to do
+    data = await r.json();
+  } catch {
+    return;
+  }
+  if (!data.frames || data.frames.length < 2) return;
+
+  // The slot may have been replaced if the user clicked a different
+  // node by now; bail if our placeholder isn't on the page anymore.
+  if (!slot.isConnected) return;
+
+  const wrap = document.createElement("div");
+  wrap.className = "animation-offer";
+  const summary = document.createElement("div");
+  summary.className = "animation-summary";
+  const totalMs = data.frames.reduce((s, f) => s + f.delay_ms, 0);
+  summary.textContent =
+    `Animation: ${data.frames.length} frames, total ${totalMs} ms`;
+  wrap.appendChild(summary);
+
+  const playBtn = document.createElement("button");
+  playBtn.className = "animation-play-btn";
+  playBtn.textContent = "▶ Play animation";
+  wrap.appendChild(playBtn);
+
+  let player = null;
+  playBtn.addEventListener("click", () => {
+    if (player) {
+      player.toggleVisible();
+      return;
+    }
+    player = makeAnimationPlayer(data);
+    wrap.appendChild(player.root);
+    playBtn.style.display = "none";
+  });
+
+  slot.replaceChildren(wrap);
+}
+
+function makeAnimationPlayer(data) {
+  const frames = data.frames;
+  const root = document.createElement("div");
+  root.className = "animation-player";
+
+  // ── viewport sizing ──
+  // To align by origin, we need a viewport whose origin point sits at
+  // a fixed pixel position. Compute the bounding box across all frames
+  // when each frame is positioned with its origin on (0, 0). The
+  // result tells us how far left/up/right/down any pixel might extend.
+  let minX = 0, minY = 0, maxX = 0, maxY = 0;
+  for (const f of frames) {
+    const ox = f.origin?.x || 0;
+    const oy = f.origin?.y || 0;
+    minX = Math.min(minX, -ox);
+    minY = Math.min(minY, -oy);
+    maxX = Math.max(maxX, f.width - ox);
+    maxY = Math.max(maxY, f.height - oy);
+  }
+  const vpW = Math.max(1, maxX - minX);
+  const vpH = Math.max(1, maxY - minY);
+  // Position of origin (0, 0) in viewport coordinates:
+  const originVpX = -minX;
+  const originVpY = -minY;
+
+  // ── DOM ──
+  const toolbar = document.createElement("div");
+  toolbar.className = "animation-toolbar";
+  const btn = (label, title, fn) => {
+    const b = document.createElement("button");
+    b.className = "animation-btn";
+    b.textContent = label; b.title = title;
+    b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
+    return b;
+  };
+
+  const playPauseBtn = btn("⏸", "Pause/play (space)", () => {
+    state.playing = !state.playing;
+    playPauseBtn.textContent = state.playing ? "⏸" : "▶";
+    if (state.playing) tick();
+  });
+  toolbar.appendChild(playPauseBtn);
+  toolbar.appendChild(btn("⏮", "First frame", () => seek(0)));
+  toolbar.appendChild(btn("⏭", "Last frame",
+    () => seek(frames.length - 1)));
+
+  const speedSel = document.createElement("select");
+  speedSel.className = "animation-speed";
+  speedSel.title = "Playback speed";
+  for (const v of [0.25, 0.5, 1, 2, 4]) {
+    const o = document.createElement("option");
+    o.value = String(v); o.textContent = v + "×";
+    if (v === 1) o.selected = true;
+    speedSel.appendChild(o);
+  }
+  speedSel.addEventListener("change", () => {
+    state.speed = Number(speedSel.value);
+  });
+  toolbar.appendChild(speedSel);
+
+  const loopLabel = document.createElement("label");
+  loopLabel.className = "animation-toggle";
+  const loopCb = document.createElement("input");
+  loopCb.type = "checkbox"; loopCb.checked = true;
+  loopCb.addEventListener("change", () => { state.loop = loopCb.checked; });
+  loopLabel.appendChild(loopCb);
+  loopLabel.appendChild(document.createTextNode(" loop"));
+  toolbar.appendChild(loopLabel);
+
+  const alignLabel = document.createElement("label");
+  alignLabel.className = "animation-toggle";
+  const alignCb = document.createElement("input");
+  alignCb.type = "checkbox"; alignCb.checked = true;
+  alignCb.title = "Align frames by their origin point so the character anchor stays fixed";
+  alignCb.addEventListener("change", () => {
+    state.alignOrigin = alignCb.checked;
+    placeFrame(state.idx);
+  });
+  alignLabel.appendChild(alignCb);
+  alignLabel.appendChild(document.createTextNode(" align origin"));
+  toolbar.appendChild(alignLabel);
+
+  // Fit / 1:1 toggle. Big monsters easily blow past 600 px wide and
+  // need scaling to fit the right-hand panel; small sprites should
+  // display at native size.
+  const fitBtn = btn("Fit", "Fit / 1:1 (toggle)", () => {
+    state.fitMode = !state.fitMode;
+    fitBtn.textContent = state.fitMode ? "Fit" : "1:1";
+    fitBtn.title = state.fitMode ? "Currently fit; click for 1:1" :
+                                    "Currently 1:1; click for fit";
+    applyScale();
+  });
+  toolbar.appendChild(fitBtn);
+
+  const counter = document.createElement("span");
+  counter.className = "animation-counter";
+  toolbar.appendChild(counter);
+
+  root.appendChild(toolbar);
+
+  // Stage scroller wraps the scaled stage so a too-large 1:1 view
+  // can scroll horizontally / vertically without breaking the rest of
+  // the panel layout.
+  const scroller = document.createElement("div");
+  scroller.className = "animation-stage-scroller";
+  root.appendChild(scroller);
+
+  // Stage holds the viewport at its scaled (rendered) dimensions so
+  // surrounding flow reserves the right amount of space.
+  const stage = document.createElement("div");
+  stage.className = "animation-stage";
+  scroller.appendChild(stage);
+
+  // Viewport is the unscaled coordinate space — width/height match
+  // the bounding box of the (origin-aligned) frames. We apply a CSS
+  // scale to it to fit the available width.
+  const viewport = document.createElement("div");
+  viewport.className = "animation-viewport";
+  viewport.style.width = vpW + "px";
+  viewport.style.height = vpH + "px";
+  viewport.style.transformOrigin = "top left";
+  stage.appendChild(viewport);
+
+  // Preload all frame images and stack them — only the active one is
+  // displayed at a time. This avoids a flash on swap.
+  const imgs = frames.map((f, i) => {
+    const im = document.createElement("img");
+    im.className = "animation-frame";
+    im.src = f.url;
+    im.alt = "frame " + i;
+    im.draggable = false;
+    im.style.display = "none";
+    viewport.appendChild(im);
+    return im;
+  });
+
+  // Scrubber
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = "0";
+  slider.max = String(frames.length - 1);
+  slider.value = "0";
+  slider.className = "animation-scrubber";
+  slider.addEventListener("input", () => {
+    state.playing = false;
+    playPauseBtn.textContent = "▶";
+    seek(Number(slider.value));
+  });
+  root.appendChild(slider);
+
+  const state = {
+    idx: 0,
+    playing: true,
+    speed: 1,
+    loop: true,
+    alignOrigin: true,
+    fitMode: true,        // start fit-to-container; user can flip to 1:1
+    timer: null,
+    visible: true,
+  };
+
+  function applyScale() {
+    if (!state.fitMode) {
+      // 1:1 — let the scroller decide whether scrollbars are needed.
+      viewport.style.transform = "none";
+      stage.style.width = vpW + "px";
+      stage.style.height = vpH + "px";
+      return;
+    }
+    // Fit: never scale UP automatically (small sprites stay crisp);
+    // scale DOWN if necessary so the stage fits the scroller's width.
+    // Use the scroller's current clientWidth — that respects the
+    // detail panel's own padding/sidebar.
+    const availW = scroller.clientWidth || 720;
+    // Cap the height so a tall animation doesn't push controls off
+    // screen on short windows.
+    const availH = Math.max(160, Math.min(window.innerHeight * 0.55, 800));
+    const s = Math.min(availW / vpW, availH / vpH, 1);
+    viewport.style.transform = `scale(${s})`;
+    stage.style.width = (vpW * s) + "px";
+    stage.style.height = (vpH * s) + "px";
+  }
+
+  function placeFrame(i) {
+    const f = frames[i];
+    const im = imgs[i];
+    const ox = state.alignOrigin ? (f.origin?.x || 0) : 0;
+    const oy = state.alignOrigin ? (f.origin?.y || 0) : 0;
+    im.style.left = (originVpX - ox) + "px";
+    im.style.top = (originVpY - oy) + "px";
+  }
+
+  function showFrame(i) {
+    placeFrame(i);
+    for (let j = 0; j < imgs.length; j++) {
+      imgs[j].style.display = j === i ? "block" : "none";
+    }
+    counter.textContent =
+      `${i + 1} / ${frames.length}  (${frames[i].delay_ms} ms)`;
+    slider.value = String(i);
+  }
+
+  function seek(i) {
+    state.idx = ((i % frames.length) + frames.length) % frames.length;
+    showFrame(state.idx);
+  }
+
+  function tick() {
+    if (state.timer) { clearTimeout(state.timer); state.timer = null; }
+    if (!state.playing || !state.visible) return;
+    const wait = frames[state.idx].delay_ms / Math.max(0.05, state.speed);
+    state.timer = setTimeout(() => {
+      const next = state.idx + 1;
+      if (next >= frames.length) {
+        if (!state.loop) {
+          state.playing = false;
+          playPauseBtn.textContent = "▶";
+          return;
+        }
+        state.idx = 0;
+      } else {
+        state.idx = next;
+      }
+      showFrame(state.idx);
+      tick();
+    }, wait);
+  }
+
+  // Pause when the viewport is no longer onscreen (e.g. user clicked
+  // a different node) so we stop chewing CPU on a hidden animation.
+  const observer = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      state.visible = e.isIntersecting;
+      if (state.visible && state.playing) tick();
+      else if (state.timer) { clearTimeout(state.timer); state.timer = null; }
+    }
+  });
+  observer.observe(viewport);
+
+  // Re-fit when the viewport's available width changes — e.g. user
+  // resizes the tree-panel divider or the window. Falls back to the
+  // global resize event for older browsers without ResizeObserver.
+  let resizeObs = null;
+  if (typeof ResizeObserver !== "undefined") {
+    resizeObs = new ResizeObserver(() => applyScale());
+    resizeObs.observe(scroller);
+  } else {
+    window.addEventListener("resize", applyScale);
+  }
+
+  // Initial layout — defer one frame so the scroller has a real
+  // ``clientWidth``. Without this, scroller.clientWidth is 0 because
+  // the player isn't in the DOM yet when ``makeAnimationPlayer``
+  // returns.
+  requestAnimationFrame(applyScale);
+  showFrame(0);
+  tick();
+
+  return {
+    root,
+    toggleVisible() {
+      root.style.display = root.style.display === "none" ? "" : "none";
+      // Re-fit on show in case the panel size changed while hidden.
+      if (root.style.display !== "none") applyScale();
     },
   };
 }

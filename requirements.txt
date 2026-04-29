@@ -1,3 +1,4 @@
 flask>=3.0
+numpy>=1.24
 pillow>=10.0
 pycryptodome>=3.20

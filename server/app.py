@@ -481,16 +481,46 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
 
     @app.route("/api/canvas/<path:subpath>.png")
     def api_canvas(subpath: str) -> Response:
+        # Break ``decode_canvas`` into its three measurable phases
+        # (raw read → decompress → pixel-decode → PNG encode) so the
+        # log line tells us which one is the bottleneck. Heavy hitters
+        # are usually pixel-decode for the pure-Python paths
+        # (ARGB4444, ARGB1555, RGB565, downsampled 3/517, DXT3/DXT5),
+        # and PNG encode for very large bitmaps.
+        from wzpy.canvas import (
+            _decompress, _decode_pixels, _read_canvas_bytes,
+        )
+        from wzpy.crypto import WzKey
+
+        t_total = time.perf_counter()
         node, remaining = _resolve(unquote(subpath))
         if not isinstance(node, WzImage) or not remaining:
             abort(404)
         prop = node.get(remaining)
         if not isinstance(prop, WzCanvasProperty) or not prop.has_pixels():
             abort(404)
+
+        region = app.config["WZ_REGION"]
+        key = WzKey.for_region(region)
+        fmt = prop.format + prop.format2
+
+        t_read = t_decompress = t_decode = t_encode = 0.0
+        raw_bytes = decompressed_bytes = png_bytes = 0
         try:
-            img = decode_canvas(prop, region=app.config["WZ_REGION"])
+            t0 = time.perf_counter()
+            raw = _read_canvas_bytes(prop)
+            raw_bytes = len(raw)
+            t_read = time.perf_counter() - t0
+
+            t0 = time.perf_counter()
+            decompressed = _decompress(prop, key)
+            decompressed_bytes = len(decompressed)
+            t_decompress = time.perf_counter() - t0
+
+            t0 = time.perf_counter()
+            img = _decode_pixels(decompressed, prop.width, prop.height, fmt)
+            t_decode = time.perf_counter() - t0
         except Exception as exc:
-            from wzpy.canvas import _read_canvas_bytes
             try:
                 raw = _read_canvas_bytes(prop)
             except Exception:
@@ -518,10 +548,48 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
                 draw.text((6, 6 + 14 * i), line, fill=color)
             buf = io.BytesIO()
             placeholder.save(buf, format="PNG")
+            elapsed_ms = (time.perf_counter() - t_total) * 1000
+            print(
+                f"  [canvas {elapsed_ms:6.1f} ms FAILED] "
+                f"{prop.width}x{prop.height} fmt={fmt}  raw={raw_bytes}b  "
+                f"reason={exc}  /{subpath}",
+                flush=True,
+            )
             return Response(buf.getvalue(), mimetype="image/png", status=200)
+
+        t0 = time.perf_counter()
         buf = io.BytesIO()
         img.save(buf, format="PNG")
-        return Response(buf.getvalue(), mimetype="image/png")
+        png_bytes = buf.tell()
+        t_encode = time.perf_counter() - t0
+
+        elapsed_ms = (time.perf_counter() - t_total) * 1000
+        # Always log canvases that take meaningful time so the user can
+        # see when something is heavy without grepping every request.
+        if elapsed_ms > 30 or png_bytes > 200_000:
+            print(
+                f"  [canvas {elapsed_ms:6.1f} ms] "
+                f"{prop.width}x{prop.height} fmt={fmt}  "
+                f"raw={raw_bytes}b decomp={decompressed_bytes}b png={png_bytes}b  "
+                f"read={t_read*1000:.1f} decompress={t_decompress*1000:.1f} "
+                f"decode={t_decode*1000:.1f} encode={t_encode*1000:.1f}  "
+                f"/{subpath}",
+                flush=True,
+            )
+        resp = Response(buf.getvalue(), mimetype="image/png")
+        # Server-Timing is what Chrome's Network panel surfaces in the
+        # "Timing" tab — neat per-request breakdown without console
+        # spam for fast cases.
+        resp.headers["Server-Timing"] = ", ".join([
+            f"read;dur={t_read*1000:.1f}",
+            f"decompress;dur={t_decompress*1000:.1f}",
+            f"decode;dur={t_decode*1000:.1f}",
+            f"encode;dur={t_encode*1000:.1f}",
+            f"total;dur={elapsed_ms:.1f}",
+        ])
+        resp.headers["X-Canvas-Format"] = str(fmt)
+        resp.headers["X-Canvas-Size"] = f"{prop.width}x{prop.height}"
+        return resp
 
     @app.route("/api/sound/<path:subpath>")
     def api_sound(subpath: str) -> Response:
@@ -537,6 +605,67 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         data = r.read(prop._data_length)
         r.seek(keep)
         return Response(data, mimetype="audio/mpeg")
+
+    @app.route("/api/animation/<path:subpath>")
+    def api_animation(subpath: str) -> Response:
+        """Gather animation frames for a SubProperty whose children are
+        numbered Canvases (0, 1, 2, ...). Each WZ frame typically has
+        a ``delay`` Int (ms) and an ``origin`` Vector (anchor point)
+        as siblings of the bitmap; we fold those in so the client can
+        play the sequence at the right cadence and align frames to a
+        common anchor.
+
+        Response: ``{path, frame_count, frames: [{index, name, url,
+        width, height, delay_ms, origin: {x, y}}]}``. ``404`` if the
+        target isn't a SubProperty with at least one numeric-named
+        Canvas child.
+        """
+        from wzpy.properties import (
+            WzCanvasProperty, WzIntProperty, WzShortProperty,
+            WzSubProperty, WzVectorProperty,
+        )
+        from urllib.parse import quote as _quote
+
+        target = _resolve_target(subpath)
+        if not isinstance(target, WzSubProperty):
+            abort(404, "target is not a SubProperty")
+
+        frames: List[Dict[str, Any]] = []
+        for child in target.children():
+            try:
+                idx = int(child.name)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(child, WzCanvasProperty) or not child.has_pixels():
+                continue
+            delay_ms = 100  # MapleStory's typical default when no delay is set
+            origin = {"x": 0, "y": 0}
+            for sub in child.children():
+                if sub.name == "delay" and isinstance(sub, (WzIntProperty, WzShortProperty)):
+                    try:
+                        delay_ms = int(sub.value)
+                    except Exception:
+                        pass
+                elif sub.name == "origin" and isinstance(sub, WzVectorProperty):
+                    origin = {"x": int(sub.x), "y": int(sub.y)}
+            frames.append({
+                "index": idx,
+                "name": child.name,
+                "url": f"/api/canvas/{_quote(subpath, safe='/')}/{_quote(child.name)}.png",
+                "width": child.width,
+                "height": child.height,
+                "delay_ms": max(1, delay_ms),
+                "origin": origin,
+            })
+
+        if not frames:
+            abort(404, "no numeric-named Canvas children")
+        frames.sort(key=lambda f: f["index"])
+        return jsonify({
+            "path": subpath,
+            "frame_count": len(frames),
+            "frames": frames,
+        })
 
     # ── export endpoints ─────────────────────────────────────────────
     def _resolve_target(subpath: str):
