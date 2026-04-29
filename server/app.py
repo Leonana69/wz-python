@@ -1081,8 +1081,12 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
     #
     # We track which paths have unsaved-on-disk edits in
     # ``app.config["WZ_DIRTY_PATHS"]`` so the UI can warn before
-    # navigation.
+    # navigation. ``WZ_FORCE_FULL_REWRITE`` is set when an edit changes
+    # the tree's structure (rename, etc.) — every image needs to be
+    # re-emitted because directory entries / property names shift, so
+    # the per-image verbatim-copy fast path can't be trusted.
     app.config["WZ_DIRTY_PATHS"] = set()
+    app.config["WZ_FORCE_FULL_REWRITE"] = False
 
     @app.route("/api/edit", methods=["POST"])
     def api_edit() -> Response:
@@ -1212,6 +1216,202 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             "dirty_count": len(app.config["WZ_DIRTY_PATHS"]),
         })
 
+    @app.route("/api/rename", methods=["POST"])
+    def api_rename() -> Response:
+        """Rename a node (property, image, or sub-directory).
+
+        Body: ``{path: "...", new_name: "..."}``. The change is staged
+        in memory only; the next ``/api/save_as`` flushes it. (A WZ
+        rename almost always shifts byte offsets — both the name's own
+        bytes inside the directory entry / string-block AND every
+        downstream encrypted-offset in the parent directory — so an
+        in-place patch is rarely possible.)
+
+        Returns ``{ok, old_path, new_path, kind, dirty_count}``.
+        """
+        from wzpy.properties import WzSubProperty
+        from wzpy.wz_image import WzImage as _WzImage
+        from wzpy.wz_file import WzDirectory as _WzDirectory
+
+        def _err(status: int, reason: str) -> Response:
+            r = jsonify({"ok": False, "reason": reason})
+            r.status_code = status
+            return r
+
+        body = request.get_json(silent=True) or {}
+        path = (body.get("path") or "").strip("/")
+        new_name = body.get("new_name")
+        if not path:
+            return _err(400, "cannot rename the WZ root")
+        if not isinstance(new_name, str) or not new_name:
+            return _err(400, "new_name is required and must be a non-empty string")
+        if "/" in new_name or "\\" in new_name:
+            return _err(400, "new_name must not contain path separators")
+
+        from werkzeug.exceptions import HTTPException as _HTTPException
+        with app.config["WZ_READER_LOCK"]:
+            try:
+                target = _resolve_target(path)
+            except _HTTPException as exc:
+                return _err(exc.code or 404, exc.description or "not found")
+            if target is wz.root:
+                return _err(400, "cannot rename the WZ root")
+            old_name = getattr(target, "name", None)
+            if old_name is None:
+                return _err(400, f"target has no name to rename")
+            if old_name == new_name:
+                return jsonify({
+                    "ok": True, "no_op": True,
+                    "old_path": path, "new_path": path,
+                })
+
+            parent = getattr(target, "parent", None)
+            if parent is None:
+                return _err(400, "target has no parent (cannot reseat in dict)")
+
+            # Collision check + dict reseat. The parent stores children
+            # by name in one of three dicts depending on its kind.
+            if isinstance(parent, _WzDirectory):
+                if isinstance(target, _WzDirectory):
+                    bucket = parent.subdirs
+                    kind = "directory"
+                elif isinstance(target, _WzImage):
+                    bucket = parent.images
+                    kind = "image"
+                else:
+                    return _err(400,
+                        "child of a directory must be either a sub-directory or an image")
+            elif isinstance(parent, WzSubProperty):
+                bucket = parent._children
+                kind = "property"
+            else:
+                return _err(400, f"unsupported parent type: {type(parent).__name__}")
+
+            if new_name in bucket and bucket[new_name] is not target:
+                return _err(409, f"{new_name!r} already exists under the same parent")
+
+            # Reseat: remove old key, insert new key. We keep the
+            # rest of the dict order untouched by rebuilding (Python
+            # 3.7+ dicts preserve insertion order, so this matters
+            # for the directory listing the user sees).
+            new_bucket = {}
+            for k, v in bucket.items():
+                if k == old_name:
+                    new_bucket[new_name] = target
+                else:
+                    new_bucket[k] = v
+            if isinstance(parent, _WzDirectory):
+                if kind == "directory":
+                    parent.subdirs = new_bucket
+                else:
+                    parent.images = new_bucket
+            else:
+                parent._children = new_bucket
+            target.name = new_name
+
+            # Compute new path. Rename is structural — it shifts every
+            # downstream encrypted offset — so we must abandon the per-
+            # image verbatim-copy fast path on the next save_as.
+            parts = path.split("/")
+            parts[-1] = new_name
+            new_path = "/".join(parts)
+            app.config["WZ_FORCE_FULL_REWRITE"] = True
+            app.config["WZ_DIRTY_PATHS"].add(new_path)
+
+        return jsonify({
+            "ok": True,
+            "old_path": path,
+            "new_path": new_path,
+            "kind": kind,
+            "dirty_count": len(app.config["WZ_DIRTY_PATHS"]),
+        })
+
+    @app.route("/api/remove", methods=["POST"])
+    def api_remove() -> Response:
+        """Remove a node (property, image, or sub-directory) from the
+        in-memory tree. Body: ``{path: "..."}``.
+
+        Like ``/api/rename``, the change is staged in memory and the
+        next ``/api/save_as`` materializes it. Removing a node shifts
+        every downstream encrypted offset, so we set
+        ``WZ_FORCE_FULL_REWRITE`` to make save_as re-emit every image
+        from the parsed tree (no verbatim-copy fast path).
+
+        Returns ``{ok, removed_path, parent_path, kind, dirty_count}``.
+        """
+        from wzpy.properties import WzSubProperty
+        from wzpy.wz_image import WzImage as _WzImage
+        from wzpy.wz_file import WzDirectory as _WzDirectory
+
+        def _err(status: int, reason: str) -> Response:
+            r = jsonify({"ok": False, "reason": reason})
+            r.status_code = status
+            return r
+
+        body = request.get_json(silent=True) or {}
+        path = (body.get("path") or "").strip("/")
+        if not path:
+            return _err(400, "cannot remove the WZ root")
+
+        from werkzeug.exceptions import HTTPException as _HTTPException
+        with app.config["WZ_READER_LOCK"]:
+            try:
+                target = _resolve_target(path)
+            except _HTTPException as exc:
+                return _err(exc.code or 404, exc.description or "not found")
+            if target is wz.root:
+                return _err(400, "cannot remove the WZ root")
+            old_name = getattr(target, "name", None)
+            if old_name is None:
+                return _err(400, "target has no name")
+
+            parent = getattr(target, "parent", None)
+            if parent is None:
+                return _err(400, "target has no parent")
+
+            if isinstance(parent, _WzDirectory):
+                if isinstance(target, _WzDirectory):
+                    bucket = parent.subdirs
+                    kind = "directory"
+                elif isinstance(target, _WzImage):
+                    bucket = parent.images
+                    kind = "image"
+                else:
+                    return _err(400,
+                        "child of a directory must be a sub-directory or an image")
+            elif isinstance(parent, WzSubProperty):
+                bucket = parent._children
+                kind = "property"
+            else:
+                return _err(400, f"unsupported parent type: {type(parent).__name__}")
+
+            if old_name not in bucket or bucket[old_name] is not target:
+                return _err(404,
+                    f"target {old_name!r} not found under its parent's child dict")
+
+            del bucket[old_name]
+
+            parent_path = "/".join(path.split("/")[:-1])
+            app.config["WZ_FORCE_FULL_REWRITE"] = True
+            # Drop any staged dirty paths under the removed subtree —
+            # they no longer exist. Then mark the parent as dirty so the
+            # Save As badge updates.
+            prefix = path + "/"
+            kept = {
+                p for p in app.config["WZ_DIRTY_PATHS"]
+                if p != path and not p.startswith(prefix)
+            }
+            kept.add(parent_path or "<root>")
+            app.config["WZ_DIRTY_PATHS"] = kept
+
+        return jsonify({
+            "ok": True,
+            "removed_path": path,
+            "parent_path": parent_path,
+            "kind": kind,
+            "dirty_count": len(app.config["WZ_DIRTY_PATHS"]),
+        })
+
     @app.route("/api/save_as", methods=["POST"])
     def api_save_as() -> Response:
         """Re-serialize the entire archive (including all in-memory
@@ -1239,11 +1439,18 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         with _SAVE_LOCK, app.config["WZ_READER_LOCK"]:
             try:
                 # Pass the dirty-path set so unedited images get the
-                # fast (and bug-resistant) verbatim-copy path.
+                # fast (and bug-resistant) verbatim-copy path —
+                # UNLESS something structural (a rename) requires the
+                # whole archive to be re-emitted from the parsed tree.
                 image_failures: List[str] = []
+                effective_dirty = (
+                    None  # forces full re-serialize in WzFile.save_as
+                    if app.config.get("WZ_FORCE_FULL_REWRITE")
+                    else app.config["WZ_DIRTY_PATHS"]
+                )
                 size = wz.save_as(
                     out_path,
-                    dirty_paths=app.config["WZ_DIRTY_PATHS"],
+                    dirty_paths=effective_dirty,
                     image_failures=image_failures,
                 )
             except Exception as exc:
@@ -1267,6 +1474,7 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
                 return resp
             cleared = len(app.config["WZ_DIRTY_PATHS"])
             app.config["WZ_DIRTY_PATHS"].clear()
+            app.config["WZ_FORCE_FULL_REWRITE"] = False
 
         return jsonify({
             "ok": True,

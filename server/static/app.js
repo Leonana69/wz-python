@@ -522,6 +522,22 @@ function showContextMenuFor(x, y, labelPath, fullPath, kind) {
   const k = (kind || "").toLowerCase();
   const isDir = k === "directory";
   const isImg = k === "image";
+
+  // Structural edits — only meaningful for nodes that have a parent
+  // (i.e. not the synthetic WZ-file root LI, whose fullPath is "").
+  if (fullPath) {
+    addItem("Rename…", () => runRename(fullPath));
+    const removeItem = document.createElement("div");
+    removeItem.className = "menu-item destructive";
+    removeItem.textContent = "Remove…";
+    removeItem.onclick = (e) => {
+      e.stopPropagation();
+      hideContextMenu();
+      runRemove(fullPath, labelPath);
+    };
+    contextMenuEl.appendChild(removeItem);
+    addSep();
+  }
   if (isDir) {
     addItem("Export data as JSON (one file per .img)",
       () => runJsonBundleExport(fullPath, labelPath));
@@ -578,6 +594,110 @@ document.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") hideContextMenu();
 });
 window.addEventListener("blur", hideContextMenu);
+
+// Rename — prompt for a new name, POST to /api/rename, then refresh
+// the affected branch of the tree so the new name appears.
+async function runRename(fullPath) {
+  const oldName = fullPath.split("/").pop();
+  const next = window.prompt(
+    `Rename "${oldName}" — staged in memory; flush via Save As.`,
+    oldName,
+  );
+  if (next === null) return;             // user cancelled
+  const trimmed = next.trim();
+  if (!trimmed || trimmed === oldName) return;
+
+  try {
+    const r = await fetch("/api/rename", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({path: fullPath, new_name: trimmed}),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || body.ok === false) {
+      alert(`Rename failed: ${body.reason || r.statusText}`);
+      return;
+    }
+    // Bump the Save As dirty badge so the user sees that a flush is
+    // pending. /api/dirty would also work but we already have the
+    // count in the response.
+    saveAsButton.dataset.dirty = String(body.dirty_count || 0);
+    updateSaveAsButton();
+    // Refresh the affected subtree: re-fetch the *parent* of the
+    // renamed node and rebuild its child list, so the LI we see is
+    // the new one with the new fullPath. For a renamed root-level
+    // image the parent is the synthetic WZ-file LI (whose
+    // _fullPath is "").
+    const parentPath = fullPath.includes("/")
+      ? fullPath.slice(0, fullPath.lastIndexOf("/"))
+      : "";
+    await refreshChildrenAt(parentPath);
+  } catch (err) {
+    alert(`Rename failed: ${err.message}`);
+  }
+}
+
+// Remove — confirm, POST, and refresh the parent's tree so the node
+// disappears immediately.
+async function runRemove(fullPath, labelPath) {
+  const ok = window.confirm(
+    `Remove "${labelPath || fullPath}"?\n\n` +
+    `Staged in memory; flush via Save As. The change is reversible by ` +
+    `simply not saving.`,
+  );
+  if (!ok) return;
+  try {
+    const r = await fetch("/api/remove", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({path: fullPath}),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || body.ok === false) {
+      alert(`Remove failed: ${body.reason || r.statusText}`);
+      return;
+    }
+    saveAsButton.dataset.dirty = String(body.dirty_count || 0);
+    updateSaveAsButton();
+    // If the removed node was the currently-displayed one, blank
+    // the detail panel — its content references a node that no
+    // longer exists.
+    if (currentlySelected && currentlySelected.parentElement &&
+        currentlySelected.parentElement._fullPath === fullPath) {
+      detailEl.innerHTML = '<p class="hint">Node removed. Save As to flush, or click another node.</p>';
+      crumbsEl.innerHTML = "";
+      currentlySelected = null;
+    }
+    await refreshChildrenAt(body.parent_path || "");
+  } catch (err) {
+    alert(`Remove failed: ${err.message}`);
+  }
+}
+
+// Re-fetch the children of whichever node currently lives at
+// ``fullPath`` and replace its child UL in place. Used after a
+// structural change (rename, remove, future add).
+async function refreshChildrenAt(fullPath) {
+  // Find the LI for this path, if any (it might be in the virtualized
+  // window or fully expanded). For the root we use the synthetic
+  // WZ-file LI which has _fullPath "".
+  let li = null;
+  for (const el of treeRoot.getElementsByClassName("node")) {
+    const candidate = el.parentElement;
+    if (candidate && candidate._fullPath === fullPath) {
+      li = candidate;
+      break;
+    }
+  }
+  if (!li || !li._childUl) return;       // nothing to refresh visibly
+
+  // Tear down existing UL + force a fresh fetch via expandLi.
+  li._childUl.remove();
+  li._childUl = null;
+  li._loaded = false;
+  li._twisty.textContent = "▾";
+  await expandLi(li, fullPath);
+}
 
 function makeCrumbs(path) {
   crumbsEl.innerHTML = "";

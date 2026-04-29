@@ -435,6 +435,8 @@ audio { margin-top: 12px; }
   color: #d6d6d6;
 }
 .context-menu .menu-item:hover { background: #3a4d6f; color: #fff; }
+.context-menu .menu-item.destructive { color: #e08585; }
+.context-menu .menu-item.destructive:hover { background: #6a2424; color: #fff; }
 .context-menu .menu-sep {
   height: 1px;
   background: #1a1b1d;
