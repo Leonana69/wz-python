@@ -352,8 +352,15 @@ def _get_canvas_payload_bytes(canvas: Any) -> bytes:
 
 
 def _read_sound_payload(sound: Any) -> bytes:
-    """Pull the audio bytes off the original file (Sound writes aren't
-    edited yet — we just round-trip them)."""
+    """Pull the audio bytes for the on-disk write.
+
+    For sounds parsed from a source WZ we re-read the original bytes
+    via mmap (fast, byte-identical round-trip). For sounds *added*
+    by the user, the audio bytes were stashed on ``sound._data`` at
+    construction time — use those.
+    """
+    if getattr(sound, "_data", None) is not None:
+        return sound._data
     if sound._wz_image is None:
         return b""
     r = sound._wz_image.wz_file.reader

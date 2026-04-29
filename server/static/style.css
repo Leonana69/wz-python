@@ -437,6 +437,25 @@ audio { margin-top: 12px; }
 .context-menu .menu-item:hover { background: #3a4d6f; color: #fff; }
 .context-menu .menu-item.destructive { color: #e08585; }
 .context-menu .menu-item.destructive:hover { background: #6a2424; color: #fff; }
+
+/* Hover-triggered submenu (used by Add ▸). The submenu sits to the
+   right of its trigger and inherits the same styling as the parent
+   menu so it visually feels like one unit. */
+.context-menu .menu-item.has-submenu { position: relative; }
+.context-menu .menu-item.has-submenu > .submenu {
+  display: none;
+  position: absolute;
+  left: 100%;
+  top: -5px;
+  min-width: 140px;
+  background: #2b2d31;
+  border: 1px solid #1a1b1d;
+  border-radius: 4px;
+  padding: 4px 0;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+}
+.context-menu .menu-item.has-submenu:hover > .submenu { display: block; }
+.context-menu .submenu .menu-item { padding: 6px 14px; }
 .context-menu .menu-sep {
   height: 1px;
   background: #1a1b1d;

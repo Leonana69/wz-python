@@ -138,6 +138,158 @@ def _node_to_xml(node) -> str:
     return f"<unknown name={quoteattr(getattr(node, 'name', '') or '')}/>"
 
 
+# ── MP3 header + duration estimator (used by /api/add/sound) ──────────
+# WZ Sound properties carry a WAVEFORMATEX + MPEGLAYER3WAVEFORMAT
+# header before the actual audio bytes. For added sounds we emit a
+# fixed CD-quality stereo MP3 header — compatible with every WZ
+# reader and good enough for typical MapleStory sound effects.
+
+_MP3_BITRATES_V1_L3 = (
+    0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
+)
+_MP3_SAMPLE_RATES_V1 = (44100, 48000, 32000, 0)
+
+
+def _is_mp3_bytes(data: bytes) -> bool:
+    """Validate that ``data`` looks like an MP3 stream — either an MPEG
+    audio sync (``0xFFE``…) or a leading ID3v2 tag (``ID3``)."""
+    if len(data) < 3:
+        return False
+    if data[:3] == b"ID3":
+        return True
+    return data[0] == 0xFF and (data[1] & 0xE0) == 0xE0
+
+
+def _estimate_mp3_duration_ms(data: bytes) -> int:
+    """Sum the duration of every MPEG-1 Layer III frame.
+
+    Falls back to a file-size estimate at 128 kbps if no frames decode
+    cleanly (for esoteric MP3 variants — V2/V2.5, layer I/II, free-
+    format). Good enough for the in-game sound-length display."""
+    duration_ms = 0.0
+    pos = 0
+    if data[:3] == b"ID3":
+        # Skip the ID3v2 tag if present. Length is encoded as 4
+        # syncsafe 7-bit ints.
+        if len(data) >= 10:
+            sz = ((data[6] & 0x7F) << 21) | ((data[7] & 0x7F) << 14) \
+                 | ((data[8] & 0x7F) << 7) | (data[9] & 0x7F)
+            pos = 10 + sz
+    while pos + 4 <= len(data):
+        if data[pos] != 0xFF or (data[pos + 1] & 0xE0) != 0xE0:
+            pos += 1
+            continue
+        h = (data[pos] << 24) | (data[pos + 1] << 16) | (data[pos + 2] << 8) | data[pos + 3]
+        version_id = (h >> 19) & 0x3        # 3 = MPEG-1
+        layer = (h >> 17) & 0x3             # 1 = Layer III
+        bitrate_idx = (h >> 12) & 0xF
+        sample_idx = (h >> 10) & 0x3
+        padding = (h >> 9) & 0x1
+        if version_id != 0x3 or layer != 0x1 or bitrate_idx in (0, 0xF) or sample_idx == 0x3:
+            pos += 1
+            continue
+        bitrate_bps = _MP3_BITRATES_V1_L3[bitrate_idx] * 1000
+        sample_rate = _MP3_SAMPLE_RATES_V1[sample_idx]
+        frame_size = 144 * bitrate_bps // sample_rate + padding
+        if frame_size < 4:
+            pos += 1
+            continue
+        duration_ms += 1152 * 1000 / sample_rate
+        pos += frame_size
+
+    if duration_ms <= 0:
+        # Conservative file-size fallback — assume 128 kbps.
+        duration_ms = (len(data) * 1000) / 16000
+    return int(duration_ms)
+
+
+def _default_mp3_header(
+    sample_rate: int = 44100, channels: int = 2, bitrate_bps: int = 128_000,
+) -> bytes:
+    """Return a 28-byte WAVEFORMATEX + MPEGLAYER3WAVEFORMAT for a
+    stereo MP3 stream. Matches the layout MapleLib emits."""
+    import struct as _s
+    bytes_per_sec = bitrate_bps // 8
+    wfx = _s.pack(
+        "<HHIIHHH",
+        0x0055,           # wFormatTag = WAVE_FORMAT_MPEGLAYER3
+        channels,         # nChannels
+        sample_rate,      # nSamplesPerSec
+        bytes_per_sec,    # nAvgBytesPerSec
+        1,                # nBlockAlign
+        0,                # wBitsPerSample (0 for variable / MP3)
+        12,               # cbSize (size of MPEGLAYER3WAVEFORMAT extension)
+    )
+    ext = _s.pack(
+        "<HIHHH",
+        1,                # wID (MPEGLAYER3_ID_MPEG)
+        2,                # fdwFlags (MPEGLAYER3_FLAG_PADDING_OFF)
+        1,                # nBlockSize
+        1,                # nFramesPerBlock
+        1393,             # nCodecDelay
+    )
+    return wfx + ext
+
+
+def _construct_property(kind: str, name: str, body: Dict[str, Any], parent):
+    """Build a fresh property of ``kind`` for the /api/add route.
+
+    The supported simple types are the ones the in-place editor
+    already handles. Canvas/Sound/UOL/Convex are intentionally not
+    here — they need richer construction (image upload, audio
+    upload, etc.) and are deferred to v2.
+    """
+    from wzpy.properties import (
+        WzDoubleProperty, WzFloatProperty, WzIntProperty,
+        WzLongProperty, WzNullProperty, WzShortProperty,
+        WzStringProperty, WzSubProperty, WzVectorProperty,
+    )
+    if kind == "Null":
+        return WzNullProperty(name, parent)
+    if kind == "Short":
+        v = int(body.get("value", 0))
+        if not (-(1 << 15) <= v < (1 << 15)):
+            raise ValueError(f"Short out of range: {v}")
+        return WzShortProperty(name, v, parent)
+    if kind == "Int":
+        v = int(body.get("value", 0))
+        if not (-(1 << 31) <= v < (1 << 31)):
+            raise ValueError(f"Int out of range: {v}")
+        return WzIntProperty(name, v, parent)
+    if kind == "Long":
+        v = int(body.get("value", 0))
+        if not (-(1 << 63) <= v < (1 << 63)):
+            raise ValueError(f"Long out of range: {v}")
+        return WzLongProperty(name, v, parent)
+    if kind == "Float":
+        return WzFloatProperty(name, float(body.get("value", 0.0)), parent)
+    if kind == "Double":
+        return WzDoubleProperty(name, float(body.get("value", 0.0)), parent)
+    if kind == "String":
+        s = str(body.get("value", ""))
+        prop = WzStringProperty(name, s, parent)
+        # The serializer auto-picks ASCII vs Unicode based on the
+        # string's contents, so we don't have to set ``_encoding`` here
+        # — but giving it a value lets future in-place edits compute
+        # the right byte budget without re-detecting.
+        try:
+            s.encode("cp1252")
+            prop._encoding = "ascii"
+        except UnicodeEncodeError:
+            prop._encoding = "unicode"
+        return prop
+    if kind == "Vector":
+        x = int(body.get("x", 0))
+        y = int(body.get("y", 0))
+        return WzVectorProperty(name, x, y, parent)
+    if kind == "SubProperty":
+        return WzSubProperty(name, parent)
+    raise ValueError(
+        f"unsupported kind {kind!r} (try Null, Short, Int, Long, Float, "
+        f"Double, String, Vector, or SubProperty)"
+    )
+
+
 def _walk_canvases(node, current_path: str = "") -> Iterator[Tuple[str, Any]]:
     """Yield every (path, WzCanvasProperty) with pixels in the subtree."""
     from wzpy.properties import WzCanvasProperty, WzProperty
@@ -1409,6 +1561,266 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             "removed_path": path,
             "parent_path": parent_path,
             "kind": kind,
+            "dirty_count": len(app.config["WZ_DIRTY_PATHS"]),
+        })
+
+    @app.route("/api/add", methods=["POST"])
+    def api_add() -> Response:
+        """Add a new property under ``parent_path``.
+
+        Body: ``{parent_path, name, kind, ...}`` where ``kind`` is
+        one of the supported simple types (Null, Short, Int, Long,
+        Float, Double, String, Vector, SubProperty). Extra fields:
+          - scalar types: ``value``
+          - Vector: ``x``, ``y``
+          - Null / SubProperty: nothing more
+
+        Canvas / Sound / UOL / Convex are intentionally not supported
+        in v1 — those need richer construction (image upload, audio
+        upload, target lookup, etc.). Use Save As + Replace... for
+        canvases and write tooling for sounds.
+
+        Returns ``{ok, new_path, kind, dirty_count}``.
+        """
+        from werkzeug.exceptions import HTTPException as _HTTPException
+        from wzpy.properties import (
+            WzDoubleProperty, WzFloatProperty, WzIntProperty,
+            WzLongProperty, WzNullProperty, WzShortProperty,
+            WzStringProperty, WzSubProperty, WzVectorProperty,
+        )
+        from wzpy.wz_image import WzImage as _WzImage
+
+        def _err(status: int, reason: str) -> Response:
+            r = jsonify({"ok": False, "reason": reason})
+            r.status_code = status
+            return r
+
+        body = request.get_json(silent=True) or {}
+        parent_path = (body.get("parent_path") or "").strip("/")
+        name = body.get("name")
+        kind = body.get("kind")
+
+        if not isinstance(name, str) or not name:
+            return _err(400, "name is required and must be a non-empty string")
+        if "/" in name or "\\" in name:
+            return _err(400, "name must not contain path separators")
+        if not isinstance(kind, str) or not kind:
+            return _err(400, "kind is required")
+
+        with app.config["WZ_READER_LOCK"]:
+            try:
+                parent = _resolve_target(parent_path) if parent_path else None
+            except _HTTPException as exc:
+                return _err(exc.code or 404, exc.description or "not found")
+            if parent is None:
+                return _err(400, "cannot add directly to the WZ root; "
+                                 "create the property under an .img instead")
+
+            # Determine which container's child dict to mutate. For an
+            # Image the user is adding INSIDE the image — descend into
+            # its parsed root SubProperty.
+            if isinstance(parent, _WzImage):
+                parent.parse()
+                container = parent.root
+            elif isinstance(parent, WzSubProperty):
+                container = parent
+            else:
+                return _err(
+                    400,
+                    f"cannot add a child to a {type(parent).__name__} — pick "
+                    f"an image or a sub-property as the parent",
+                )
+
+            if name in container._children:
+                return _err(409, f"{name!r} already exists under the same parent")
+
+            # Construct the new property based on the requested kind.
+            try:
+                prop = _construct_property(kind, name, body, container)
+            except (ValueError, TypeError) as exc:
+                return _err(400, str(exc))
+            container.add(prop)
+
+            new_path = f"{parent_path}/{name}" if parent_path else name
+            app.config["WZ_FORCE_FULL_REWRITE"] = True
+            app.config["WZ_DIRTY_PATHS"].add(new_path)
+
+        return jsonify({
+            "ok": True,
+            "new_path": new_path,
+            "parent_path": parent_path,
+            "kind": kind,
+            "dirty_count": len(app.config["WZ_DIRTY_PATHS"]),
+        })
+
+    # ── richer add: Canvas (PNG upload) and Sound (MP3 upload) ───────
+    # These can't go through /api/add because they need a multipart
+    # body. Same dirty-flag bookkeeping as the simple types.
+
+    def _resolve_add_container(parent_path: str, name: str):
+        """Returns ``(container, new_path)`` or aborts with a JSON
+        error. Mirrors the validation in /api/add for the
+        multipart variants."""
+        from werkzeug.exceptions import HTTPException as _HTTPException
+        from wzpy.properties import WzSubProperty
+        from wzpy.wz_image import WzImage as _WzImage
+
+        if "/" in name or "\\" in name:
+            raise ValueError("name must not contain path separators")
+        try:
+            parent = _resolve_target(parent_path) if parent_path else None
+        except _HTTPException as exc:
+            raise LookupError(exc.description or "not found")
+        if parent is None:
+            raise LookupError("cannot add directly to the WZ root; pick an .img")
+        if isinstance(parent, _WzImage):
+            parent.parse()
+            container = parent.root
+        elif isinstance(parent, WzSubProperty):
+            container = parent
+        else:
+            raise ValueError(
+                f"cannot add a child to a {type(parent).__name__}")
+        if name in container._children:
+            raise FileExistsError(f"{name!r} already exists under the same parent")
+        return container, (f"{parent_path}/{name}" if parent_path else name)
+
+    @app.route("/api/add/canvas", methods=["POST"])
+    def api_add_canvas() -> Response:
+        """Add a new Canvas property from a PNG upload.
+
+        Multipart body: ``image`` (PNG file) plus form fields
+        ``parent_path`` and ``name``. Optional ``format`` defaults
+        to 2 (BGRA8888) which is lossless and supported on every
+        MapleStory client we know about.
+        """
+        from wzpy.canvas import encode_canvas_payload
+        from wzpy.crypto import WzKey
+        from wzpy.properties import WzCanvasProperty
+
+        def _err(status: int, reason: str) -> Response:
+            r = jsonify({"ok": False, "reason": reason})
+            r.status_code = status
+            return r
+
+        if "image" not in request.files:
+            return _err(400, "missing 'image' form field")
+        upload = request.files["image"]
+        # Server-side filetype enforcement. Frontend already restricts
+        # via accept="image/png" but a malicious client could lie.
+        head = upload.stream.read(8); upload.stream.seek(0)
+        if head != b"\x89PNG\r\n\x1a\n":
+            return _err(400, "uploaded file is not a PNG (magic mismatch)")
+
+        parent_path = (request.form.get("parent_path") or "").strip("/")
+        name = request.form.get("name") or ""
+        if not name:
+            return _err(400, "name form field required")
+
+        try:
+            uploaded_image = Image.open(upload.stream)
+            uploaded_image.load()
+        except Exception as exc:
+            return _err(400, f"cannot decode PNG: {exc}")
+
+        # BGRA8888 is the natural default — lossless, no quantization.
+        try:
+            fmt = int(request.form.get("format", 2))
+        except ValueError:
+            return _err(400, "format must be an integer")
+
+        with app.config["WZ_READER_LOCK"]:
+            try:
+                container, new_path = _resolve_add_container(parent_path, name)
+            except LookupError as exc:
+                return _err(404, str(exc))
+            except FileExistsError as exc:
+                return _err(409, str(exc))
+            except ValueError as exc:
+                return _err(400, str(exc))
+
+            try:
+                payload = encode_canvas_payload(
+                    uploaded_image, fmt,
+                    uploaded_image.width, uploaded_image.height,
+                    key=WzKey.for_region(app.config["WZ_REGION"]),
+                    listwz=False,
+                )
+            except ValueError as exc:
+                return _err(400, str(exc))
+
+            canvas = WzCanvasProperty(name, parent=container)
+            canvas.width = uploaded_image.width
+            canvas.height = uploaded_image.height
+            canvas.format = fmt
+            canvas.format2 = 0
+            canvas._png_data = payload
+            canvas._png_length = len(payload)
+            container.add(canvas)
+
+            app.config["WZ_FORCE_FULL_REWRITE"] = True
+            app.config["WZ_DIRTY_PATHS"].add(new_path)
+
+        return jsonify({
+            "ok": True, "new_path": new_path, "parent_path": parent_path,
+            "kind": "Canvas",
+            "width": uploaded_image.width, "height": uploaded_image.height,
+            "format": fmt, "payload_bytes": len(payload),
+            "dirty_count": len(app.config["WZ_DIRTY_PATHS"]),
+        })
+
+    @app.route("/api/add/sound", methods=["POST"])
+    def api_add_sound() -> Response:
+        """Add a new Sound property from an MP3 upload.
+
+        Multipart body: ``audio`` (MP3 file) plus form fields
+        ``parent_path`` and ``name``. Duration (``length_ms``) is
+        estimated by walking MP3 frame headers.
+        """
+        from wzpy.properties import WzSoundProperty
+
+        def _err(status: int, reason: str) -> Response:
+            r = jsonify({"ok": False, "reason": reason})
+            r.status_code = status
+            return r
+
+        if "audio" not in request.files:
+            return _err(400, "missing 'audio' form field")
+        upload = request.files["audio"]
+        audio_bytes = upload.stream.read()
+        if not _is_mp3_bytes(audio_bytes):
+            return _err(400, "uploaded file is not an MP3 (no MPEG sync / ID3 header)")
+
+        parent_path = (request.form.get("parent_path") or "").strip("/")
+        name = request.form.get("name") or ""
+        if not name:
+            return _err(400, "name form field required")
+
+        with app.config["WZ_READER_LOCK"]:
+            try:
+                container, new_path = _resolve_add_container(parent_path, name)
+            except LookupError as exc:
+                return _err(404, str(exc))
+            except FileExistsError as exc:
+                return _err(409, str(exc))
+            except ValueError as exc:
+                return _err(400, str(exc))
+
+            length_ms = _estimate_mp3_duration_ms(audio_bytes)
+            sound = WzSoundProperty(name, parent=container)
+            sound.length_ms = length_ms
+            sound.header = _default_mp3_header()
+            sound._data_length = len(audio_bytes)
+            sound._data = audio_bytes
+            container.add(sound)
+
+            app.config["WZ_FORCE_FULL_REWRITE"] = True
+            app.config["WZ_DIRTY_PATHS"].add(new_path)
+
+        return jsonify({
+            "ok": True, "new_path": new_path, "parent_path": parent_path,
+            "kind": "Sound",
+            "length_ms": length_ms, "audio_bytes": len(audio_bytes),
             "dirty_count": len(app.config["WZ_DIRTY_PATHS"]),
         })
 

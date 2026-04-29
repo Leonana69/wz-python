@@ -546,11 +546,13 @@ function showContextMenuFor(x, y, labelPath, fullPath, kind) {
     addEntry.textContent = "Add ▸";
     const sub = document.createElement("div");
     sub.className = "submenu";
-    const types = [
+    // Two groups: simple types (JSON-only POST) and the upload-based
+    // ones that need a file picker.
+    const simpleTypes = [
       "Int", "Short", "Long", "Float", "Double",
       "String", "Vector", "SubProperty", "Null",
     ];
-    for (const t of types) {
+    for (const t of simpleTypes) {
       const it = document.createElement("div");
       it.className = "menu-item";
       it.textContent = t;
@@ -561,6 +563,25 @@ function showContextMenuFor(x, y, labelPath, fullPath, kind) {
       };
       sub.appendChild(it);
     }
+    const sep = document.createElement("div");
+    sep.className = "menu-sep";
+    sub.appendChild(sep);
+    const canvasItem = document.createElement("div");
+    canvasItem.className = "menu-item";
+    canvasItem.textContent = "Canvas (PNG…)";
+    canvasItem.onclick = (e) => {
+      e.stopPropagation(); hideContextMenu();
+      runAddCanvas(fullPath);
+    };
+    sub.appendChild(canvasItem);
+    const soundItem = document.createElement("div");
+    soundItem.className = "menu-item";
+    soundItem.textContent = "Sound (MP3…)";
+    soundItem.onclick = (e) => {
+      e.stopPropagation(); hideContextMenu();
+      runAddSound(fullPath);
+    };
+    sub.appendChild(soundItem);
     addEntry.appendChild(sub);
     contextMenuEl.appendChild(addEntry);
   }
@@ -726,6 +747,73 @@ async function runAdd(parentPath, kind) {
     // leaf (no children → no twisty, no childUl), refreshChildrenAt
     // would no-op. ``refreshOrExpandAt`` flips the leaf bit, draws
     // the twisty, and force-expands so the new child appears.
+    await refreshOrExpandAt(parentPath);
+  } catch (err) {
+    alert(`Add failed: ${err.message}`);
+  }
+}
+
+// Pick a single file matching ``accept`` and return it (or null on
+// cancel). Reuses a transient hidden <input> so we don't accumulate
+// pickers in the DOM.
+function pickFile(accept) {
+  return new Promise((resolve) => {
+    const inp = document.createElement("input");
+    inp.type = "file";
+    inp.accept = accept;
+    inp.style.display = "none";
+    inp.addEventListener("change", () => {
+      const f = inp.files && inp.files[0];
+      inp.remove();
+      resolve(f || null);
+    }, { once: true });
+    // Fire ``cancel`` resolve as well; not all browsers emit it but
+    // the once handler will GC if the input is garbage-collected.
+    document.body.appendChild(inp);
+    inp.click();
+  });
+}
+
+async function runAddCanvas(parentPath) {
+  const file = await pickFile(".png,image/png");
+  if (!file) return;
+  const name = window.prompt("Canvas name:", file.name.replace(/\.png$/i, ""));
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed) return;
+
+  const fd = new FormData();
+  fd.append("parent_path", parentPath);
+  fd.append("name", trimmed);
+  fd.append("image", file);
+  await _runAddUpload("/api/add/canvas", fd, parentPath);
+}
+
+async function runAddSound(parentPath) {
+  const file = await pickFile(".mp3,audio/mpeg,audio/mp3");
+  if (!file) return;
+  const name = window.prompt("Sound name:", file.name.replace(/\.mp3$/i, ""));
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed) return;
+
+  const fd = new FormData();
+  fd.append("parent_path", parentPath);
+  fd.append("name", trimmed);
+  fd.append("audio", file);
+  await _runAddUpload("/api/add/sound", fd, parentPath);
+}
+
+async function _runAddUpload(url, fd, parentPath) {
+  try {
+    const r = await fetch(url, { method: "POST", body: fd });
+    const result = await r.json().catch(() => ({}));
+    if (!r.ok || result.ok === false) {
+      alert(`Add failed: ${result.reason || r.statusText}`);
+      return;
+    }
+    saveAsButton.dataset.dirty = String(result.dirty_count || 0);
+    updateSaveAsButton();
     await refreshOrExpandAt(parentPath);
   } catch (err) {
     alert(`Add failed: ${err.message}`);
