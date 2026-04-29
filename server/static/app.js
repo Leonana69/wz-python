@@ -538,54 +538,77 @@ function showContextMenuFor(x, y, labelPath, fullPath, kind) {
     contextMenuEl.appendChild(removeItem);
   }
 
-  // Add — only meaningful for containers (Image, SubProperty, Canvas).
-  // Canvas IS a SubProperty subclass; the API accepts it.
-  if (["image", "subproperty", "property", "canvas"].includes(k)) {
+  // Add — what choices appear depends on what kind of container the
+  // user right-clicked. Directories take Directory/Image children;
+  // Images / SubProperties / Canvases take property values.
+  const isContainer = ["image", "subproperty", "property", "canvas",
+                        "directory"].includes(k);
+  if (isContainer) {
     const addEntry = document.createElement("div");
     addEntry.className = "menu-item has-submenu";
     addEntry.textContent = "Add ▸";
     const sub = document.createElement("div");
     sub.className = "submenu";
-    // Two groups: simple types (JSON-only POST) and the upload-based
-    // ones that need a file picker.
-    const simpleTypes = [
-      "Int", "Short", "Long", "Float", "Double",
-      "String", "Vector", "SubProperty", "Null",
-    ];
-    for (const t of simpleTypes) {
-      const it = document.createElement("div");
-      it.className = "menu-item";
-      it.textContent = t;
-      it.onclick = (e) => {
-        e.stopPropagation();
-        hideContextMenu();
-        runAdd(fullPath, t);
+
+    if (k === "directory") {
+      // Directory parent: only Directory + Image are legal children.
+      const dirItem = document.createElement("div");
+      dirItem.className = "menu-item";
+      dirItem.textContent = "Directory";
+      dirItem.onclick = (e) => {
+        e.stopPropagation(); hideContextMenu();
+        runAdd(fullPath, "Directory");
       };
-      sub.appendChild(it);
+      sub.appendChild(dirItem);
+      const imgItem = document.createElement("div");
+      imgItem.className = "menu-item";
+      imgItem.textContent = "Image";
+      imgItem.onclick = (e) => {
+        e.stopPropagation(); hideContextMenu();
+        runAdd(fullPath, "Image");
+      };
+      sub.appendChild(imgItem);
+    } else {
+      // Image / SubProperty / Canvas parent: the property menu.
+      const simpleTypes = [
+        "Int", "Short", "Long", "Float", "Double",
+        "String", "Vector", "SubProperty", "Null",
+      ];
+      for (const t of simpleTypes) {
+        const it = document.createElement("div");
+        it.className = "menu-item";
+        it.textContent = t;
+        it.onclick = (e) => {
+          e.stopPropagation();
+          hideContextMenu();
+          runAdd(fullPath, t);
+        };
+        sub.appendChild(it);
+      }
+      const sep = document.createElement("div");
+      sep.className = "menu-sep";
+      sub.appendChild(sep);
+      const canvasItem = document.createElement("div");
+      canvasItem.className = "menu-item";
+      canvasItem.textContent = "Canvas (PNG…)";
+      canvasItem.onclick = (e) => {
+        e.stopPropagation(); hideContextMenu();
+        runAddCanvas(fullPath);
+      };
+      sub.appendChild(canvasItem);
+      const soundItem = document.createElement("div");
+      soundItem.className = "menu-item";
+      soundItem.textContent = "Sound (MP3…)";
+      soundItem.onclick = (e) => {
+        e.stopPropagation(); hideContextMenu();
+        runAddSound(fullPath);
+      };
+      sub.appendChild(soundItem);
     }
-    const sep = document.createElement("div");
-    sep.className = "menu-sep";
-    sub.appendChild(sep);
-    const canvasItem = document.createElement("div");
-    canvasItem.className = "menu-item";
-    canvasItem.textContent = "Canvas (PNG…)";
-    canvasItem.onclick = (e) => {
-      e.stopPropagation(); hideContextMenu();
-      runAddCanvas(fullPath);
-    };
-    sub.appendChild(canvasItem);
-    const soundItem = document.createElement("div");
-    soundItem.className = "menu-item";
-    soundItem.textContent = "Sound (MP3…)";
-    soundItem.onclick = (e) => {
-      e.stopPropagation(); hideContextMenu();
-      runAddSound(fullPath);
-    };
-    sub.appendChild(soundItem);
     addEntry.appendChild(sub);
     contextMenuEl.appendChild(addEntry);
   }
-  if (fullPath || ["image", "subproperty", "property", "canvas"].includes(k)) {
+  if (fullPath || isContainer) {
     addSep();
   }
   if (isDir) {
@@ -690,7 +713,11 @@ async function runRename(fullPath) {
 // Add — prompt for the new property's name + per-type extra inputs,
 // POST to /api/add, refresh the parent's tree so the new node shows.
 async function runAdd(parentPath, kind) {
-  const name = window.prompt(`Add ${kind} — name:`);
+  // Helpful default: Images conventionally end in ``.img``. The
+  // prompt's pre-fill makes the convention obvious without making it
+  // mandatory (a name like ``Headers`` is still legal).
+  const defaultName = kind === "Image" ? "Untitled.img" : "";
+  const name = window.prompt(`Add ${kind} — name:`, defaultName);
   if (name === null) return;
   const trimmed = name.trim();
   if (!trimmed) return;

@@ -1589,6 +1589,7 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             WzStringProperty, WzSubProperty, WzVectorProperty,
         )
         from wzpy.wz_image import WzImage as _WzImage
+        from wzpy.wz_file import WzDirectory as _WzDirectory
 
         def _err(status: int, reason: str) -> Response:
             r = jsonify({"ok": False, "reason": reason})
@@ -1609,16 +1610,47 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
 
         with app.config["WZ_READER_LOCK"]:
             try:
-                parent = _resolve_target(parent_path) if parent_path else None
+                # Empty parent_path means "add at the WZ root". Only
+                # Directory / Image kinds make sense there.
+                parent = _resolve_target(parent_path) if parent_path else wz.root
             except _HTTPException as exc:
                 return _err(exc.code or 404, exc.description or "not found")
-            if parent is None:
-                return _err(400, "cannot add directly to the WZ root; "
-                                 "create the property under an .img instead")
 
-            # Determine which container's child dict to mutate. For an
-            # Image the user is adding INSIDE the image — descend into
-            # its parsed root SubProperty.
+            new_path = f"{parent_path}/{name}" if parent_path else name
+
+            # Directory + Image: parent must be a WzDirectory (root or
+            # sub). They go into ``parent.subdirs`` / ``parent.images``
+            # respectively, not into a SubProperty's child dict.
+            if kind in ("Directory", "Image"):
+                if not isinstance(parent, _WzDirectory):
+                    return _err(400,
+                        f"{kind} can only be added under a Directory")
+                if name in parent.subdirs or name in parent.images:
+                    return _err(409,
+                        f"{name!r} already exists under the same directory")
+                if kind == "Directory":
+                    new_dir = _WzDirectory(name, parent=parent)
+                    parent.subdirs[name] = new_dir
+                else:
+                    # Empty image — just an empty SubProperty root, no
+                    # source bytes. ``offset/size = 0`` is fine because
+                    # ``_parsed = True`` makes ``parse()`` return the
+                    # in-memory root without ever seeking the file.
+                    new_img = _WzImage(name, parent=parent, offset=0,
+                                        size=0, wz_file=wz)
+                    new_img._parsed = True
+                    new_img._root = WzSubProperty(name)
+                    parent.images[name] = new_img
+                app.config["WZ_FORCE_FULL_REWRITE"] = True
+                app.config["WZ_DIRTY_PATHS"].add(new_path)
+                return jsonify({
+                    "ok": True, "new_path": new_path,
+                    "parent_path": parent_path, "kind": kind,
+                    "dirty_count": len(app.config["WZ_DIRTY_PATHS"]),
+                })
+
+            # Property kinds: parent must be Image / SubProperty
+            # (Image: descend into its root SubProperty).
             if isinstance(parent, _WzImage):
                 parent.parse()
                 container = parent.root
@@ -1627,8 +1659,10 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             else:
                 return _err(
                     400,
-                    f"cannot add a child to a {type(parent).__name__} — pick "
-                    f"an image or a sub-property as the parent",
+                    f"cannot add a {kind} child to a "
+                    f"{type(parent).__name__} — pick an image, sub-"
+                    f"property, or canvas as the parent (or pick a "
+                    f"Directory/Image kind for a Directory parent)",
                 )
 
             if name in container._children:
@@ -1641,7 +1675,6 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
                 return _err(400, str(exc))
             container.add(prop)
 
-            new_path = f"{parent_path}/{name}" if parent_path else name
             app.config["WZ_FORCE_FULL_REWRITE"] = True
             app.config["WZ_DIRTY_PATHS"].add(new_path)
 
