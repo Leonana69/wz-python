@@ -1086,6 +1086,24 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         if not isinstance(node, WzImage) or not remaining:
             abort(404)
         prop = node.get(remaining)
+        # Follow a UOL to its target so paths like
+        # ``Cap/01005222.img/alert/0/default`` (a UOL pointing back at
+        # ``default/default``) resolve transparently. Without this an
+        # animation frame URL that lands on a UOL leaf would 404.
+        if isinstance(prop, WzUolProperty):
+            prop = _resolve_uol_target(prop) or prop
+        # Cap-style frames are SubProperties wrapping a UOL'd
+        # ``default``. Look one level deeper so the URL can point at
+        # the wrapping SubProperty (matches how the animation
+        # endpoint addresses each frame).
+        if isinstance(prop, WzSubProperty):
+            for child_name in ("default", "0"):
+                child = prop.get(child_name)
+                if isinstance(child, WzUolProperty):
+                    child = _resolve_uol_target(child) or child
+                if isinstance(child, WzCanvasProperty):
+                    prop = child
+                    break
         if not isinstance(prop, WzCanvasProperty):
             abort(404)
 
@@ -1270,26 +1288,74 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
     @app.route("/api/animation/<path:subpath>")
     def api_animation(subpath: str) -> Response:
         """Gather animation frames for a SubProperty whose children are
-        numbered Canvases (0, 1, 2, ...). Each WZ frame typically has
-        a ``delay`` Int (ms) and an ``origin`` Vector (anchor point)
-        as siblings of the bitmap; we fold those in so the client can
-        play the sequence at the right cadence and align frames to a
-        common anchor.
+        numbered (0, 1, 2, ...). Each frame's bitmap is either a
+        direct Canvas child or a SubProperty wrapping a UOL'd
+        ``default`` canvas — the cap-action shape (``alert``,
+        ``walk1``, …) where every frame UOLs back to the cap's
+        canonical ``default/default`` canvas. ``delay`` (ms) and
+        ``origin`` (Vector) sit on either the wrapper SubProperty or
+        the resolved canvas itself, depending on the WZ author.
 
         Response: ``{path, frame_count, frames: [{index, name, url,
-        width, height, delay_ms, origin: {x, y}}]}``. ``404`` if the
-        target isn't a SubProperty with at least one numeric-named
-        Canvas child.
+        width, height, delay_ms, origin: {x, y}}]}``.
+
+        Status codes:
+          * 200 — frames found.
+          * 204 — target IS a SubProperty but doesn't look animation-
+            shaped (no numeric children, or none resolve to a
+            canvas). Lets the client's speculative
+            ``maybeOfferAnimation`` probe drop quietly without
+            painting the access log red on every SubProperty click.
+          * 404 — target isn't a SubProperty at all (or the path
+            doesn't resolve).
         """
         from wzpy.properties import (
             WzCanvasProperty, WzIntProperty, WzShortProperty,
             WzSubProperty, WzVectorProperty,
         )
+        from wzpy.wz_package import resolve_canvas_link
         from urllib.parse import quote as _quote
 
         target = _resolve_target(subpath)
         if not isinstance(target, WzSubProperty):
             abort(404, "target is not a SubProperty")
+
+        def _frame_dimensions(canvas):
+            """Return ``(width, height)``. Resolves _outlink/_inlink so
+            cap-style 1×1 placeholders report the real pixel size of
+            the linked canvas instead of the placeholder's dimensions
+            (api_canvas does the same at render time)."""
+            if canvas.child("_outlink") is None and canvas.child("_inlink") is None:
+                return canvas.width, canvas.height
+            try:
+                linked = resolve_canvas_link(canvas, wz.root)
+            except Exception:
+                linked = None
+            if isinstance(linked, WzCanvasProperty):
+                return linked.width, linked.height
+            return canvas.width, canvas.height
+
+        def _resolve_frame_canvas(child):
+            """Return ``(canvas, sub_path_extra)`` where ``canvas`` is
+            the WzCanvasProperty for this frame's bitmap and
+            ``sub_path_extra`` is the additional path segments past
+            ``child.name`` that the canvas URL needs (so api_canvas
+            lands on either the SubProperty wrapper or the deeper
+            UOL leaf — both follow UOLs after the recent fix).
+            ``(None, None)`` when no bitmap is found."""
+            if isinstance(child, WzCanvasProperty) and child.has_pixels():
+                return child, ""
+            if isinstance(child, WzSubProperty):
+                for name in ("default", "0"):
+                    sub = child.get(name)
+                    if sub is None:
+                        continue
+                    target_node = sub
+                    if isinstance(target_node, WzUolProperty):
+                        target_node = _resolve_uol_target(target_node)
+                    if isinstance(target_node, WzCanvasProperty) and target_node.has_pixels():
+                        return target_node, f"/{name}"
+            return None, None
 
         frames: List[Dict[str, Any]] = []
         for child in target.children():
@@ -1297,30 +1363,42 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
                 idx = int(child.name)
             except (TypeError, ValueError):
                 continue
-            if not isinstance(child, WzCanvasProperty) or not child.has_pixels():
+            canvas, extra = _resolve_frame_canvas(child)
+            if canvas is None:
                 continue
             delay_ms = 100  # MapleStory's typical default when no delay is set
             origin = {"x": 0, "y": 0}
-            for sub in child.children():
-                if sub.name == "delay" and isinstance(sub, (WzIntProperty, WzShortProperty)):
-                    try:
-                        delay_ms = int(sub.value)
-                    except Exception:
-                        pass
-                elif sub.name == "origin" and isinstance(sub, WzVectorProperty):
-                    origin = {"x": int(sub.x), "y": int(sub.y)}
+            # Per-frame metadata (delay / origin) can sit on either the
+            # wrapping SubProperty (cap-style) or the resolved canvas
+            # (legacy direct-canvas frames). Sweep both, last writer
+            # wins so author-explicit values on the wrapper override
+            # any defaults on the shared underlying canvas.
+            for source in (canvas, child):
+                if not isinstance(source, WzSubProperty) and not isinstance(source, WzCanvasProperty):
+                    continue
+                for sub in source.children():
+                    if sub.name == "delay" and isinstance(sub, (WzIntProperty, WzShortProperty)):
+                        try:
+                            delay_ms = int(sub.value)
+                        except Exception:
+                            pass
+                    elif sub.name == "origin" and isinstance(sub, WzVectorProperty):
+                        origin = {"x": int(sub.x), "y": int(sub.y)}
+            width, height = _frame_dimensions(canvas)
             frames.append({
                 "index": idx,
                 "name": child.name,
-                "url": f"/api/canvas/{_quote(subpath, safe='/')}/{_quote(child.name)}.png",
-                "width": child.width,
-                "height": child.height,
+                "url": f"/api/canvas/{_quote(subpath, safe='/')}/{_quote(child.name)}{extra}.png",
+                "width": width,
+                "height": height,
                 "delay_ms": max(1, delay_ms),
                 "origin": origin,
             })
 
         if not frames:
-            abort(404, "no numeric-named Canvas children")
+            # Target is a SubProperty but not animation-shaped; let
+            # the client probe complete quietly.
+            return Response(status=204)
         frames.sort(key=lambda f: f["index"])
         return jsonify({
             "path": subpath,

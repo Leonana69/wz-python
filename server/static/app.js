@@ -1826,7 +1826,12 @@ async function maybeOfferAnimation(path, slot) {
   let data;
   try {
     const r = await fetch(`/api/animation/${encodeURI(path)}`);
-    if (!r.ok) return;          // 404 = not an animation; nothing to do
+    // 404 (target isn't a SubProperty) and 204 (SubProperty but no
+    // animation-shaped children) both mean "no offer" — bail without
+    // painting an empty player. The 204 path is what most non-
+    // animation SubProperty clicks land on, so the probe stays quiet
+    // in the access log.
+    if (r.status === 204 || !r.ok) return;
     data = await r.json();
   } catch {
     return;
