@@ -745,9 +745,18 @@ def _collect_part_canvases(
     For Head, ``front/`` siblings other than ``head`` are treated as ear
     variants and filtered to just the one matching ``ear_type`` —
     matching MapleNecrocer's per-frame visibility filter so we don't
-    composite (e.g.) ``humanEar`` and ``lefEar`` on top of each other."""
+    composite (e.g.) ``humanEar`` and ``lefEar`` on top of each other.
+
+    Frame paths are tried in priority order — the first occurrence of
+    a leaf name wins, fallback paths only fill in leaf names the
+    primary didn't ship. Without this, caps like 01003559 — which
+    duplicates its frames as both ``default/default`` and
+    ``stand1/0/default`` (different ``_Canvas`` outlink targets, same
+    ``z='cap'``) — composite both bitmaps on top of each other and
+    the user sees a doubled cap."""
     base = _render_root(img, category, equip_id, pose)
     seen_ids: set = set()
+    seen_names: set = set()
     out: List[Tuple[str, WzCanvasProperty, WzCanvasProperty]] = []
     for path in _frame_paths(category, pose):
         node = base.get(path)
@@ -755,6 +764,11 @@ def _collect_part_canvases(
         if not isinstance(node, WzSubProperty):
             continue
         for child in node.children():
+            # Drop a leaf name we've already collected from a higher-
+            # priority frame path (see the docstring note about
+            # duplicated cap canvases).
+            if child.name in seen_names:
+                continue
             # For Head, every sibling of ``head`` is treated as an ear
             # variant (matches MapleNecrocer's per-frame visibility
             # filter in ``MapleCharacter.cs:1218``). Filter is name-based
@@ -793,6 +807,7 @@ def _collect_part_canvases(
             if not pixels.has_pixels():
                 continue
             seen_ids.add(id(target))
+            seen_names.add(child.name)
             out.append((child.name, target, pixels))
     return out
 
