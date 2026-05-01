@@ -83,6 +83,19 @@
 }
 .char-controls button:hover { background: #4d6592; }
 
+/* Save PNG sits on its own row beneath Scale / Pose / Ear and
+ * spans the full width of the controls panel. ``flex: 1`` overrides
+ * the default ``margin-left: auto`` from ``.char-controls button``
+ * so the button fills instead of just hugging the right edge. */
+.char-controls-actions {
+  align-items: stretch;
+}
+.char-controls-actions button {
+  flex: 1;
+  margin-left: 0;
+  padding: 6px 12px;
+}
+
 /* Pose toggle — only shown when the equipped weapon supports both
  * stand1 (one-handed) and stand2 (two-handed). */
 .char-pose {
