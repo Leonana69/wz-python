@@ -956,6 +956,60 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             "X-Resolved-Pose": renderer.detect_pose(ids, pose),
         })
 
+    @app.route("/api/search")
+    def api_search() -> Response:
+        """Walk the WZ tree and return nodes whose name contains the
+        query as a case-insensitive substring.
+
+        Matches directories and ``.img`` images only — property
+        children would force a parse of every img and the tree alone
+        is enough to find any equipment ID. Capped at ``limit`` hits
+        (default 200) so a 1-character query doesn't dump tens of
+        thousands of results into the response.
+        """
+        q = request.args.get("q", "").strip().lower()
+        try:
+            limit = max(1, min(1000, int(request.args.get("limit", "200"))))
+        except ValueError:
+            limit = 200
+        if not q:
+            return jsonify({"results": [], "truncated": False})
+        results: List[Dict[str, Any]] = []
+        truncated = False
+
+        def walk(node: WzDirectory, prefix: str) -> None:
+            nonlocal truncated
+            if len(results) >= limit:
+                truncated = True
+                return
+            # Directories first so the result order roughly mirrors
+            # the on-disk layout users expect.
+            for name, sub in node.subdirs.items():
+                full = f"{prefix}/{name}" if prefix else name
+                if q in name.lower():
+                    results.append({
+                        "path": full, "name": name, "kind": "Directory",
+                    })
+                    if len(results) >= limit:
+                        truncated = True
+                        return
+                walk(sub, full)
+                if len(results) >= limit:
+                    truncated = True
+                    return
+            for name in node.images.keys():
+                if len(results) >= limit:
+                    truncated = True
+                    return
+                if q in name.lower():
+                    full = f"{prefix}/{name}" if prefix else name
+                    results.append({
+                        "path": full, "name": name, "kind": "Image",
+                    })
+
+        walk(wz.root, "")
+        return jsonify({"results": results, "truncated": truncated})
+
     @app.route("/api/tree")
     @app.route("/api/tree/")
     @app.route("/api/tree/<path:subpath>")

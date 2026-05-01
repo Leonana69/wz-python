@@ -233,6 +233,82 @@ main { display: flex; flex: 1; overflow: hidden; }
   overflow-anchor: none;
 }
 
+/* Search box pinned above the tree. Server-side ``/api/search``
+ * walks directories + .img names; results render here as a
+ * clickable list. Clicking a result loads its detail panel without
+ * touching the tree below — handy for jumping straight to a deep
+ * .img by ID without expanding ten directories first. */
+.tree-search {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: #232428;
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid #1a1b1d;
+}
+#tree-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: #2b2d31;
+  color: #d6d6d6;
+  border: 1px solid #1a1b1d;
+  border-radius: 3px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 12px;
+}
+#tree-search-input:focus {
+  outline: none;
+  border-color: #e8b96b;
+}
+#tree-search-input::placeholder { color: #777; }
+
+.tree-search-results {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  max-height: 280px;
+  overflow-y: auto;
+  background: #1e1f22;
+  border: 1px solid #1a1b1d;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.tree-search-results li {
+  padding: 3px 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  border-bottom: 1px solid #2b2d31;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+}
+.tree-search-results li:last-child { border-bottom: none; }
+.tree-search-results li:hover { background: #2b2d31; }
+.tree-search-results li.selected { background: #3a4d6f; }
+.tree-search-results .ts-kind {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: #888;
+  text-transform: lowercase;
+  background: #2b2d31;
+  padding: 1px 5px;
+  border-radius: 2px;
+}
+.tree-search-results .ts-path {
+  flex: 1;
+  color: #c5c5c5;
+  word-break: break-all;
+}
+.tree-search-results .ts-empty,
+.tree-search-results .ts-truncated {
+  padding: 6px 8px;
+  color: #777;
+  font-style: italic;
+  font-family: inherit;
+}
+
 #detail-panel {
   flex: 1;
   overflow: auto;

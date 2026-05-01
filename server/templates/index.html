@@ -21,6 +21,16 @@
 
   <main>
     <aside id="tree-panel">
+      <div class="tree-search">
+        <input
+          type="search"
+          id="tree-search-input"
+          placeholder="Search by name or img ID…"
+          autocomplete="off"
+          spellcheck="false"
+        >
+        <ul id="tree-search-results" class="tree-search-results" hidden></ul>
+      </div>
       <ul id="tree" class="tree"></ul>
     </aside>
     <section id="detail-panel">

@@ -477,6 +477,197 @@ async function expandLi(li, fullPath) {
 
 treeRoot.addEventListener("click", onTreeClick);
 
+// ── tree search ────────────────────────────────────────────────────
+const treeSearchInput = document.getElementById("tree-search-input");
+const treeSearchResults = document.getElementById("tree-search-results");
+
+let _treeSearchSeq = 0;     // drop stale responses
+let _treeSearchTimer = 0;   // debounce timer
+
+function clearTreeSearchResults() {
+  treeSearchResults.innerHTML = "";
+  treeSearchResults.hidden = true;
+}
+
+async function runTreeSearch(query) {
+  const seq = ++_treeSearchSeq;
+  const q = query.trim();
+  if (!q) {
+    clearTreeSearchResults();
+    return;
+  }
+  try {
+    const data = await fetchJson(`/api/search?q=${encodeURIComponent(q)}`);
+    if (seq !== _treeSearchSeq) return;  // a newer search superseded us
+    treeSearchResults.innerHTML = "";
+    if (!data.results.length) {
+      const li = document.createElement("li");
+      li.className = "ts-empty";
+      li.textContent = "No matches.";
+      treeSearchResults.appendChild(li);
+      treeSearchResults.hidden = false;
+      return;
+    }
+    for (const r of data.results) {
+      const li = document.createElement("li");
+      li.dataset.path = r.path;
+      li.dataset.kind = r.kind;
+      const kind = document.createElement("span");
+      kind.className = "ts-kind";
+      kind.textContent = r.kind === "Directory" ? "dir" : "img";
+      const path = document.createElement("span");
+      path.className = "ts-path";
+      path.textContent = r.path;
+      li.appendChild(kind);
+      li.appendChild(path);
+      li.title = r.path;
+      li.addEventListener("click", () => selectSearchResult(r));
+      treeSearchResults.appendChild(li);
+    }
+    if (data.truncated) {
+      const li = document.createElement("li");
+      li.className = "ts-truncated";
+      li.textContent = `… more results (capped at ${data.results.length}). Refine the query.`;
+      treeSearchResults.appendChild(li);
+    }
+    treeSearchResults.hidden = false;
+  } catch (err) {
+    if (seq !== _treeSearchSeq) return;
+    treeSearchResults.innerHTML = "";
+    const li = document.createElement("li");
+    li.className = "ts-empty";
+    li.textContent = `Search failed: ${err.message}`;
+    treeSearchResults.appendChild(li);
+    treeSearchResults.hidden = false;
+  }
+}
+
+async function selectSearchResult(r) {
+  // Highlight the chosen result so the user sees what they picked.
+  for (const el of treeSearchResults.querySelectorAll("li.selected")) {
+    el.classList.remove("selected");
+  }
+  for (const el of treeSearchResults.querySelectorAll(`li[data-path="${CSS.escape(r.path)}"]`)) {
+    el.classList.add("selected");
+  }
+  // Walk the tree to the result, auto-expanding each ancestor along
+  // the way. ``navigateToPath`` returns the final LI so we can
+  // select + scroll into view; on failure (virtualized child that
+  // never rendered, expand error, etc.) fall back to populating the
+  // detail panel without tree navigation so the user still sees
+  // *something* useful.
+  const li = await navigateToPath(r.path);
+  if (li) {
+    if (currentlySelected) currentlySelected.classList.remove("selected");
+    const node = li.querySelector(".node");
+    if (node) {
+      node.classList.add("selected");
+      currentlySelected = node;
+    }
+    li.scrollIntoView({ block: "center" });
+    showDetail(li._fullPath, li._meta);
+  } else {
+    showDetail(r.path, { name: r.name, kind: r.kind, leaf: false });
+  }
+}
+
+// Walk ``targetPath`` from the synthetic file root down, expanding
+// each ancestor and returning the final LI. Returns ``null`` if any
+// segment can't be resolved (path no longer exists, virtual child
+// failed to render, expand fetch failed, …) so the caller can fall
+// back gracefully.
+async function navigateToPath(targetPath) {
+  const fileLi = treeRoot.firstElementChild;
+  if (!fileLi || !fileLi._childUl) return null;
+  const segments = String(targetPath).split("/").filter(Boolean);
+  if (!segments.length) return fileLi;
+
+  let parentUl = fileLi._childUl;
+  let lastLi = null;
+  for (const seg of segments) {
+    const li = await ensureChildRendered(parentUl, seg);
+    if (!li) return null;
+    if (!li._meta.leaf) {
+      if (!li._childUl) {
+        try {
+          await expandLi(li, li._fullPath);
+        } catch (err) {
+          console.warn("[navigate] expand failed:", li._fullPath, err);
+          return li;  // best we can do — return what we reached
+        }
+      } else if (li._childUl.style.display === "none") {
+        li._childUl.style.display = "";
+        li._twisty.textContent = "▾";
+        notifyAncestorVirtualResize(li);
+      }
+    }
+    lastLi = li;
+    parentUl = li._childUl || null;
+    if (!parentUl) break;  // reached a leaf or expand-less node
+  }
+  return lastLi;
+}
+
+// Find the LI for child ``name`` directly under ``ul``. For
+// virtualized lists the child's LI may not be in the DOM yet —
+// scroll the tree panel so VirtualList's range covers the child,
+// then wait a few rAFs for the render to settle.
+async function ensureChildRendered(ul, name) {
+  if (!ul) return null;
+  // Direct children (non-virtualized list, or virtualized item that's
+  // already in the rendered range).
+  for (const li of ul.children) {
+    if (li._meta && li._meta.name === name) return li;
+  }
+  if (!ul._virtual) return null;
+  const v = ul._virtual;
+  const child = v.children.find((c) => c.name === name);
+  if (!child) return null;
+  if (child._li && ul.contains(child._li)) return child._li;
+
+  // Scroll the tree panel so this child's row falls inside the
+  // virtualized list's render window. Aim the row about a third
+  // of the way down the visible panel so subsequent expansions
+  // don't immediately push it back out of view.
+  const ulRect = ul.getBoundingClientRect();
+  const panelRect = treePanel.getBoundingClientRect();
+  const childYInPanel = (ulRect.top - panelRect.top) + child._cumTop;
+  treePanel.scrollTop += childYInPanel - panelRect.height / 3;
+  v.requestUpdate();
+
+  // Poll for the render to land. _update runs on rAF; allow a few
+  // frames before giving up so we tolerate slow style/layout passes.
+  for (let attempts = 0; attempts < 12; attempts++) {
+    await new Promise((res) => requestAnimationFrame(res));
+    if (child._li && ul.contains(child._li)) return child._li;
+  }
+  return null;
+}
+
+if (treeSearchInput) {
+  treeSearchInput.addEventListener("input", () => {
+    const q = treeSearchInput.value;
+    clearTimeout(_treeSearchTimer);
+    // Short debounce — 200ms is comfortable for typing without
+    // firing per keystroke. Empty input clears results immediately
+    // (no point waiting).
+    if (!q.trim()) {
+      _treeSearchSeq++;
+      clearTreeSearchResults();
+      return;
+    }
+    _treeSearchTimer = setTimeout(() => runTreeSearch(q), 200);
+  });
+  // Escape clears the input without losing focus.
+  treeSearchInput.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && treeSearchInput.value) {
+      treeSearchInput.value = "";
+      _treeSearchSeq++;
+      clearTreeSearchResults();
+    }
+  });
+}
+
 // ── right-click export menu ─────────────────────────────────────────
 const contextMenuEl = document.getElementById("context-menu");
 
