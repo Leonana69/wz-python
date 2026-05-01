@@ -12,6 +12,12 @@ from .crypto import (
 )
 from .wz_file import WzFile
 from .wz_image import WzImage
+from .wz_package import (
+    WzPackage,
+    is_hierarchical_pack,
+    open_wz,
+    resolve_canvas_link,
+)
 from .properties import (
     WzProperty,
     WzNullProperty,
@@ -34,6 +40,10 @@ __all__ = [
     "WzFile",
     "WzImage",
     "WzKey",
+    "WzPackage",
+    "open_wz",
+    "is_hierarchical_pack",
+    "resolve_canvas_link",
     "WzProperty",
     "WzNullProperty",
     "WzShortProperty",

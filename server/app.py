@@ -474,11 +474,15 @@ from wzpy import (
     WzFile,
     WzImage,
     WzNullProperty,
+    WzPackage,
     WzProperty,
     WzSoundProperty,
     WzSubProperty,
     WzUolProperty,
     WzVectorProperty,
+    is_hierarchical_pack,
+    open_wz,
+    resolve_canvas_link,
 )
 from wzpy.canvas import decode_canvas
 from wzpy.wz_file import WzDirectory
@@ -531,11 +535,24 @@ def _score_root_printability(wz: "WzFile") -> float:
 def _auto_detect_region(wz_path: str, version: Optional[int]) -> str:
     """Try each known region and return the one that decodes the root
     directory most cleanly. Open + parse-root is cheap for memory-mapped
-    files even on multi-GB WZs, so doing it three times is fine."""
+    files even on multi-GB WZs, so doing it three times is fine.
+
+    For hierarchical packs we score the structure file alone — same
+    cipher applies to every sibling, so detection on the entry point
+    is enough."""
+    # Hierarchical packs derive region from the structure file (the
+    # ``<base>.wz`` next to the indexed siblings). Scoring just that
+    # one file avoids opening dozens of indexed siblings per region.
+    structure_path = wz_path
+    if os.path.isdir(wz_path):
+        base = os.path.basename(os.path.abspath(wz_path).rstrip(os.sep))
+        candidate = os.path.join(wz_path, f"{base}.wz")
+        if os.path.isfile(candidate):
+            structure_path = candidate
     best: Optional[Tuple[str, float]] = None
     for r in ("BMS", "GMS", "EMS"):
         try:
-            wz = WzFile.open(wz_path, region=r, version=version)
+            wz = WzFile.open(structure_path, region=r, version=version)
         except Exception as e:
             print(f"  {r}: open failed ({e})")
             continue
@@ -561,9 +578,17 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         print(f"  -> using region: {region}")
     app = Flask(__name__, template_folder="templates", static_folder="static")
     # writable=True mmaps the WZ with ACCESS_WRITE so /api/save can patch
-    # scalar values in-place without copying the entire archive.
-    wz = WzFile.open(wz_path, region=region, version=version, writable=True)
+    # scalar values in-place without copying the entire archive. For
+    # hierarchical packs this falls back to read-only — split-file
+    # save_as is not supported.
+    hierarchical = is_hierarchical_pack(wz_path)
+    if hierarchical:
+        wz = WzPackage.open(wz_path, region=region, version=version)
+        print(f"  loaded hierarchical pack with {len(wz._files)} .wz file(s)")
+    else:
+        wz = WzFile.open(wz_path, region=region, version=version, writable=True)
     app.config["WZ"] = wz
+    app.config["WZ_HIERARCHICAL"] = hierarchical
     app.config["WZ_REGION"] = region
     # Background bundle exports parse images on a worker thread; the WZ reader
     # carries shared file-position + cipher state, so we mediate access with
@@ -666,6 +691,22 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             # Surfaced so the canvas viewer can show the slot budget for
             # the "Replace…" button.
             d["slot_total"] = p._png_length
+            # Outlink/inlink: most placeholders are 1×1 with the real
+            # pixels stored in a sibling _Canvas image. Resolve the link
+            # so the UI lays out the canvas at its true size and the
+            # viewer fetches the linked PNG.
+            if p.child("_outlink") is not None or p.child("_inlink") is not None:
+                try:
+                    linked = resolve_canvas_link(p, wz.root)
+                except Exception:
+                    linked = None
+                if linked is not None and linked is not p:
+                    d["linked"] = True
+                    d["width"] = linked.width
+                    d["height"] = linked.height
+                    d["format"] = linked.format + linked.format2
+                    d["renderable"] = linked.has_pixels()
+                    d["slot_total"] = linked._png_length
         elif isinstance(p, WzSoundProperty):
             d["length_ms"] = p.length_ms
             d["bytes"] = p.value
@@ -868,49 +909,70 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         if not isinstance(node, WzImage) or not remaining:
             abort(404)
         prop = node.get(remaining)
-        if not isinstance(prop, WzCanvasProperty) or not prop.has_pixels():
+        if not isinstance(prop, WzCanvasProperty):
+            abort(404)
+
+        # If the canvas has _outlink/_inlink, prefer the linked canvas's
+        # pixels — the property here is usually a 1×1 placeholder. We
+        # fall back to the placeholder if resolution fails so the
+        # original error path still renders something useful.
+        link_target: Optional[WzCanvasProperty] = None
+        if prop.child("_outlink") is not None or prop.child("_inlink") is not None:
+            try:
+                link_target = resolve_canvas_link(prop, wz.root)
+            except Exception:
+                link_target = None
+        render_prop = link_target if link_target is not None else prop
+        if not render_prop.has_pixels():
             abort(404)
 
         region = app.config["WZ_REGION"]
         key = WzKey.for_region(region)
-        fmt = prop.format + prop.format2
+        fmt = render_prop.format + render_prop.format2
 
         t_read = t_decompress = t_decode = t_encode = 0.0
         raw_bytes = decompressed_bytes = png_bytes = 0
         try:
             t0 = time.perf_counter()
-            raw = _read_canvas_bytes(prop)
+            raw = _read_canvas_bytes(render_prop)
             raw_bytes = len(raw)
             t_read = time.perf_counter() - t0
 
             t0 = time.perf_counter()
-            decompressed = _decompress(prop, key)
+            decompressed = _decompress(render_prop, key)
             decompressed_bytes = len(decompressed)
             t_decompress = time.perf_counter() - t0
 
             t0 = time.perf_counter()
-            img = _decode_pixels(decompressed, prop.width, prop.height, fmt)
+            img = _decode_pixels(
+                decompressed, render_prop.width, render_prop.height, fmt
+            )
             t_decode = time.perf_counter() - t0
         except Exception as exc:
             try:
-                raw = _read_canvas_bytes(prop)
+                raw = _read_canvas_bytes(render_prop)
             except Exception:
                 raw = b""
             outlink = prop.child("_outlink")
             inlink = prop.child("_inlink")
             lines = [
                 f"decode error: {exc}",
-                f"format={prop.format + prop.format2}  size={prop.width}x{prop.height}",
+                f"format={render_prop.format + render_prop.format2}  "
+                f"size={render_prop.width}x{render_prop.height}",
                 f"data {len(raw)} bytes; first 16: {raw[:16].hex()}",
             ]
             if outlink is not None:
                 lines.append(f"_outlink → {outlink.value}")
-                lines.append("(actual pixels live in a sibling _Canvas WZ file)")
+                if link_target is None:
+                    lines.append("(link unresolved — target not in this pack)")
             if inlink is not None:
                 lines.append(f"_inlink → {inlink.value}")
             placeholder = Image.new(
                 "RGBA",
-                (max(prop.width, 560), max(prop.height, 16 * (len(lines) + 1))),
+                (
+                    max(render_prop.width, 560),
+                    max(render_prop.height, 16 * (len(lines) + 1)),
+                ),
                 (40, 40, 40, 255),
             )
             draw = ImageDraw.Draw(placeholder)
@@ -922,8 +984,8 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             elapsed_ms = (time.perf_counter() - t_total) * 1000
             print(
                 f"  [canvas {elapsed_ms:6.1f} ms FAILED] "
-                f"{prop.width}x{prop.height} fmt={fmt}  raw={raw_bytes}b  "
-                f"reason={exc}  /{subpath}",
+                f"{render_prop.width}x{render_prop.height} fmt={fmt}  "
+                f"raw={raw_bytes}b  reason={exc}  /{subpath}",
                 flush=True,
             )
             return Response(buf.getvalue(), mimetype="image/png", status=200)
@@ -935,12 +997,13 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         t_encode = time.perf_counter() - t0
 
         elapsed_ms = (time.perf_counter() - t_total) * 1000
+        link_tag = " (linked)" if link_target is not None else ""
         # Always log canvases that take meaningful time so the user can
         # see when something is heavy without grepping every request.
         if elapsed_ms > 30 or png_bytes > 200_000:
             print(
-                f"  [canvas {elapsed_ms:6.1f} ms] "
-                f"{prop.width}x{prop.height} fmt={fmt}  "
+                f"  [canvas {elapsed_ms:6.1f} ms]{link_tag} "
+                f"{render_prop.width}x{render_prop.height} fmt={fmt}  "
                 f"raw={raw_bytes}b decomp={decompressed_bytes}b png={png_bytes}b  "
                 f"read={t_read*1000:.1f} decompress={t_decompress*1000:.1f} "
                 f"decode={t_decode*1000:.1f} encode={t_encode*1000:.1f}  "
@@ -959,7 +1022,9 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             f"total;dur={elapsed_ms:.1f}",
         ])
         resp.headers["X-Canvas-Format"] = str(fmt)
-        resp.headers["X-Canvas-Size"] = f"{prop.width}x{prop.height}"
+        resp.headers["X-Canvas-Size"] = f"{render_prop.width}x{render_prop.height}"
+        if link_target is not None:
+            resp.headers["X-Canvas-Linked"] = "1"
         return resp
 
     @app.route("/api/sound/<path:subpath>")

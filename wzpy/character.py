@@ -39,6 +39,7 @@ from .properties import (
 )
 from .wz_file import WzDirectory, WzFile
 from .wz_image import WzImage
+from .wz_package import resolve_canvas_link
 
 
 # ── category mapping ──────────────────────────────────────────────────────
@@ -421,7 +422,9 @@ class _Placement:
     equip_id: str
     category: str
     name: str                          # leaf canvas name (e.g. "body", "arm")
-    canvas: WzCanvasProperty
+    canvas: WzCanvasProperty           # owns the metadata: origin / map / z
+    pixel_canvas: WzCanvasProperty     # owns the actual pixels (== canvas, except
+                                       # for hierarchical _outlink placeholders)
     origin: Tuple[int, int]
     map_anchors: Dict[str, Tuple[int, int]]
     z_slot: Optional[str]
@@ -510,16 +513,23 @@ def _render_root(img: WzImage, category: str, equip_id: str, pose: str) -> WzPro
 
 def _collect_part_canvases(
     img: WzImage, category: str, equip_id: str, pose: str,
-) -> List[Tuple[str, WzCanvasProperty]]:
-    """Return ``(leaf_name, canvas)`` pairs to render for this part image.
+    pkg_root: Optional[WzDirectory] = None,
+) -> List[Tuple[str, WzCanvasProperty, WzCanvasProperty]]:
+    """Return ``(leaf_name, metadata_canvas, pixel_canvas)`` triples to render.
 
-    Walks each frame-path candidate for the category from the
-    appropriate render root, follows UOLs, and deduplicates by canvas
-    identity (so a stand1/0 UOL pointing at default/<canvas> doesn't
-    double-count the canvas)."""
+    Walks each frame-path candidate from the appropriate render root,
+    follows UOLs, and deduplicates by canvas identity. For hierarchical
+    packs the per-frame canvas is a 1×1 placeholder with ``_outlink``
+    pointing into a ``_Canvas`` sibling — we resolve that link and
+    return the linked canvas as ``pixel_canvas`` while keeping the
+    placeholder as the metadata canvas (it owns ``origin`` / ``map`` /
+    ``z``). When no link is present, both fields point at the same
+    canvas. ``pkg_root`` is the WZ root used for absolute outlink
+    navigation; when ``None`` (legacy single-file Character.wz), only
+    ``_inlink`` resolves."""
     base = _render_root(img, category, equip_id, pose)
     seen_ids: set = set()
-    out: List[Tuple[str, WzCanvasProperty]] = []
+    out: List[Tuple[str, WzCanvasProperty, WzCanvasProperty]] = []
     for path in _frame_paths(category, pose):
         node = base.get(path)
         node = _resolve_uol(node) if isinstance(node, WzUolProperty) else node
@@ -527,11 +537,27 @@ def _collect_part_canvases(
             continue
         for child in node.children():
             target = _resolve_uol(child) if isinstance(child, WzUolProperty) else child
-            if isinstance(target, WzCanvasProperty) and target.has_pixels():
-                if id(target) in seen_ids:
-                    continue
-                seen_ids.add(id(target))
-                out.append((child.name, target))
+            if not isinstance(target, WzCanvasProperty):
+                continue
+            if id(target) in seen_ids:
+                continue
+            # Resolve _outlink/_inlink (a no-op when neither child is
+            # present, returns the original canvas). For hierarchical
+            # packs the placeholder is 1×1 and the link target carries
+            # the real pixels; for legacy single-file Character.wz the
+            # placeholder *is* the pixel canvas.
+            pixels: WzCanvasProperty = target
+            if (target.child("_outlink") is not None
+                    or target.child("_inlink") is not None):
+                root_for_link = pkg_root if pkg_root is not None \
+                    else WzDirectory(name="")
+                resolved = resolve_canvas_link(target, root_for_link)
+                if isinstance(resolved, WzCanvasProperty):
+                    pixels = resolved
+            if not pixels.has_pixels():
+                continue
+            seen_ids.add(id(target))
+            out.append((child.name, target, pixels))
     return out
 
 
@@ -758,9 +784,12 @@ class CharacterRenderer:
             img = self._open_part(eid)
             if img is None:
                 continue
-            for leaf_name, canvas in _collect_part_canvases(img, cat, eid, pose):
+            for leaf_name, canvas, pixel_canvas in _collect_part_canvases(
+                img, cat, eid, pose, pkg_root=self.wz.root,
+            ):
                 placements.append(_Placement(
-                    equip_id=eid, category=cat, name=leaf_name, canvas=canvas,
+                    equip_id=eid, category=cat, name=leaf_name,
+                    canvas=canvas, pixel_canvas=pixel_canvas,
                     origin=_origin(canvas), map_anchors=_map_anchors(canvas),
                     z_slot=_z_slot(canvas),
                 ))
@@ -814,10 +843,17 @@ class CharacterRenderer:
         # Step 3: Sort by z-slot back-to-front and composite.
         placements.sort(key=lambda p: self._z_index(p.z_slot))
 
+        # Bounding box uses the *pixel* canvas dimensions — for
+        # hierarchical packs ``pl.canvas`` is a 1×1 placeholder and the
+        # real pixels live on ``pl.pixel_canvas`` in a sibling _Canvas
+        # WZ. (For legacy single-file Character.wz they're the same
+        # object so this is a no-op.)
         min_x = min(p.top_left[0] for p in placements if p.top_left is not None)
         min_y = min(p.top_left[1] for p in placements if p.top_left is not None)
-        max_x = max(p.top_left[0] + p.canvas.width for p in placements if p.top_left is not None)
-        max_y = max(p.top_left[1] + p.canvas.height for p in placements if p.top_left is not None)
+        max_x = max(p.top_left[0] + p.pixel_canvas.width
+                    for p in placements if p.top_left is not None)
+        max_y = max(p.top_left[1] + p.pixel_canvas.height
+                    for p in placements if p.top_left is not None)
         width = max(1, max_x - min_x)
         height = max(1, max_y - min_y)
 
@@ -826,7 +862,7 @@ class CharacterRenderer:
             if pl.top_left is None:
                 continue
             try:
-                layer = decode_canvas(pl.canvas, region=self.region)
+                layer = decode_canvas(pl.pixel_canvas, region=self.region)
             except Exception:
                 continue
             if layer.mode != "RGBA":
