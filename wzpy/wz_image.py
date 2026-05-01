@@ -7,7 +7,9 @@ access since some WZ files contain thousands of images.
 
 from __future__ import annotations
 
+import contextlib
 import io
+import threading
 from typing import TYPE_CHECKING, List, Optional
 
 from .properties import (
@@ -26,13 +28,16 @@ class _StandaloneWzFile:
 
     The .img parser only ever reaches for ``self._wz_file.reader`` while
     parsing, so a tiny shim suffices and we avoid pretending to be a full
-    parsed WZ container.
+    parsed WZ container. The lock mirrors the one on :class:`WzFile` so
+    callers (parse, canvas reads) can lock uniformly without checking
+    which kind of file backs the image.
     """
 
-    __slots__ = ("reader",)
+    __slots__ = ("reader", "reader_lock")
 
     def __init__(self, reader):
         self.reader = reader
+        self.reader_lock = threading.RLock()
 
 
 class WzImage:
@@ -89,30 +94,42 @@ class WzImage:
 
     # ── lazy parse ──────────────────────────────────────────────────
     def parse(self) -> WzSubProperty:
+        # Fast path: parse already done, no lock required (write to
+        # ``_parsed`` is ordered after ``_root`` below, so once we see
+        # ``_parsed=True`` the root is fully populated).
         if self._parsed and self._root is not None:
             return self._root
-        r = self._wz_file.reader
-        r.seek(self.offset)
-        tag = r.read_byte()
-        # Identifier byte: 0x73 (Property/SubProperty) is by far the most
-        # common. Read the type name to confirm.
-        if tag != 0x73:
-            # Some images don't follow this layout; fall back to an empty root
-            self._root = WzSubProperty(self.name)
+        # Slow path: serialize on the underlying file's reader lock.
+        # The ``WzBinaryReader`` cursor is shared across every WzImage
+        # in the same WzFile, so two threads parsing different images
+        # would otherwise interleave seeks and read each other's
+        # bytes. The double-checked ``_parsed`` re-check inside the
+        # lock keeps subsequent waiters from re-parsing.
+        with self._wz_file.reader_lock:
+            if self._parsed and self._root is not None:
+                return self._root
+            r = self._wz_file.reader
+            r.seek(self.offset)
+            tag = r.read_byte()
+            # Identifier byte: 0x73 (Property/SubProperty) is by far the most
+            # common. Read the type name to confirm.
+            if tag != 0x73:
+                # Some images don't follow this layout; fall back to empty.
+                self._root = WzSubProperty(self.name)
+                self._parsed = True
+                return self._root
+            type_name = r.read_string()
+            r.skip(2)  # reserved (matches Property block)
+            if type_name != "Property":
+                self._root = WzSubProperty(self.name)
+                self._parsed = True
+                return self._root
+            root = WzSubProperty(self.name)
+            for child in parse_property_list(r, self.offset, root, self):
+                root.add(child)
+            self._root = root
             self._parsed = True
-            return self._root
-        type_name = r.read_string()
-        r.skip(2)  # reserved (matches Property block)
-        if type_name != "Property":
-            self._root = WzSubProperty(self.name)
-            self._parsed = True
-            return self._root
-        root = WzSubProperty(self.name)
-        for child in parse_property_list(r, self.offset, root, self):
-            root.add(child)
-        self._root = root
-        self._parsed = True
-        return root
+            return root
 
     # ── access ──────────────────────────────────────────────────────
     @property

@@ -8,6 +8,7 @@ the same once unwrapped.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -104,6 +105,14 @@ class WzFile:
         self.root = WzDirectory(name="")
         self._fp = None
         self._reader: Optional[WzBinaryReader] = None
+        # The underlying ``WzBinaryReader`` keeps a single position
+        # cursor that's shared across every WzImage in this file (and
+        # by canvas raw-byte reads). Werkzeug serves requests on
+        # multiple threads, so without a lock two simultaneous parses
+        # / canvas reads end up doing interleaved seeks on the same
+        # mmap and one of them parses garbage. Acquire this lock for
+        # any operation that moves the reader's cursor.
+        self.reader_lock = threading.RLock()
 
     # ── lifecycle ───────────────────────────────────────────────────
     @classmethod

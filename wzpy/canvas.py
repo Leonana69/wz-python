@@ -30,12 +30,20 @@ def _read_canvas_bytes(canvas: "WzCanvasProperty") -> bytes:
     wz_image = canvas._wz_image
     if wz_image is None:
         raise RuntimeError("canvas not bound to a WzImage")
-    r = wz_image.wz_file.reader
-    keep = r.position
-    r.seek(canvas._png_offset)
-    canvas._png_data = r.read(canvas._png_length)
-    r.seek(keep)
-    return canvas._png_data
+    wz_file = wz_image.wz_file
+    # Same reasoning as WzImage.parse: the reader's cursor is shared
+    # across every canvas / image in this WzFile, so two threads
+    # racing on _read_canvas_bytes would seek and read each other's
+    # bytes. Acquire the file's reader lock for the duration.
+    with wz_file.reader_lock:
+        if canvas._png_data is not None:
+            return canvas._png_data
+        r = wz_file.reader
+        keep = r.position
+        r.seek(canvas._png_offset)
+        canvas._png_data = r.read(canvas._png_length)
+        r.seek(keep)
+        return canvas._png_data
 
 
 def _try_listwz(raw: bytes, key: WzKey) -> bytes:
