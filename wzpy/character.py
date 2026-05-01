@@ -339,6 +339,40 @@ DEFAULT_POSE = "stand1"
 DEFAULT_EAR_TYPE = "humanEar"
 
 
+# Caps occupy "visual slots" listed in ``info/vslot``: a concatenation
+# of two-character tokens like ``Cp`` (the cap itself) and ``H1``..``H6``
+# (hair sub-slots). The renderer needs to know which Hair canvases the
+# cap covers so the hair doesn't poke through. The mapping below
+# mirrors MapleNecrocer's CapType derivation in MapleCharacter.cs:301:
+#
+#   ``Cp`` / ``CpH5``                  → no hair hidden
+#   ``CpH1H5``                         → hide hairOverHead, backHair
+#   long vslot starting ``CpH1H3``     → hide the four "front-hair"
+#                                        canvases below
+#   any other long vslot               → hide ALL hair (full helmet)
+#
+# A returned ``None`` means "every Hair canvas is hidden". An empty
+# set means "show everything".
+_CAP_HIDE_PARTIAL: frozenset = frozenset(
+    {"hairOverHead", "backHair", "hairBelowBody", "backHairBelowCap"}
+)
+_CAP_HIDE_TOP: frozenset = frozenset({"hairOverHead", "backHair"})
+
+
+def _cap_hidden_hair_canvases(vslot: Optional[str]) -> Optional[frozenset]:
+    """Resolve a cap's ``info/vslot`` string to the set of Hair canvas
+    names it covers, or ``None`` if it covers every Hair canvas."""
+    if not vslot or vslot in ("Cp", "CpH5"):
+        return frozenset()
+    if vslot == "CpH1H5":
+        return _CAP_HIDE_TOP
+    if len(vslot) > 12:
+        if vslot.startswith("CpH1H3"):
+            return _CAP_HIDE_PARTIAL
+        return None
+    return frozenset()
+
+
 def _frame_paths(category: str, pose: str) -> Tuple[str, ...]:
     """Return ordered candidate frame paths for collecting render leaves.
 
@@ -587,6 +621,7 @@ def _collect_part_canvases(
     img: WzImage, category: str, equip_id: str, pose: str,
     pkg_root: Optional[WzDirectory] = None,
     ear_type: str = DEFAULT_EAR_TYPE,
+    hide_hair: frozenset = frozenset(),
 ) -> List[Tuple[str, WzCanvasProperty, WzCanvasProperty]]:
     """Return ``(leaf_name, metadata_canvas, pixel_canvas)`` triples to render.
 
@@ -622,6 +657,14 @@ def _collect_part_canvases(
             # before we ever reach ``front`` and the dedupe table hides
             # them from the explicit ``front`` filter.
             if category == "Head" and child.name not in ("head", ear_type):
+                continue
+            # For Hair, drop canvases the equipped Cap covers (mirrors
+            # MapleCharacter.cs:1189-1212 — when DressCap and ShowHair
+            # are both true the cap's vslot decides which hair canvases
+            # stay visible). The "hide every Hair" case (full helmet)
+            # is short-circuited in ``compose`` so we don't need a
+            # special sentinel here.
+            if category == "Hair" and child.name in hide_hair:
                 continue
             target = _resolve_uol(child) if isinstance(child, WzUolProperty) else child
             if not isinstance(target, WzCanvasProperty):
@@ -856,6 +899,36 @@ class CharacterRenderer:
                     break
         return seen
 
+    def _cap_hair_filter(
+        self, equip_ids: List[str],
+    ) -> Tuple[bool, frozenset]:
+        """Find the equipped Cap's ``info/vslot`` and translate it into
+        the Hair-canvas filter to apply during compose.
+
+        Returns ``(hide_hair_full, hide_hair_set)``: the boolean is
+        True when the cap covers every Hair canvas (full helmet), in
+        which case ``compose`` skips the Hair part entirely; otherwise
+        the set names the specific Hair canvases the cap covers.
+        """
+        cap_id = next(
+            (e for e in equip_ids if category_for_id(e) == "Cap"), None,
+        )
+        if cap_id is None:
+            return (False, frozenset())
+        img = self._open_part(cap_id)
+        if img is None:
+            return (False, frozenset())
+        info = img.parse().get("info")
+        vslot: Optional[str] = None
+        if isinstance(info, WzSubProperty):
+            v = info.get("vslot")
+            if isinstance(v, WzStringProperty):
+                vslot = v.value
+        hidden = _cap_hidden_hair_canvases(vslot)
+        if hidden is None:
+            return (True, frozenset())
+        return (False, hidden)
+
     def get_ear_types(self, equip_id: str) -> List[str]:
         """Return the ear-canvas names a Head image ships with.
 
@@ -912,18 +985,27 @@ class CharacterRenderer:
         canvas the ear simply doesn't render — call
         :meth:`get_ear_types` first to enumerate what's available."""
         pose = self.detect_pose(equip_ids, pose)
+        # Resolve the cap's vslot string into the set of Hair canvases
+        # it covers — or to ``None`` when the cap is a full helmet that
+        # hides every Hair canvas. Done before collecting canvases so we
+        # can skip the Hair part wholesale in the helmet case (saves
+        # parsing a hair img we'd discard anyway) and otherwise narrow
+        # the per-canvas filter inside ``_collect_part_canvases``.
+        hide_hair_full, hide_hair_set = self._cap_hair_filter(equip_ids)
         # Step 1: Per-part canvas collection.
         placements: List[_Placement] = []
         for eid in equip_ids:
             cat = category_for_id(eid)
             if cat is None:
                 continue
+            if cat == "Hair" and hide_hair_full:
+                continue
             img = self._open_part(eid)
             if img is None:
                 continue
             for leaf_name, canvas, pixel_canvas in _collect_part_canvases(
                 img, cat, eid, pose, pkg_root=self.wz.root,
-                ear_type=ear_type,
+                ear_type=ear_type, hide_hair=hide_hair_set,
             ):
                 placements.append(_Placement(
                     equip_id=eid, category=cat, name=leaf_name,
