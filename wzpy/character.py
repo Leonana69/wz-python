@@ -635,6 +635,9 @@ def _dedupe_by_color(
     return out
 
 
+_INFO_ONLY: frozenset = frozenset({"info"})
+
+
 def _read_cash_flag(img: WzImage) -> bool:
     """True when the image's ``info/cash`` is a non-zero int.
 
@@ -644,9 +647,15 @@ def _read_cash_flag(img: WzImage) -> bool:
     for the regular ID range and ``info/cash = 1`` for cash-shop
     variants; the pre-built ID prefix isn't a reliable signal because
     cash and non-cash IDs share the same 4-digit prefix in stock data.
+
+    Uses ``WzImage.parse_partial`` so we read just the ``info``
+    subtree — for a Weapon img that's a few small scalars instead of
+    the full pose / frame / canvas-metadata walk (~30x faster). The
+    full-parse cache is left untouched so ``compose`` / canvas
+    requests still trigger and cache a complete parse on demand.
     """
     try:
-        info = img.parse().get("info")
+        info = img.parse_partial(only=_INFO_ONLY).get("info")
     except Exception:
         return False
     if not isinstance(info, WzSubProperty):
@@ -1130,6 +1139,7 @@ class CharacterRenderer:
     def compose(
         self, equip_ids: List[str], pose: Optional[str] = None,
         ear_type: str = DEFAULT_EAR_TYPE,
+        flip: bool = False,
     ) -> Image.Image:
         """Render the equipped parts as a single RGBA :class:`PIL.Image`.
 
@@ -1141,7 +1151,11 @@ class CharacterRenderer:
         to render alongside ``head`` (e.g. ``humanEar``, ``lefEar``,
         ``highlefEar``). If the Head image doesn't ship a matching
         canvas the ear simply doesn't render — call
-        :meth:`get_ear_types` first to enumerate what's available."""
+        :meth:`get_ear_types` first to enumerate what's available.
+
+        ``flip=True`` mirrors the final composite horizontally, which
+        is how MapleStory renders a right-facing character — the
+        bitmaps are authored facing left and flipped at draw time."""
         pose = self.detect_pose(equip_ids, pose)
         # Resolve the cap's vslot string into the set of Hair canvases
         # it covers — or to ``None`` when the cap is a full helmet that
@@ -1278,6 +1292,8 @@ class CharacterRenderer:
                 layer,
                 (pl.top_left[0] - min_x, pl.top_left[1] - min_y),
             )
+        if flip:
+            composite = composite.transpose(Image.FLIP_LEFT_RIGHT)
         return composite
 
     # ── internals ──────────────────────────────────────────────────────

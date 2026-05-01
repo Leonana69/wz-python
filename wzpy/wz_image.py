@@ -16,6 +16,7 @@ from .properties import (
     WzProperty,
     WzSubProperty,
     parse_property_list,
+    parse_property_list_filtered,
 )
 
 if TYPE_CHECKING:
@@ -129,6 +130,42 @@ class WzImage:
                 root.add(child)
             self._root = root
             self._parsed = True
+            return root
+
+    def parse_partial(self, *, only) -> WzSubProperty:
+        """Parse only the named top-level subtrees, skipping every
+        other tag-9 child via its ``block_size`` prefix.
+
+        Lets ``_read_cash_flag`` reach ``info/cash`` without walking
+        the pose / frame / canvas-metadata tree that dominates parse
+        cost on Weapon imgs (~5-10ms full vs. ~0.1-0.3ms partial).
+
+        Critical invariant: this method **does not** populate
+        ``self._root`` or set ``self._parsed``. The returned tree
+        contains only the requested children; subsequent full
+        ``parse()`` calls must still produce the complete tree, so
+        leaving the cache flags untouched is essential.
+
+        ``only`` is a frozenset of top-level child names to actually
+        recurse into. Names not in the set are skipped via
+        ``seek(end_pos)`` if tag-9 (extended), or fully decoded if
+        they're cheap basic scalars at the same depth (tag 0/2/3/4/5/8/
+        11/19/20). Re-entrant on the file's reader lock (RLock)."""
+        with self._wz_file.reader_lock:
+            r = self._wz_file.reader
+            r.seek(self.offset)
+            tag = r.read_byte()
+            if tag != 0x73:
+                return WzSubProperty(self.name)
+            type_name = r.read_string()
+            r.skip(2)
+            if type_name != "Property":
+                return WzSubProperty(self.name)
+            root = WzSubProperty(self.name)
+            for child in parse_property_list_filtered(
+                r, self.offset, root, self, only=only,
+            ):
+                root.add(child)
             return root
 
     # ── access ──────────────────────────────────────────────────────

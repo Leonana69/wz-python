@@ -252,6 +252,131 @@ def parse_property_list(
     return items
 
 
+def parse_property_list_filtered(
+    reader: "WzBinaryReader",
+    base_offset: int,
+    parent: WzProperty,
+    wz_image: "WzImage",
+    *,
+    only: frozenset,
+) -> List[WzProperty]:
+    """Parse children but recurse only into tag-9 (extended) entries
+    whose name is in ``only``; skip the body of every other tag-9
+    entry via its 4-byte ``block_size`` prefix.
+
+    Lets ``_read_cash_flag`` land at ``info/cash`` without walking the
+    pose / frame / canvas subtrees that dominate a Weapon img's parse
+    cost — for those imgs we read ``count`` + a few ``string_block`` +
+    ``seek(end_pos)`` per top-level child instead of recursively
+    decoding 50+ canvas-metadata properties. Same EOFError / ValueError
+    truncation handling as :func:`parse_property_list`.
+
+    Tag-2 / 3 / 4 / 5 / 8 / 11 / 19 / 20 (basic scalars / strings) and
+    tag 0 (Null) still parse normally — they're tiny and we may want
+    them (e.g. ``info`` itself is tag-9, but its children are mostly
+    these). Only tag-9 children get the name-gated skip.
+    """
+    try:
+        count = reader.read_compressed_int()
+    except EOFError:
+        if wz_image is not None:
+            wz_image.truncated = True
+        return []
+    items: List[WzProperty] = []
+    for _ in range(count):
+        try:
+            name = reader.read_string_block(base_offset)
+            tag = reader.read_byte()
+            if tag == 9:
+                block_size = reader.read_u32()
+                end_pos = reader.position + block_size
+                if name in only:
+                    ext_type = reader.read_string_block(base_offset)
+                    prop = _parse_extended(
+                        reader, base_offset, name, ext_type,
+                        parent, wz_image, end_pos,
+                    )
+                    if reader.position < end_pos:
+                        reader.seek(end_pos)
+                    items.append(prop)
+                else:
+                    # Skip the entire extended body (ext_type + payload).
+                    reader.seek(end_pos)
+            else:
+                # Basic/scalar tag: cheap to parse, always include so
+                # callers asking only for tag-9 names still see siblings
+                # like ``cash`` (tag 3) when they're at the same depth.
+                prop = _decode_basic_tag(
+                    reader, base_offset, name, tag, parent, wz_image,
+                )
+                items.append(prop)
+        except EOFError:
+            if wz_image is not None:
+                wz_image.truncated = True
+            break
+        except ValueError as exc:
+            if wz_image is not None:
+                wz_image.truncated = True
+                wz_image.parse_warnings.append(
+                    f"stopped parsing {parent.name or '?'}: {exc}"
+                )
+            break
+    return items
+
+
+def _decode_basic_tag(
+    reader: "WzBinaryReader",
+    base_offset: int,
+    name: str,
+    tag: int,
+    parent: WzProperty,
+    wz_image: "WzImage",
+) -> WzProperty:
+    """Tag-byte already consumed — dispatch the non-extended (non-tag-9)
+    cases of ``_parse_extended_or_basic``. Used by the filtered parser
+    so we don't have to read the tag twice for tag-9 children."""
+    if tag == 0:
+        return WzNullProperty(name, parent)
+    if tag in (2, 11):
+        v_off = reader.position
+        prop = WzShortProperty(name, reader.read_i16(), parent)
+        prop._value_offset, prop._value_length = v_off, 2
+        return prop
+    if tag in (3, 19):
+        v_off = reader.position
+        prop = WzIntProperty(name, reader.read_compressed_int(), parent)
+        prop._value_offset, prop._value_length = v_off, reader.position - v_off
+        return prop
+    if tag == 20:
+        v_off = reader.position
+        prop = WzLongProperty(name, reader.read_compressed_long(), parent)
+        prop._value_offset, prop._value_length = v_off, reader.position - v_off
+        return prop
+    if tag == 4:
+        v_off = reader.position
+        sub = reader.read_byte()
+        if sub == 0x80:
+            prop = WzFloatProperty(name, reader.read_f32(), parent)
+        else:
+            prop = WzFloatProperty(name, 0.0, parent)
+        prop._value_offset, prop._value_length = v_off, reader.position - v_off
+        return prop
+    if tag == 5:
+        v_off = reader.position
+        prop = WzDoubleProperty(name, reader.read_f64(), parent)
+        prop._value_offset, prop._value_length = v_off, 8
+        return prop
+    if tag == 8:
+        text, p_off, p_len, enc, indirected = reader.read_string_block_with_location(base_offset)
+        prop = WzStringProperty(name, text, parent)
+        prop._payload_offset = p_off
+        prop._payload_length = p_len
+        prop._encoding = enc
+        prop._indirected = indirected
+        return prop
+    raise ValueError(f"unknown property tag {tag} for '{name}' at 0x{reader.position - 1:X}")
+
+
 def _parse_extended_or_basic(
     reader: "WzBinaryReader",
     base_offset: int,
