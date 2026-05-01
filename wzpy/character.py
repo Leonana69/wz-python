@@ -272,10 +272,24 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     "ear",
     "accessoryEarBelowFace",
     "accessoryFaceBelowFace",
+    "accessoryEyeBelowFace",
     "face",
     "faceOverHair",
     "hairShade",
     "hair",
+    # Face / eye / ear accessories whose z slot doesn't end in
+    # ``*OverCap``. Per the canonical v83 zmap these sit ABOVE the
+    # face / hair canvas but BELOW ``hairOverHead`` so bangs cover
+    # them — what the user expects when no cap is equipped (otherwise
+    # cap-less glasses, earrings, and most FaceAcc render on top of
+    # the bangs).
+    "accessoryEar",
+    "accessoryFace",
+    "accessoryFaceOverFaceBelowCap",
+    "accessoryFaceOverFaceAcc",
+    "accessoryFaceOverEar",
+    "accessoryEyes",
+    "accessoryEye",
     "hairOverHead",
     # Cap layers (above hair, below face accessories that overlap caps).
     "capeOverHead",
@@ -301,20 +315,30 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     "handOverHair",
     "gloveOverHair",
     "gloveWristOverHair",
-    # Face / eye / ear accessories — top of the stack.
-    "accessoryFace",
-    "accessoryFaceOverFaceBelowCap",
-    "accessoryFaceOverFaceAcc",
-    "accessoryFaceOverEar",
+    # Face / eye accessories that explicitly sit ABOVE the cap
+    # (named ``*OverCap``). These render at the very top of the
+    # stack only when a cap is actually equipped — when no cap is on,
+    # ``compose`` remaps each one to its non-OverCap sibling so the
+    # bangs (hairOverHead) cover the glasses / face accessory like
+    # they should. See ``_OVER_CAP_REMAP``.
     "accessoryFaceOverCap",
     "accessoryFaceUpperOverCap",
-    "accessoryEyes",
-    "accessoryEye",
     "accessoryEyeOverCap",
-    "accessoryEar",
     "shieldOverHair",
     "emotionOverBody",
 )
+
+
+# Conditional z-slot remap for ``*OverCap`` face accessories. When no
+# Cap is equipped, treat these slots as their non-OverCap equivalent
+# during the z-sort so ordinary glasses (e.g., 01022032, 01022046) sit
+# behind the bangs instead of on top of them. With a Cap equipped the
+# remap is skipped — the cap is meant to wear them on top.
+_OVER_CAP_REMAP: Dict[str, str] = {
+    "accessoryEyeOverCap": "accessoryEye",
+    "accessoryFaceOverCap": "accessoryFace",
+    "accessoryFaceUpperOverCap": "accessoryFace",
+}
 
 # Per-category candidate frame paths to walk when collecting render leaves.
 # We try each path in order, dedupe by canvas identity (UOLs into the same
@@ -1021,6 +1045,15 @@ class CharacterRenderer:
         # parsing a hair img we'd discard anyway) and otherwise narrow
         # the per-canvas filter inside ``_collect_part_canvases``.
         hide_hair_full, hide_hair_set = self._cap_hair_filter(equip_ids)
+        # ``*OverCap`` glasses / face accs need to sit BEHIND the
+        # bangs whenever the bangs are actually visible — otherwise
+        # the glass renders on top of hair that's covering the
+        # forehead. A cap with vslot ``Cp`` / ``CpH5`` (CapType 0)
+        # doesn't hide any hair, so the bangs are still visible and
+        # we treat it like "no cap" for this layering. Only caps
+        # that hide at least one hair canvas trigger the OverCap
+        # slot's top-of-stack behaviour.
+        cap_covers_hair = hide_hair_full or bool(hide_hair_set)
         # Step 1: Per-part canvas collection.
         placements: List[_Placement] = []
         for eid in equip_ids:
@@ -1089,8 +1122,17 @@ class CharacterRenderer:
                 )
             self._register_anchors(pl, world_anchors, overwrite=False)
 
-        # Step 3: Sort by z-slot back-to-front and composite.
-        placements.sort(key=lambda p: self._z_index(p.z_slot))
+        # Step 3: Sort by z-slot back-to-front and composite. When the
+        # equipped cap (if any) doesn't actually hide hair, swap any
+        # ``*OverCap`` slot for its non-OverCap sibling during the
+        # sort so the canvas drops behind ``hairOverHead`` like an
+        # ordinary glass / face acc.
+        def z_for(pl: _Placement) -> int:
+            slot = pl.z_slot
+            if slot is not None and not cap_covers_hair:
+                slot = _OVER_CAP_REMAP.get(slot, slot)
+            return self._z_index(slot)
+        placements.sort(key=z_for)
 
         # Bounding box uses the *pixel* canvas dimensions — for
         # hierarchical packs ``pl.canvas`` is a 1×1 placeholder and the
