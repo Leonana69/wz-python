@@ -1037,6 +1037,15 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         resp.headers["X-Canvas-Size"] = f"{render_prop.width}x{render_prop.height}"
         if link_target is not None:
             resp.headers["X-Canvas-Linked"] = "1"
+        # Save-As filename hint. Without this the browser falls back to
+        # the last URL segment, which for thumbnails is just ``icon`` /
+        # ``body`` / ``hairOverHead``. Pull the .img stem out of the
+        # request path so a Cap thumbnail saves as e.g. ``01000000.png``
+        # instead of ``icon.png``. Use ``inline`` so the browser still
+        # renders it in the page; the filename only kicks in on Save As.
+        resp.headers["Content-Disposition"] = (
+            f'inline; filename="{_canvas_save_name(subpath)}"'
+        )
         return resp
 
     @app.route("/api/sound/<path:subpath>")
@@ -1173,6 +1182,20 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         # Strip characters problematic on Windows.
         base = re.sub(r'[<>:"|?*]', "_", base)
         return f"{base}.{ext}"
+
+    def _canvas_save_name(subpath: str) -> str:
+        """Default Save As name for ``/api/canvas/<subpath>.png``.
+
+        Picks the .img stem so a thumbnail at ``Cap/01000000.img/info/icon``
+        saves as ``01000000.png``. If the path doesn't contain an .img
+        segment (rare — direct property paths under the root), fall back
+        to the underscore-joined subpath."""
+        for part in unquote(subpath).split("/"):
+            if part.endswith(".img"):
+                stem = part[: -len(".img")]
+                if stem:
+                    return re.sub(r'[<>:"|?*\\/]', "_", stem) + ".png"
+        return _safe_filename(subpath, "png")
 
     @app.route("/api/export/json/", defaults={"subpath": ""})
     @app.route("/api/export/json/<path:subpath>")
