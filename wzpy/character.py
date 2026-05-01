@@ -488,17 +488,47 @@ def _is_cash_weapon(equip_id: str) -> bool:
     return bool(equip_id) and equip_id.startswith("0170")
 
 
-def _dedupe_hair_by_color(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Collapse 8-variant hair color groups (``id // 10`` shared) to a
-    single entry per style, keeping the smallest-numbered variant as
-    the canonical ``id`` and exposing the available color indices
-    (0..7) under ``colors``. Outlier styles that ship fewer than 8
-    colors keep whatever subset the WZ actually has."""
+# Color-encoding rules for Hair / Face. Each tuple is
+# ``(base_divisor, color_modulus)`` such that ``id // base_divisor``
+# is shared across colors and ``(id // (base_divisor // 10)) % 10``
+# yields the color index. For Hair the color sits in the ones digit
+# (last). For Face the color sits in the hundreds digit, e.g.
+# ``00022017``, ``00022117`` … ``00022817`` are the same style.
+_HAIR_COLOR_INDEX = (10, 1)     # base = id // 10, color = id % 10
+_FACE_COLOR_INDEX = (1000, 100)  # base = (id//1000)*100 + id%100, color = (id//100)%10
+
+
+def _dedupe_by_color(
+    parts: List[Dict[str, Any]],
+    rule: Tuple[int, int],
+) -> List[Dict[str, Any]]:
+    """Collapse color-variant groups to a single canonical entry.
+
+    ``rule`` is ``(base_divisor, color_unit)``:
+      * ``base_divisor``: divide the numeric ID by this and keep the
+        quotient — this is the "style" key that variants share.
+        For Hair (``10``), the last digit is dropped. For Face
+        (``1000``), the hundreds digit and below are dropped.
+      * ``color_unit``: divide the ID by this and modulo 10 to read
+        out the color digit (1 for Hair's last digit, 100 for
+        Face's hundreds digit).
+
+    The smallest-numbered variant in each group becomes the canonical
+    ``id`` so the icon thumbnail and default render show the leftmost
+    color in the swatch row (typically black). The full set of
+    available color indices is returned under ``colors`` so the UI
+    can disable missing colors.
+    """
+    base_div, color_unit = rule
     grouped: Dict[int, Dict[str, Any]] = {}
     for entry in parts:
         n = int(entry["id"])
-        base = n // 10
-        color = n % 10
+        # Strip the color digit out of the ID so styles that differ
+        # only in color collapse to the same key. ``base = n - color
+        # * color_unit`` is robust whether the color sits in the
+        # ones, hundreds, or any other position.
+        color = (n // color_unit) % 10
+        base = n - color * color_unit
         existing = grouped.get(base)
         if existing is None:
             new_entry = dict(entry)
@@ -506,9 +536,6 @@ def _dedupe_hair_by_color(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             grouped[base] = new_entry
         else:
             existing["colors"].append(color)
-            # Smaller IDs win as the canonical entry so the icon and
-            # default render reflect the leftmost color in the swatch
-            # row (typically black, color 0).
             if n < int(existing["id"]):
                 existing["id"] = entry["id"]
                 existing["icon_paths"] = entry["icon_paths"]
@@ -860,15 +887,17 @@ class CharacterRenderer:
         # Natural sort by ID.
         results.sort(key=lambda r: int(r["id"]))
 
-        # Hair styles: the last digit encodes color
-        # (0 black, 1 red, 2 orange, 3 yellow, 4 green, 5 blue, 6 purple,
-        # 7 brown). Roughly 98% of styles ship all 8 variants as
-        # consecutive IDs (e.g., 00030000–00030007). Collapse the list
-        # to one entry per style, keep the smallest variant as ``id``,
-        # and surface the available ``colors`` so the client can build
-        # a color picker that disables missing colors.
+        # Hair / Face styles encode color in a specific digit position
+        # (last digit for Hair, hundreds digit for Face). Most styles
+        # ship the full color palette as consecutive IDs (Hair: 8
+        # colors, Face: 9), so collapse the listing to one entry per
+        # style, keep the smallest variant as ``id``, and surface the
+        # available color indices so the client can build a color
+        # picker that grays out colors the style doesn't ship.
         if category == "Hair":
-            results = _dedupe_hair_by_color(results)
+            results = _dedupe_by_color(results, _HAIR_COLOR_INDEX)
+        elif category == "Face":
+            results = _dedupe_by_color(results, _FACE_COLOR_INDEX)
         return results
 
     # ── pose discovery ──────────────────────────────────────────────────

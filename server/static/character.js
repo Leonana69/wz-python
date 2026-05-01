@@ -117,35 +117,59 @@ const state = {
   // visit to a tab shows the in-game gear (cash items are gear-shop
   // variants, less likely to be the user's first pick).
   subTab: {},
-  // Hair color index 0..7 (0=black). Each style ID's last digit
-  // encodes color; the deduped style entry from the server lists
-  // which color indices it ships under ``colors``. Changing this
-  // re-skins every visible hair thumbnail and, if a Hair is
-  // equipped, swaps the equipped ID to the new color variant.
-  hairColor: 0,
+  // Color index per category (currently Hair, Face). Each is the
+  // currently-selected color index 0..N-1, default 0. Changing one
+  // re-skins every visible thumbnail in that category and, if a
+  // member is equipped, swaps the equipped ID to the new variant.
+  colorByCategory: { Hair: 0, Face: 0 },
 };
 
-// Hair color palette — index → {label, swatch-css}. Order matches the
-// last-digit convention in the WZ data: 0 black, 1 red, 2 orange,
-// 3 yellow, 4 green, 5 blue, 6 purple, 7 brown.
-const HAIR_COLORS = [
-  { name: "Black",  swatch: "#1a1a1a" },
-  { name: "Red",    swatch: "#c43c3c" },
-  { name: "Orange", swatch: "#dd7b2a" },
-  { name: "Yellow", swatch: "#e0c350" },
-  { name: "Green",  swatch: "#5b9b4a" },
-  { name: "Blue",   swatch: "#3a6fa8" },
-  { name: "Purple", swatch: "#7b4a9b" },
-  { name: "Brown",  swatch: "#7a4a2c" },
-];
+// Per-category color configuration. ``palette`` is a list of
+// {name, swatch} pairs in WZ-index order. ``variantId`` rewrites a
+// base ID to the variant for the picked color (Hair: last digit;
+// Face: hundreds digit). The order of ``palette`` MUST match the WZ
+// digit-encoding convention or the swatch labels will lie.
+const COLOR_CONFIG = {
+  Hair: {
+    // Last digit: 0 black, 1 red, 2 orange, 3 yellow, 4 green,
+    // 5 blue, 6 purple, 7 brown.
+    palette: [
+      { name: "Black",  swatch: "#1a1a1a" },
+      { name: "Red",    swatch: "#c43c3c" },
+      { name: "Orange", swatch: "#dd7b2a" },
+      { name: "Yellow", swatch: "#e0c350" },
+      { name: "Green",  swatch: "#5b9b4a" },
+      { name: "Blue",   swatch: "#3a6fa8" },
+      { name: "Purple", swatch: "#7b4a9b" },
+      { name: "Brown",  swatch: "#7a4a2c" },
+    ],
+    variantId: (baseId, color) => baseId.slice(0, -1) + String(color),
+  },
+  Face: {
+    // Hundreds digit: 0 black, 1 blue, 2 red, 3 green, 4 orange,
+    // 5 cyan, 6 purple, 7 pink, 8 gray.
+    palette: [
+      { name: "Black",  swatch: "#1a1a1a" },
+      { name: "Blue",   swatch: "#3a6fa8" },
+      { name: "Red",    swatch: "#c43c3c" },
+      { name: "Green",  swatch: "#5b9b4a" },
+      { name: "Orange", swatch: "#dd7b2a" },
+      { name: "Cyan",   swatch: "#4dbdc8" },
+      { name: "Purple", swatch: "#7b4a9b" },
+      { name: "Pink",   swatch: "#e08fb0" },
+      { name: "Gray",   swatch: "#888888" },
+    ],
+    variantId: (baseId, color) =>
+      baseId.slice(0, -3) + String(color) + baseId.slice(-2),
+  },
+};
 
-function colorVariantId(baseId, color) {
-  // baseId encodes color in its last digit; replace with the picked
-  // index (kept as a single 0..7 character).
-  return baseId.slice(0, -1) + String(color);
+function variantIdFor(category, baseId, color) {
+  const cfg = COLOR_CONFIG[category];
+  return cfg ? cfg.variantId(baseId, color) : baseId;
 }
 
-function pickHairColor(availableColors, requested) {
+function pickAvailableColor(availableColors, requested) {
   if (!availableColors || availableColors.length === 0) return 0;
   if (availableColors.includes(requested)) return requested;
   return availableColors[0];
@@ -216,8 +240,8 @@ function renderSubTabs(category, parts) {
     $subtabs.hidden = true;
     return;
   }
-  if (category === "Hair") {
-    renderHairColorSubTabs();
+  if (COLOR_CONFIG[category]) {
+    renderColorSubTabs(category);
     $subtabs.hidden = false;
     return;
   }
@@ -257,25 +281,28 @@ function renderSubTabs(category, parts) {
   make("cash",     "Cash",     counts.cash);
 }
 
-function renderHairColorSubTabs() {
+function renderColorSubTabs(category) {
+  const cfg = COLOR_CONFIG[category];
+  if (!cfg) return;
+  const active = state.colorByCategory[category] ?? 0;
   const label = document.createElement("span");
   label.className = "subtab-label";
   label.textContent = "Color";
   $subtabs.appendChild(label);
-  for (let i = 0; i < HAIR_COLORS.length; i++) {
-    const c = HAIR_COLORS[i];
+  for (let i = 0; i < cfg.palette.length; i++) {
+    const c = cfg.palette[i];
     const btn = document.createElement("button");
     btn.type = "button";
     btn.dataset.color = String(i);
     btn.classList.add("color-btn");
-    btn.classList.toggle("active", i === state.hairColor);
+    btn.classList.toggle("active", i === active);
     btn.title = c.name;
     const swatch = document.createElement("span");
     swatch.className = "color-swatch";
     swatch.style.background = c.swatch;
     btn.appendChild(swatch);
     btn.appendChild(document.createTextNode(c.name));
-    btn.addEventListener("click", () => selectHairColor(i));
+    btn.addEventListener("click", () => selectColor(category, i));
     $subtabs.appendChild(btn);
   }
 }
@@ -290,31 +317,33 @@ function selectSubTab(category, key) {
   if (parts) renderGrid(category, filterPartsBySubTab(category, parts));
 }
 
-function selectHairColor(color) {
-  if (state.hairColor === color) return;
-  state.hairColor = color;
+function selectColor(category, color) {
+  if (state.colorByCategory[category] === color) return;
+  state.colorByCategory[category] = color;
   for (const b of $subtabs.querySelectorAll("button.color-btn")) {
     b.classList.toggle("active", Number(b.dataset.color) === color);
   }
-  // Re-skin every visible hair tile to the new color and update the
-  // equipped highlight (the equipped ID may shift to the new variant).
-  const parts = state.parts.get("Hair");
-  if (parts) renderGrid("Hair", parts);
-  // If a Hair is equipped, swap to the matching color variant — pick
-  // the requested color when the equipped style ships it, otherwise
-  // fall back to the first color the style does ship. The boot
-  // default seeds Hair without ``baseId`` / ``colors``; derive a
-  // base from the equipped ID and assume the canonical 0..7 palette
-  // so the swap still works without waiting for the parts list.
-  const eq = state.equipped.Hair;
+  // Re-skin every visible tile in this category to the new color and
+  // update the equipped highlight (the equipped ID may shift to the
+  // new variant).
+  const parts = state.parts.get(category);
+  if (parts) renderGrid(category, parts);
+  // If a member of this category is equipped, swap to the matching
+  // color variant. Pick the requested color when the equipped style
+  // ships it; fall back to the first color it does ship. The boot
+  // default seeds without ``baseId`` / ``colors``; derive a base
+  // from the equipped ID and assume the full palette so the swap
+  // still works without waiting for the parts list.
+  const eq = state.equipped[category];
   if (eq) {
-    const baseId = eq.baseId ?? colorVariantId(eq.id, 0);
-    const colors = eq.colors ?? [0, 1, 2, 3, 4, 5, 6, 7];
-    const target = pickHairColor(colors, color);
-    const newId = colorVariantId(baseId, target);
+    const cfg = COLOR_CONFIG[category];
+    const baseId = eq.baseId ?? cfg.variantId(eq.id, 0);
+    const colors = eq.colors ?? cfg.palette.map((_, i) => i);
+    const target = pickAvailableColor(colors, color);
+    const newId = cfg.variantId(baseId, target);
     if (newId !== eq.id) {
       eq.id = newId;
-      eq.iconPaths = iconPathsFor("Hair", newId);
+      eq.iconPaths = iconPathsFor(category, newId);
       eq.baseId = baseId;
       eq.colors = colors;
       renderEquipped();
@@ -416,15 +445,17 @@ function renderGrid(category, parts) {
 function makeTile(category, part, equippedId) {
   const tile = document.createElement("div");
 
-  // Hair tiles represent a style (one entry per ``id // 10`` group);
-  // the displayed thumb and the equipped ID swap to the variant for
-  // the active color. Other categories use the part ID as-is.
+  // Hair / Face tiles each represent a style (one entry per
+  // dedup-group); the displayed thumb and the equipped ID swap to
+  // the variant for the active color. Other categories use the part
+  // ID as-is.
   let displayId = part.id;
   let candidates;
-  if (category === "Hair") {
-    const color = pickHairColor(part.colors, state.hairColor);
-    displayId = colorVariantId(part.id, color);
-    candidates = iconPathsFor("Hair", displayId);
+  const cfg = COLOR_CONFIG[category];
+  if (cfg) {
+    const color = pickAvailableColor(part.colors, state.colorByCategory[category] ?? 0);
+    displayId = cfg.variantId(part.id, color);
+    candidates = iconPathsFor(category, displayId);
   } else {
     candidates =
       part.icon_paths && part.icon_paths.length ? part.icon_paths
@@ -454,9 +485,7 @@ function makeTile(category, part, equippedId) {
   tile.appendChild(pid);
 
   tile.addEventListener("click", () => {
-    const extra = category === "Hair"
-      ? { baseId: part.id, colors: part.colors }
-      : null;
+    const extra = cfg ? { baseId: part.id, colors: part.colors } : null;
     equipPart(category, displayId, candidates, extra);
   });
   return tile;
