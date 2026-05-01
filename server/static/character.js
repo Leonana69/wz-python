@@ -182,6 +182,31 @@ const $grid = document.getElementById("char-grid");
 const $equipped = document.getElementById("char-equipped");
 const $scale = document.getElementById("char-scale");
 const $export = document.getElementById("char-export");
+const $progress = document.getElementById("char-progress");
+
+// Inflight-fetch counter that drives the bottom progress bar. Fetches
+// that hit ``/api/character/*`` (parts list, compose, ear types,
+// weapon poses) call ``progressBegin()`` before awaiting and
+// ``progressEnd()`` in their finally block; the bar shows whenever
+// the counter is > 0 and hides when it returns to 0. Indeterminate —
+// no fraction tracked, just "something is happening".
+let _progressInflight = 0;
+function progressBegin() {
+  _progressInflight++;
+  if ($progress) $progress.hidden = false;
+}
+function progressEnd() {
+  _progressInflight = Math.max(0, _progressInflight - 1);
+  if (_progressInflight === 0 && $progress) $progress.hidden = true;
+}
+async function trackedFetch(url, init) {
+  progressBegin();
+  try {
+    return await fetch(url, init);
+  } finally {
+    progressEnd();
+  }
+}
 
 // ── tabs ───────────────────────────────────────────────────────────
 for (const cat of CATEGORIES) {
@@ -211,7 +236,7 @@ async function loadCategory(category) {
   let parts = state.parts.get(category);
   if (!parts) {
     try {
-      const resp = await fetch(`/api/character/parts/${category}`);
+      const resp = await trackedFetch(`/api/character/parts/${category}`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const json = await resp.json();
       parts = json.parts || [];
@@ -556,7 +581,7 @@ async function syncHeadEars(headId) {
   let ears = state.headEarCache.get(headId);
   if (!ears) {
     try {
-      const resp = await fetch(`/api/character/ear_types/${headId}`);
+      const resp = await trackedFetch(`/api/character/ear_types/${headId}`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const json = await resp.json();
       ears = Array.isArray(json.ear_types) ? json.ear_types : [];
@@ -585,7 +610,7 @@ async function syncWeaponPose(weaponId) {
   let poses = state.weaponPoseCache.get(weaponId);
   if (!poses) {
     try {
-      const resp = await fetch(`/api/character/weapon_poses/${weaponId}`);
+      const resp = await trackedFetch(`/api/character/weapon_poses/${weaponId}`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const json = await resp.json();
       poses = json.poses && json.poses.length ? json.poses : ["stand1"];
@@ -754,7 +779,7 @@ async function refreshCompose() {
   // Use a fetch+blob round-trip so we can drop the result if it's stale,
   // and so the image doesn't flicker while a new one loads.
   try {
-    const resp = await fetch(url);
+    const resp = await trackedFetch(url);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const blob = await resp.blob();
     if (seq !== state.composeSeq) return;  // a newer compose superseded us

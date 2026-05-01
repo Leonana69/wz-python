@@ -348,3 +348,32 @@
   grid-column: 1 / -1;
   height: 1px;
 }
+
+/* Indeterminate progress bar pinned to the bottom of the page. Shown
+ * while any tracked fetch (parts list, compose, ear types, weapon
+ * poses) is in flight. Animation is purely CSS so we don't need to
+ * estimate progress server-side — the bar just slides until the
+ * inflight counter hits zero. */
+.char-progress {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: #1a1b1d;
+  z-index: 100;
+  overflow: hidden;
+  pointer-events: none;
+}
+.char-progress-bar {
+  width: 30%;
+  height: 100%;
+  background: linear-gradient(
+    90deg, transparent 0%, #e8b96b 20%, #e8b96b 80%, transparent 100%
+  );
+  animation: char-progress-slide 1.2s linear infinite;
+}
+@keyframes char-progress-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(450%); }
+}
