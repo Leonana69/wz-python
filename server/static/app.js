@@ -480,6 +480,7 @@ treeRoot.addEventListener("click", onTreeClick);
 // ── tree search ────────────────────────────────────────────────────
 const treeSearchInput = document.getElementById("tree-search-input");
 const treeSearchResults = document.getElementById("tree-search-results");
+const treeSearchDeep = document.getElementById("tree-search-deep");
 
 let _treeSearchSeq = 0;     // drop stale responses
 let _treeSearchTimer = 0;   // debounce timer
@@ -496,8 +497,25 @@ async function runTreeSearch(query) {
     clearTreeSearchResults();
     return;
   }
+  // ``deep=1`` widens the server walk into each img's property tree
+  // (matching property names + stringy values). First call after a
+  // page load forces a parse of every img — slow on big WZ packs;
+  // the parse cache makes subsequent searches fast. Show a hint
+  // line while the request is in flight so the user knows why the
+  // freeze is happening.
+  const deep = !!(treeSearchDeep && treeSearchDeep.checked);
+  treeSearchResults.innerHTML = "";
+  const pending = document.createElement("li");
+  pending.className = "ts-empty";
+  pending.textContent = deep
+    ? "Searching (deep — first call may parse the whole archive)…"
+    : "Searching…";
+  treeSearchResults.appendChild(pending);
+  treeSearchResults.hidden = false;
   try {
-    const data = await fetchJson(`/api/search?q=${encodeURIComponent(q)}`);
+    const params = new URLSearchParams({ q });
+    if (deep) params.set("deep", "1");
+    const data = await fetchJson(`/api/search?${params.toString()}`);
     if (seq !== _treeSearchSeq) return;  // a newer search superseded us
     treeSearchResults.innerHTML = "";
     if (!data.results.length) {
@@ -649,14 +667,16 @@ if (treeSearchInput) {
     const q = treeSearchInput.value;
     clearTimeout(_treeSearchTimer);
     // Short debounce — 200ms is comfortable for typing without
-    // firing per keystroke. Empty input clears results immediately
-    // (no point waiting).
+    // firing per keystroke. Deep search is heavier so push its
+    // debounce out a bit further to avoid kicking a 30s parse on
+    // every keystroke.
     if (!q.trim()) {
       _treeSearchSeq++;
       clearTreeSearchResults();
       return;
     }
-    _treeSearchTimer = setTimeout(() => runTreeSearch(q), 200);
+    const deep = !!(treeSearchDeep && treeSearchDeep.checked);
+    _treeSearchTimer = setTimeout(() => runTreeSearch(q), deep ? 350 : 200);
   });
   // Escape clears the input without losing focus.
   treeSearchInput.addEventListener("keydown", (ev) => {
@@ -665,6 +685,14 @@ if (treeSearchInput) {
       _treeSearchSeq++;
       clearTreeSearchResults();
     }
+  });
+}
+if (treeSearchDeep) {
+  treeSearchDeep.addEventListener("change", () => {
+    // Re-run the current query in the new mode so the result list
+    // reflects the toggle immediately. Empty query stays clear.
+    const q = treeSearchInput && treeSearchInput.value.trim();
+    if (q) runTreeSearch(q);
   });
 }
 

@@ -247,6 +247,7 @@ main { display: flex; flex: 1; overflow: hidden; }
   margin-bottom: 4px;
   border-bottom: 1px solid #1a1b1d;
 }
+.tree-search > input[type="search"],
 #tree-search-input {
   width: 100%;
   box-sizing: border-box;
@@ -258,6 +259,18 @@ main { display: flex; flex: 1; overflow: hidden; }
   font: inherit;
   font-size: 12px;
 }
+.tree-search-deep {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #888;
+  cursor: pointer;
+  user-select: none;
+}
+.tree-search-deep input { margin: 0; cursor: pointer; }
+.tree-search-deep:hover { color: #c5c5c5; }
 #tree-search-input:focus {
   outline: none;
   border-color: #e8b96b;

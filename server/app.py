@@ -961,53 +961,98 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         """Walk the WZ tree and return nodes whose name contains the
         query as a case-insensitive substring.
 
-        Matches directories and ``.img`` images only — property
-        children would force a parse of every img and the tree alone
-        is enough to find any equipment ID. Capped at ``limit`` hits
-        (default 200) so a 1-character query doesn't dump tens of
-        thousands of results into the response.
+        By default, matches directories and ``.img`` images only
+        (fast — the tree alone is enough to find any equipment ID).
+        With ``deep=1`` also descends into each .img's property tree,
+        matching property names and stringy values (WzStringProperty
+        / WzUolProperty values), so queries like ``swordL`` find
+        weapons whose ``info/sfx="swordL"``. Deep search forces a
+        parse of every visited img — slow on big WZ packs the first
+        time, near-instant after the parse cache warms up.
+
+        Capped at ``limit`` hits (default 200) with early
+        termination so a 1-character ``deep`` query doesn't iterate
+        the entire archive.
         """
+        from wzpy.properties import (
+            WzCanvasProperty, WzStringProperty, WzSubProperty,
+            WzUolProperty,
+        )
         q = request.args.get("q", "").strip().lower()
         try:
             limit = max(1, min(1000, int(request.args.get("limit", "200"))))
         except ValueError:
             limit = 200
+        deep = request.args.get("deep", "").lower() in ("1", "true", "yes")
         if not q:
             return jsonify({"results": [], "truncated": False})
         results: List[Dict[str, Any]] = []
         truncated = False
+        # Sentinel raised inside the walkers to short-circuit recursion
+        # the moment we hit ``limit`` — saves walking the rest of the
+        # WZ once the response is already full.
+        class _SearchFull(Exception):
+            pass
+
+        def append(entry: Dict[str, Any]) -> None:
+            results.append(entry)
+            if len(results) >= limit:
+                raise _SearchFull
+
+        def walk_property(prop_node: Any, path: str) -> None:
+            # Walk every descendant property within an img, matching
+            # by name and (for stringy properties) value. Skip
+            # ``Image``-rooted recursion that's already counted:
+            # ``prop_node`` is always the SubProperty representing
+            # the .img's own root (or a sub).
+            if not hasattr(prop_node, "children"):
+                return
+            for child in prop_node.children():
+                full = f"{path}/{child.name}"
+                name_match = q in child.name.lower()
+                value_match = False
+                if isinstance(child, (WzStringProperty, WzUolProperty)):
+                    cv = child.value
+                    if cv is not None and q in str(cv).lower():
+                        value_match = True
+                if name_match or value_match:
+                    append({
+                        "path": full,
+                        "name": child.name,
+                        "kind": child.type_name,
+                        "match": "value" if (value_match and not name_match) else "name",
+                    })
+                # Descend into containers. Canvas has metadata children
+                # (origin / map / z / _outlink / _inlink) that are
+                # legitimate to surface as matches; UOL is a leaf.
+                if not isinstance(child, WzUolProperty):
+                    walk_property(child, full)
 
         def walk(node: WzDirectory, prefix: str) -> None:
-            nonlocal truncated
-            if len(results) >= limit:
-                truncated = True
-                return
             # Directories first so the result order roughly mirrors
             # the on-disk layout users expect.
             for name, sub in node.subdirs.items():
                 full = f"{prefix}/{name}" if prefix else name
                 if q in name.lower():
-                    results.append({
+                    append({
                         "path": full, "name": name, "kind": "Directory",
                     })
-                    if len(results) >= limit:
-                        truncated = True
-                        return
                 walk(sub, full)
-                if len(results) >= limit:
-                    truncated = True
-                    return
-            for name in node.images.keys():
-                if len(results) >= limit:
-                    truncated = True
-                    return
+            for name, img in node.images.items():
+                full = f"{prefix}/{name}" if prefix else name
                 if q in name.lower():
-                    full = f"{prefix}/{name}" if prefix else name
-                    results.append({
-                        "path": full, "name": name, "kind": "Image",
-                    })
+                    append({"path": full, "name": name, "kind": "Image"})
+                if deep:
+                    try:
+                        root = img.parse()
+                    except Exception:
+                        continue
+                    walk_property(root, full)
 
-        walk(wz.root, "")
+        try:
+            walk(wz.root, "")
+        except _SearchFull:
+            truncated = True
         return jsonify({"results": results, "truncated": truncated})
 
     @app.route("/api/tree")
