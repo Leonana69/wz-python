@@ -377,3 +377,58 @@
   0%   { transform: translateX(-100%); }
   100% { transform: translateX(450%); }
 }
+
+/* Hover tooltip card for equipment tiles. Positioned by JS relative
+ * to the hovered tile (right-aligned by default; flips to the left
+ * when there's no room). Shows reqs / stat bumps / weapon type /
+ * price — same data the in-game tooltip surfaces. */
+.char-tooltip {
+  position: fixed;
+  z-index: 200;
+  min-width: 180px;
+  max-width: 260px;
+  background: #232428;
+  border: 1px solid #1a1b1d;
+  border-radius: 4px;
+  padding: 10px 12px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  color: #d6d6d6;
+  font-size: 12px;
+  line-height: 1.5;
+  pointer-events: none;
+}
+.char-tooltip h4 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+  color: #e8b96b;
+  letter-spacing: 0.02em;
+}
+.char-tooltip .tt-section {
+  border-top: 1px solid #2e2f33;
+  margin-top: 6px;
+  padding-top: 5px;
+}
+.char-tooltip .tt-section:first-of-type {
+  border-top: none;
+  margin-top: 0;
+  padding-top: 0;
+}
+.char-tooltip .tt-label {
+  color: #888;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 2px;
+}
+.char-tooltip .tt-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.char-tooltip .tt-key { color: #aaa; }
+.char-tooltip .tt-val { color: #d6d6d6; font-family: ui-monospace, "Cascadia Mono", Menlo, monospace; }
+.char-tooltip .tt-val.pos { color: #7bbf5b; }   /* stat increases */
+.char-tooltip .tt-val.req { color: #c5c5c5; }
+.char-tooltip .tt-empty { color: #777; font-style: italic; }
+.char-tooltip .tt-meta { color: #777; font-size: 10px; margin-top: 4px; }

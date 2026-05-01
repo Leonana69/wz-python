@@ -513,6 +513,14 @@ function makeTile(category, part, equippedId) {
     const extra = cfg ? { baseId: part.id, colors: part.colors } : null;
     equipPart(category, displayId, candidates, extra);
   });
+
+  // Hover tooltip with in-game-style stats. Skip Body / Head / Hair /
+  // Face (no equipment stats) and skip cash items (the user asked
+  // for non-cash equipment specifically).
+  if (TOOLTIP_CATEGORIES.has(category) && !part.cash) {
+    tile.addEventListener("mouseenter", () => showTooltip(tile, displayId, category));
+    tile.addEventListener("mouseleave", hideTooltip);
+  }
   return tile;
 }
 
@@ -761,6 +769,205 @@ function renderEarControls() {
     }
   });
   host.appendChild(select);
+}
+
+// ── hover tooltip ──────────────────────────────────────────────────
+const $tooltip = document.getElementById("char-tooltip");
+
+// Categories that get an in-game-style hover tooltip. Body / Head /
+// Hair / Face are character bases / cosmetics and have no equip
+// stats worth surfacing.
+const TOOLTIP_CATEGORIES = new Set([
+  "Cap", "Coat", "Longcoat", "Pants", "Shoes", "Glove",
+  "Cape", "Shield", "Weapon", "FaceAcc", "Glass", "Earring",
+]);
+
+// Cache equip_info responses so re-hovering a tile is instant.
+const _equipInfoCache = new Map();
+let _tooltipHoverId = null;        // ID currently being hovered
+let _tooltipHoverTile = null;      // DOM node currently being hovered
+
+// Friendly names for ``info/sfx`` (weapon-type indicator). Anything
+// not listed falls through to the raw token so we still show
+// something useful for unfamiliar values.
+const SFX_LABELS = {
+  swordS:  "One-Handed Sword",
+  swordL:  "Two-Handed Sword",
+  swordB:  "Two-Handed BW",
+  swordK:  "Katara",
+  swordZB: "Zero (Burning)",
+  swordZL: "Zero (Lazuli)",
+  mace:    "One-Handed BW",
+  axe:     "Axe",
+  spear:   "Spear",
+  poleArm: "Polearm",
+  bow:     "Bow",
+  cBow:    "Crossbow",
+  dualBow: "Dual Bowgun",
+  gun:     "Gun",
+  cannon:  "Cannon",
+  knuckle: "Knuckle",
+  tGlove:  "Claw",
+  cane:    "Cane",
+  barehands:"Bare Hands",
+};
+
+const ATTACK_SPEED_LABELS = {
+  2: "Faster (2)", 3: "Faster (3)", 4: "Fast (4)",
+  5: "Normal (5)", 6: "Normal (6)",
+  7: "Slow (7)",   8: "Slower (8)",  9: "Slower (9)",
+};
+
+// In-game-style display name for each ``info/incXXX`` key. Order
+// matters — that's the row order in the tooltip.
+const INC_FIELDS = [
+  ["incSTR",   "STR"],
+  ["incDEX",   "DEX"],
+  ["incINT",   "INT"],
+  ["incLUK",   "LUK"],
+  ["incPAD",   "Weapon ATT"],
+  ["incMAD",   "Magic ATT"],
+  ["incPDD",   "Weapon DEF"],
+  ["incMDD",   "Magic DEF"],
+  ["incACC",   "Accuracy"],
+  ["incEVA",   "Avoidability"],
+  ["incMHP",   "MaxHP"],
+  ["incMMP",   "MaxMP"],
+  ["incSpeed", "Speed"],
+  ["incJump",  "Jump"],
+];
+const REQ_FIELDS = [
+  ["reqLevel", "Level"],
+  ["reqSTR",   "STR"],
+  ["reqDEX",   "DEX"],
+  ["reqINT",   "INT"],
+  ["reqLUK",   "LUK"],
+  ["reqPOP",   "Pop"],
+];
+
+async function fetchEquipInfo(equipId) {
+  if (_equipInfoCache.has(equipId)) return _equipInfoCache.get(equipId);
+  const promise = (async () => {
+    try {
+      const resp = await trackedFetch(`/api/character/equip_info/${equipId}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const json = await resp.json();
+      return json.info || {};
+    } catch (err) {
+      console.warn("equip_info fetch failed:", err);
+      return null;
+    }
+  })();
+  _equipInfoCache.set(equipId, promise);
+  return promise;
+}
+
+async function showTooltip(tile, equipId, category) {
+  if (!$tooltip) return;
+  _tooltipHoverId = equipId;
+  _tooltipHoverTile = tile;
+  const info = await fetchEquipInfo(equipId);
+  // The user might have moved on while the request was in flight;
+  // only render if they're still hovering the same tile.
+  if (_tooltipHoverId !== equipId || _tooltipHoverTile !== tile) return;
+  if (info === null) return;
+  $tooltip.innerHTML = renderTooltipBody(equipId, category, info);
+  $tooltip.hidden = false;
+  positionTooltip(tile);
+}
+
+function hideTooltip() {
+  _tooltipHoverId = null;
+  _tooltipHoverTile = null;
+  if ($tooltip) $tooltip.hidden = true;
+}
+
+function renderTooltipBody(equipId, category, info) {
+  const sections = [];
+  // Header — equip ID + (for weapons) the resolved sfx label.
+  let header = `<h4>${equipId}</h4>`;
+  if (info.sfx) {
+    const label = SFX_LABELS[info.sfx] || info.sfx;
+    header += `<div class="tt-meta">${label}</div>`;
+  }
+  sections.push(header);
+
+  // Requirements. Show ``reqLevel`` whenever it's present (even 0,
+  // since "Lv. 0" is meaningful — anyone can wear it). For stat
+  // reqs, only show non-zero values: class-restricted gear ships
+  // ``reqSTR=0, reqDEX=0, reqINT=218, reqLUK=0`` and the 0 rows
+  // for unused stats just clutter the card.
+  const reqRows = REQ_FIELDS
+    .filter(([k]) => k === "reqLevel"
+      ? info[k] != null
+      : Number(info[k] ?? 0) > 0)
+    .map(([k, label]) => row(label, info[k], "req"));
+  if (reqRows.length) {
+    sections.push(section("Required", reqRows.join("")));
+  }
+
+  // Stat / combat increases
+  const incRows = INC_FIELDS
+    .filter(([k]) => Number(info[k] ?? 0) !== 0)
+    .map(([k, label]) => {
+      const v = info[k];
+      const sign = v > 0 ? "+" : "";
+      return row(label, `${sign}${v}`, "pos");
+    });
+  if (incRows.length) {
+    sections.push(section("Stats", incRows.join("")));
+  }
+
+  // Weapon-only block (attackSpeed). Skip ``info/attack`` per the
+  // user's request — its presence is implied by the weapon category.
+  if (info.attackSpeed != null) {
+    const label = ATTACK_SPEED_LABELS[info.attackSpeed] || `(${info.attackSpeed})`;
+    sections.push(section("Weapon", row("Attack Speed", label)));
+  }
+
+  // Footer — price (always shown for non-cash equipment, even when 0).
+  const priceVal = info.price != null
+    ? Number(info.price).toLocaleString() + " mesos"
+    : "—";
+  sections.push(section("Price", row("Price", priceVal)));
+
+  // If we somehow had no rows except the header, add a hint so the
+  // tooltip isn't a confusing empty card.
+  if (sections.length === 2 /* header + price */ && info.price == null) {
+    sections.push('<div class="tt-empty">No stats available.</div>');
+  }
+  return sections.join("");
+}
+
+function section(label, body) {
+  return `<div class="tt-section"><div class="tt-label">${label}</div>${body}</div>`;
+}
+function row(key, value, valClass) {
+  const cls = valClass ? `tt-val ${valClass}` : "tt-val";
+  return `<div class="tt-row"><span class="tt-key">${key}</span><span class="${cls}">${value}</span></div>`;
+}
+
+function positionTooltip(tile) {
+  // Place the card to the right of the tile when there's room,
+  // otherwise to the left. Vertically clamp so it doesn't overflow
+  // the viewport at the bottom.
+  const margin = 8;
+  const tileRect = tile.getBoundingClientRect();
+  const ttRect = $tooltip.getBoundingClientRect();
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  let left = tileRect.right + margin;
+  if (left + ttRect.width > vw - margin) {
+    left = tileRect.left - ttRect.width - margin;
+  }
+  if (left < margin) left = margin;
+  let top = tileRect.top;
+  if (top + ttRect.height > vh - margin) {
+    top = vh - margin - ttRect.height;
+  }
+  if (top < margin) top = margin;
+  $tooltip.style.left = `${left}px`;
+  $tooltip.style.top = `${top}px`;
 }
 
 async function refreshCompose() {

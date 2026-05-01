@@ -803,6 +803,54 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         poses = renderer.get_weapon_poses(equip_id)
         return jsonify({"id": equip_id, "poses": poses})
 
+    @app.route("/api/character/equip_info/<equip_id>")
+    def api_character_equip_info(equip_id: str) -> Response:
+        """Return the gameplay-relevant ``info/*`` fields for an equip.
+
+        The Character Builder's hover tooltip shows the same numbers
+        the in-game tooltip would: required stats, stat increases,
+        weapon type / speed, price. We hand back only the fields the
+        client knows how to render so unknown future fields don't
+        leak into the UI.
+        """
+        from wzpy.character import category_for_id
+        from wzpy.properties import (
+            WzIntProperty, WzShortProperty, WzStringProperty, WzSubProperty,
+        )
+        renderer = _get_character_renderer(app, region)
+        if renderer is None:
+            abort(404, "Character.wz not loaded")
+        cat = category_for_id(equip_id)
+        if cat is None:
+            abort(404, "unknown equip id")
+        img = renderer._open_part(equip_id)
+        if img is None:
+            abort(404, "no such equip")
+        info = img.parse().get("info")
+        out: Dict[str, Any] = {}
+        if isinstance(info, WzSubProperty):
+            keep = (
+                # Requirements
+                "reqLevel", "reqJob", "reqSTR", "reqDEX", "reqINT",
+                "reqLUK", "reqPOP",
+                # Stat / combat increases
+                "incSTR", "incDEX", "incINT", "incLUK",
+                "incPAD", "incMAD", "incPDD", "incMDD",
+                "incACC", "incEVA", "incMHP", "incMMP",
+                "incSpeed", "incJump",
+                # Weapon-specific
+                "attackSpeed", "sfx",
+                # Misc
+                "price", "tuc", "cash",
+            )
+            for k in keep:
+                v = info.get(k)
+                if isinstance(v, (WzIntProperty, WzShortProperty)):
+                    out[k] = int(v.value)
+                elif isinstance(v, WzStringProperty):
+                    out[k] = v.value
+        return jsonify({"id": equip_id, "category": cat, "info": out})
+
     @app.route("/api/character/ear_types/<equip_id>")
     def api_character_ear_types(equip_id: str) -> Response:
         """Return the ear-canvas names the given Head image ships with
