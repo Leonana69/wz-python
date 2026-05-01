@@ -571,6 +571,44 @@ def _auto_detect_region(wz_path: str, version: Optional[int]) -> str:
     return best[0]
 
 
+def _try_load_character_strings(
+    wz_path: str, region: str, version: Optional[int],
+):
+    """Auto-discover and load ``String.wz`` (or a hierarchical
+    ``String/`` folder) sibling of the loaded Character pack.
+
+    The String pack lets the Character Builder show display names
+    (``Eqp.img/Eqp/<sub>/<id>/name``) alongside the bare IDs. Returns
+    a :class:`StringLookup` on success, or ``None`` when no sibling
+    is found or it doesn't load cleanly — callers fall back to IDs.
+    """
+    from wzpy.string_lookup import StringLookup
+    # Recognise the Character pack only — String lookup is gear-only,
+    # so loading it for an arbitrary WZ would just waste startup time.
+    base = os.path.basename(os.path.abspath(wz_path).rstrip(os.sep)).lower()
+    if not (base.startswith("character") or base == "character.wz"):
+        return None
+    parent = os.path.dirname(os.path.abspath(wz_path).rstrip(os.sep))
+    if os.path.isfile(wz_path):
+        # If wz_path was a .wz file (e.g. ``data/Character.wz``), the
+        # sibling ``data/`` is its parent.
+        parent = os.path.dirname(os.path.abspath(wz_path))
+    candidates = [
+        os.path.join(parent, "String"),
+        os.path.join(parent, "String.wz"),
+    ]
+    for cand in candidates:
+        if not os.path.exists(cand):
+            continue
+        sl = StringLookup.open(cand, region=region, version=version)
+        if sl is not None:
+            print(f"  loaded String lookup from {cand}", flush=True)
+            return sl
+        else:
+            print(f"  String at {cand} didn't validate; skipping", flush=True)
+    return None
+
+
 def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None) -> Flask:
     if region == "auto":
         print(f"auto-detecting region for {wz_path}:")
@@ -594,6 +632,15 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
     # carries shared file-position + cipher state, so we mediate access with
     # this lock. Currently only the bundle worker acquires it.
     app.config["WZ_READER_LOCK"] = threading.Lock()
+
+    # When the loaded WZ is Character, look for a sibling ``String.wz``
+    # / ``String/`` so the UI can show real item names instead of bare
+    # IDs. Best-effort: any failure (missing file, unreadable, wrong
+    # region) leaves ``CHARACTER_STRINGS`` as None and the UI falls
+    # back to IDs.
+    app.config["CHARACTER_STRINGS"] = _try_load_character_strings(
+        wz_path, region, version,
+    )
 
     # ── helpers ──────────────────────────────────────────────────────
     def _resolve(path: str) -> Tuple[Any, str]:
@@ -791,6 +838,15 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         if renderer is None:
             abort(404, "Character.wz not loaded")
         items = renderer.list_parts(category)
+        # Decorate each entry with its display name from String.wz
+        # when available. Misses (no String pack, no entry for this
+        # ID) leave ``name`` absent so the client falls back to the ID.
+        strings = app.config.get("CHARACTER_STRINGS")
+        if strings is not None:
+            for entry in items:
+                nm = strings.name(category, entry["id"])
+                if nm:
+                    entry["name"] = nm
         return jsonify({"category": category, "parts": items})
 
     @app.route("/api/character/weapon_poses/<equip_id>")
@@ -849,7 +905,14 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
                     out[k] = int(v.value)
                 elif isinstance(v, WzStringProperty):
                     out[k] = v.value
-        return jsonify({"id": equip_id, "category": cat, "info": out})
+        # Display name from String.wz when available.
+        name = None
+        strings = app.config.get("CHARACTER_STRINGS")
+        if strings is not None:
+            name = strings.name(cat, equip_id)
+        return jsonify(
+            {"id": equip_id, "category": cat, "info": out, "name": name},
+        )
 
     @app.route("/api/character/ear_types/<equip_id>")
     def api_character_ear_types(equip_id: str) -> Response:

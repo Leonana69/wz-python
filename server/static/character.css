@@ -180,7 +180,17 @@
   letter-spacing: 0.05em;
   font-family: inherit;
 }
-.equipped-list .eq-id { color: #d6d6d6; flex: 1; }
+.equipped-list .eq-id {
+  color: #d6d6d6;
+  flex: 1;
+  /* Long item names ("Easter Egg Cushion Bandana") would otherwise
+   * push the × button off-screen — clip with ellipsis instead. The
+   * full name is on the element's ``title`` for hover. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
 .equipped-list .eq-remove {
   background: transparent;
   color: #c25555;

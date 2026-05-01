@@ -490,7 +490,10 @@ function makeTile(category, part, equippedId) {
 
   tile.className = "part-tile" + (displayId === equippedId ? " equipped" : "");
   tile.dataset.id = displayId;
-  tile.title = displayId;
+  // Tooltip on the bare tile (native browser tooltip for the
+  // hover-card-skipping case): name + ID when we have a name from
+  // String.wz, otherwise just the ID.
+  tile.title = part.name ? `${part.name} (${displayId})` : displayId;
 
   const thumb = document.createElement("img");
   thumb.alt = displayId;
@@ -510,7 +513,9 @@ function makeTile(category, part, equippedId) {
   tile.appendChild(pid);
 
   tile.addEventListener("click", () => {
-    const extra = cfg ? { baseId: part.id, colors: part.colors } : null;
+    const extra = {};
+    if (cfg) Object.assign(extra, { baseId: part.id, colors: part.colors });
+    if (part.name) extra.name = part.name;
     equipPart(category, displayId, candidates, extra);
   });
 
@@ -676,7 +681,11 @@ function renderEquipped() {
     catTag.textContent = cat;
     const idSpan = document.createElement("span");
     idSpan.className = "eq-id";
-    idSpan.textContent = slot.id;
+    // Show the display name when the server gave us one, falling
+    // back to the bare ID. Always include the ID as ``title`` so
+    // the equip-slot tooltip surfaces both for power users.
+    idSpan.textContent = slot.name || slot.id;
+    if (slot.name) idSpan.title = `${slot.name} — ${slot.id}`;
     const rm = document.createElement("button");
     rm.type = "button";
     rm.className = "eq-remove";
@@ -852,7 +861,11 @@ async function fetchEquipInfo(equipId) {
       const resp = await trackedFetch(`/api/character/equip_info/${equipId}`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const json = await resp.json();
-      return json.info || {};
+      // Stash the display name on the info object so the tooltip
+      // renderer can pull it without a second response field.
+      const info = json.info || {};
+      if (json.name) info.__name = json.name;
+      return info;
     } catch (err) {
       console.warn("equip_info fetch failed:", err);
       return null;
@@ -884,8 +897,12 @@ function hideTooltip() {
 
 function renderTooltipBody(equipId, category, info) {
   const sections = [];
-  // Header — equip ID + (for weapons) the resolved sfx label.
-  let header = `<h4>${equipId}</h4>`;
+  // Header — display name (when String.wz gave us one) + the bare ID
+  // underneath, plus the weapon-type label for weapons.
+  const nameLine = info.__name
+    ? `<h4>${escapeHtml(info.__name)}</h4><div class="tt-meta">${equipId}</div>`
+    : `<h4>${equipId}</h4>`;
+  let header = nameLine;
   if (info.sfx) {
     const label = SFX_LABELS[info.sfx] || info.sfx;
     header += `<div class="tt-meta">${label}</div>`;
@@ -945,6 +962,14 @@ function section(label, body) {
 function row(key, value, valClass) {
   const cls = valClass ? `tt-val ${valClass}` : "tt-val";
   return `<div class="tt-row"><span class="tt-key">${key}</span><span class="${cls}">${value}</span></div>`;
+}
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function positionTooltip(tile) {
