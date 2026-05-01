@@ -271,6 +271,17 @@ function makeTile(category, part, equippedId) {
   return tile;
 }
 
+// Equip-slot conflicts: equipping a Longcoat replaces both Coat and
+// Pants (since a longcoat covers the entire torso + legs); equipping a
+// Coat or Pants replaces any Longcoat. Mirrors MapleNecrocer's AddEqps
+// dedupe logic — keeps the equipped list internally consistent so the
+// composite never tries to render a longcoat AND a coat at once.
+const SLOT_CONFLICTS = {
+  Longcoat: ["Coat", "Pants"],
+  Coat:     ["Longcoat"],
+  Pants:    ["Longcoat"],
+};
+
 // ── equipped list / compose ───────────────────────────────────────
 async function equipPart(category, id, iconPaths) {
   // Accept either the new candidate list or a legacy single string for
@@ -280,6 +291,9 @@ async function equipPart(category, id, iconPaths) {
     : iconPaths ? [iconPaths]
     : iconPathsFor(category, id);
   state.equipped[category] = { id, iconPaths: paths };
+  for (const conflicting of SLOT_CONFLICTS[category] || []) {
+    delete state.equipped[conflicting];
+  }
   // Update the equipped-tile highlight without reloading.
   for (const tile of $grid.querySelectorAll(".part-tile")) {
     tile.classList.toggle("equipped", tile.dataset.id === id);
