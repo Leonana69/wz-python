@@ -190,6 +190,12 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     # ``default/defaultAc`` z=``capBelowBody``); without these slots
     # in the back-of-body cluster, the ``Ac`` half drew over the
     # torso.
+    #
+    # ``capBelowHead`` lives here too: its name reads "below head"
+    # but the WZ authors that use it (e.g., 01003934's ``defaultBack``
+    # — a back-hanging cap part) want the body to cover it, so it
+    # belongs in the back-of-body cluster rather than just-below-head.
+    "capBelowHead",
     "capBelowBody",
     "capAccessoryBelowBody",
     "body",
