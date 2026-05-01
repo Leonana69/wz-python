@@ -183,6 +183,15 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     "shieldBelowBody",
     "weaponBelowBody",
     "hairBelowBody",
+    # Cap and cap-accessory canvases whose z says "below body" — they
+    # belong with the rest of the *BelowBody cluster, BEFORE ``body``,
+    # so the body draws on top of them. Caps like 01001036 split into
+    # two canvases (``default/default`` z=``cap`` plus
+    # ``default/defaultAc`` z=``capBelowBody``); without these slots
+    # in the back-of-body cluster, the ``Ac`` half drew over the
+    # torso.
+    "capBelowBody",
+    "capAccessoryBelowBody",
     "body",
     # Pants / shoes stack (behind body parts that overlap).
     "backPantsBelowShoes",
@@ -290,12 +299,21 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     "accessoryFaceOverEar",
     "accessoryEyes",
     "accessoryEye",
+    # Synthetic slot used by ``_OVER_CAP_REMAP`` as the target for
+    # cap canvases (z=``cap`` / ``capOverHair`` / ``capAccessory``)
+    # when the cap doesn't actually hide any hair (e.g., a headband
+    # with ``vslot=Cp`` / ``CpH5``). Sits just above the face / eye
+    # accessory slots and just below ``hairOverHead`` so the cap
+    # rides on top of the face but bangs still cover the front of
+    # it. Real WZ data never declares this slot directly.
+    "capBelowHairOverHead",
     "hairOverHead",
     # Cap layers (above hair, below face accessories that overlap caps).
+    # ``capBelowBody`` and ``capAccessoryBelowBody`` are NOT in this
+    # block — they live with the back-of-body cluster up above so the
+    # body covers them as their slot names promise.
     "capeOverHead",
-    "capBelowBody",
     "capBelowAccessory",
-    "capAccessoryBelowBody",
     "capAccessoryBelowAccFace",
     "cap",
     "capOverHair",
@@ -329,16 +347,47 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
 )
 
 
-# Conditional z-slot remap for ``*OverCap`` face accessories. When no
-# Cap is equipped, treat these slots as their non-OverCap equivalent
-# during the z-sort so ordinary glasses (e.g., 01022032, 01022046) sit
-# behind the bangs instead of on top of them. With a Cap equipped the
-# remap is skipped — the cap is meant to wear them on top.
-_OVER_CAP_REMAP: Dict[str, str] = {
-    "accessoryEyeOverCap": "accessoryEye",
-    "accessoryFaceOverCap": "accessoryFace",
-    "accessoryFaceUpperOverCap": "accessoryFace",
+# Conditional z-slot remap applied during compose. Each entry is
+# ``(target_slot, vslot_token)``: the canvas's declared z-slot is
+# rewritten to ``target_slot`` whenever the remap should kick in. The
+# remap kicks in if EITHER:
+#   1. The equipped cap (if any) doesn't hide any hair, leaving the
+#      bangs visible (so ``*OverCap`` accessories drop behind them).
+#   2. The equipped cap's vslot lists ``vslot_token``, meaning the
+#      cap claims the accessory's slot — e.g., a hat with vslot
+#      containing ``Ay`` covers the eye-accessory area, so an
+#      ``accessoryEyeOverCap`` glass must render BEHIND that cap
+#      regardless of what the slot name says (caps 01004141..48 vs
+#      glass 01022032). ``vslot_token=None`` means "only the
+#      doesn't-hide-hair arm applies" — used for the bare ``cap``
+#      slot which is about bangs visibility, not accessory cover.
+# With a hair-hiding cap on AND no matching vslot token, the remap
+# is skipped — the canvases stay at their declared slot.
+#
+# ``capOverHair`` and ``capAccessory`` are deliberately left out:
+# their slot names promise "above hair / above the cap canvas",
+# which the user wants honored even when the cap doesn't hide hair
+# (that's how 01002575 / 01002576 / 01002598 / 01002842 render in
+# front of the bangs).
+_OVER_CAP_REMAP: Dict[str, Tuple[str, Optional[str]]] = {
+    "accessoryEyeOverCap": ("accessoryEye", "Ay"),
+    "accessoryFaceOverCap": ("accessoryFace", "Af"),
+    "accessoryFaceUpperOverCap": ("accessoryFace", "Af"),
+    "cap": ("capBelowHairOverHead", None),
 }
+
+
+def _parse_vslot_tokens(vslot: Optional[str]) -> frozenset:
+    """Split a cap's vslot string into its 2-character tokens.
+
+    The vslot is a concatenation of two-char slot names like ``Cp``,
+    ``H1``, ``Hd``, ``Af``, ``Ay``, ``Ae``. We don't need to validate
+    the alphabet — anything length-2 is a token, and unknown tokens
+    just don't match any of the rules that consume them.
+    """
+    if not vslot:
+        return frozenset()
+    return frozenset(vslot[i:i + 2] for i in range(0, len(vslot), 2))
 
 # Per-category candidate frame paths to walk when collecting render leaves.
 # We try each path in order, dedupe by canvas identity (UOLs into the same
@@ -364,19 +413,26 @@ DEFAULT_EAR_TYPE = "humanEar"
 
 
 # Caps occupy "visual slots" listed in ``info/vslot``: a concatenation
-# of two-character tokens like ``Cp`` (the cap itself) and ``H1``..``H6``
-# (hair sub-slots). The renderer needs to know which Hair canvases the
-# cap covers so the hair doesn't poke through. The mapping below
-# mirrors MapleNecrocer's CapType derivation in MapleCharacter.cs:301:
+# of two-character tokens like ``Cp`` (the cap itself), ``H1``..``H6``
+# (hair sub-slots), ``Hd``, ``Hs``, ``Hf``, ``Hb`` (more hair), and
+# ``Af``/``Ay``/``As``/``Ae``/``Fc`` (face/eye/ear accessories).
 #
-#   ``Cp`` / ``CpH5``                  → no hair hidden
-#   ``CpH1H5``                         → hide hairOverHead, backHair
-#   long vslot starting ``CpH1H3``     → hide the four "front-hair"
-#                                        canvases below
-#   any other long vslot               → hide ALL hair (full helmet)
+# Hair-hiding decision is token-based — the original length-cutoff
+# heuristic from MapleNecrocer's ``CapType`` derivation
+# (MapleCharacter.cs:301) misses edge cases like 01002470's
+# ``CpHdH1H2H3H4`` (length exactly 12, clearly meant to hide hair).
+# The token rule below replaces it without changing the answer for
+# any of the canonical vslots:
+#
+#   * ``H2`` token present                          → full helmet
+#                                                     (every Hair canvas hidden, returns ``None``)
+#   * ``H1`` and ``H3`` tokens present              → hide the four
+#                                                     "front-hair" canvases
+#   * ``H1`` token present (alone or with H4..H6)   → hide ``hairOverHead`` + ``backHair``
+#   * otherwise                                     → no hair hidden
 #
 # A returned ``None`` means "every Hair canvas is hidden". An empty
-# set means "show everything".
+# frozenset means "show everything".
 _CAP_HIDE_PARTIAL: frozenset = frozenset(
     {"hairOverHead", "backHair", "hairBelowBody", "backHairBelowCap"}
 )
@@ -386,14 +442,13 @@ _CAP_HIDE_TOP: frozenset = frozenset({"hairOverHead", "backHair"})
 def _cap_hidden_hair_canvases(vslot: Optional[str]) -> Optional[frozenset]:
     """Resolve a cap's ``info/vslot`` string to the set of Hair canvas
     names it covers, or ``None`` if it covers every Hair canvas."""
-    if not vslot or vslot in ("Cp", "CpH5"):
-        return frozenset()
-    if vslot == "CpH1H5":
-        return _CAP_HIDE_TOP
-    if len(vslot) > 12:
-        if vslot.startswith("CpH1H3"):
-            return _CAP_HIDE_PARTIAL
+    tokens = _parse_vslot_tokens(vslot)
+    if "H2" in tokens:
         return None
+    if "H1" in tokens and "H3" in tokens:
+        return _CAP_HIDE_PARTIAL
+    if "H1" in tokens:
+        return _CAP_HIDE_TOP
     return frozenset()
 
 
@@ -954,33 +1009,39 @@ class CharacterRenderer:
 
     def _cap_hair_filter(
         self, equip_ids: List[str],
-    ) -> Tuple[bool, frozenset]:
-        """Find the equipped Cap's ``info/vslot`` and translate it into
-        the Hair-canvas filter to apply during compose.
+    ) -> Tuple[bool, frozenset, frozenset]:
+        """Find the equipped Cap's ``info/vslot`` and derive the
+        per-canvas filters compose needs.
 
-        Returns ``(hide_hair_full, hide_hair_set)``: the boolean is
-        True when the cap covers every Hair canvas (full helmet), in
-        which case ``compose`` skips the Hair part entirely; otherwise
-        the set names the specific Hair canvases the cap covers.
+        Returns ``(hide_hair_full, hide_hair_set, vslot_tokens)``:
+        - ``hide_hair_full``: the cap covers every Hair canvas (full
+          helmet), so ``compose`` should skip the Hair part entirely.
+        - ``hide_hair_set``: the specific Hair canvases the cap covers
+          when not a full helmet.
+        - ``vslot_tokens``: every 2-character token in the cap's
+          vslot string (``Cp``, ``H1``, ``Ay``, ``Af``, …). The
+          accessory tokens (``Af``/``Ay``/``Ae``/…) drive the
+          "cap covers face accessories" arm of the z-sort remap.
         """
         cap_id = next(
             (e for e in equip_ids if category_for_id(e) == "Cap"), None,
         )
         if cap_id is None:
-            return (False, frozenset())
+            return (False, frozenset(), frozenset())
         img = self._open_part(cap_id)
         if img is None:
-            return (False, frozenset())
+            return (False, frozenset(), frozenset())
         info = img.parse().get("info")
         vslot: Optional[str] = None
         if isinstance(info, WzSubProperty):
             v = info.get("vslot")
             if isinstance(v, WzStringProperty):
                 vslot = v.value
+        tokens = _parse_vslot_tokens(vslot)
         hidden = _cap_hidden_hair_canvases(vslot)
         if hidden is None:
-            return (True, frozenset())
-        return (False, hidden)
+            return (True, frozenset(), tokens)
+        return (False, hidden, tokens)
 
     def get_ear_types(self, equip_id: str) -> List[str]:
         """Return the ear-canvas names a Head image ships with.
@@ -1044,7 +1105,8 @@ class CharacterRenderer:
         # can skip the Hair part wholesale in the helmet case (saves
         # parsing a hair img we'd discard anyway) and otherwise narrow
         # the per-canvas filter inside ``_collect_part_canvases``.
-        hide_hair_full, hide_hair_set = self._cap_hair_filter(equip_ids)
+        hide_hair_full, hide_hair_set, cap_vslot_tokens = \
+            self._cap_hair_filter(equip_ids)
         # ``*OverCap`` glasses / face accs need to sit BEHIND the
         # bangs whenever the bangs are actually visible — otherwise
         # the glass renders on top of hair that's covering the
@@ -1122,15 +1184,25 @@ class CharacterRenderer:
                 )
             self._register_anchors(pl, world_anchors, overwrite=False)
 
-        # Step 3: Sort by z-slot back-to-front and composite. When the
-        # equipped cap (if any) doesn't actually hide hair, swap any
-        # ``*OverCap`` slot for its non-OverCap sibling during the
-        # sort so the canvas drops behind ``hairOverHead`` like an
-        # ordinary glass / face acc.
+        # Step 3: Sort by z-slot back-to-front and composite. The
+        # remap rules in ``_OVER_CAP_REMAP`` rewrite a canvas's
+        # declared z-slot when either the equipped cap (if any)
+        # doesn't hide hair (``not cap_covers_hair``) OR the cap's
+        # vslot lists the accessory's slot token (covering the
+        # accessory area regardless of bangs). See the comment on
+        # ``_OVER_CAP_REMAP`` for the why.
         def z_for(pl: _Placement) -> int:
             slot = pl.z_slot
-            if slot is not None and not cap_covers_hair:
-                slot = _OVER_CAP_REMAP.get(slot, slot)
+            if slot is None:
+                return self._z_index(slot)
+            rule = _OVER_CAP_REMAP.get(slot)
+            if rule is None:
+                return self._z_index(slot)
+            target, token = rule
+            if not cap_covers_hair or (
+                token is not None and token in cap_vslot_tokens
+            ):
+                slot = target
             return self._z_index(slot)
         placements.sort(key=z_for)
 
