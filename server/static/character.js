@@ -117,6 +117,10 @@ const state = {
   // visit to a tab shows the in-game gear (cash items are gear-shop
   // variants, less likely to be the user's first pick).
   subTab: {},
+  // Free-text search query per category. Filters the grid by ID
+  // substring (e.g. ``01040``) or name substring (when String.wz
+  // is loaded — e.g. ``hanbok``). Empty string disables the filter.
+  search: {},
   // Color index per category (currently Hair, Face). Each is the
   // currently-selected color index 0..N-1, default 0. Changing one
   // re-skins every visible thumbnail in that category and, if a
@@ -178,6 +182,7 @@ function pickAvailableColor(availableColors, requested) {
 const $img = document.getElementById("char-img");
 const $tabs = document.getElementById("char-tabs");
 const $subtabs = document.getElementById("char-subtabs");
+const $search = document.getElementById("char-search");
 const $grid = document.getElementById("char-grid");
 const $equipped = document.getElementById("char-equipped");
 const $scale = document.getElementById("char-scale");
@@ -233,6 +238,9 @@ async function loadCategory(category) {
   // the sub-tab bar from a previous category lingers under the new
   // tab during the parts fetch.
   renderSubTabs(category, null);
+  // Restore this category's saved search query so swapping tabs
+  // doesn't lose the user's filter.
+  if ($search) $search.value = state.search[category] || "";
   let parts = state.parts.get(category);
   if (!parts) {
     try {
@@ -252,29 +260,47 @@ async function loadCategory(category) {
   $grid.classList.remove("loading");
 }
 
+// Search input — debounced re-render of the active category's grid
+// on each keystroke. Stores the query per-category so toggling tabs
+// preserves what the user typed.
+if ($search) {
+  $search.addEventListener("input", () => {
+    const cat = state.activeTab;
+    state.search[cat] = $search.value;
+    const parts = state.parts.get(cat);
+    if (parts) renderGrid(cat, filterPartsBySubTab(cat, parts));
+  });
+}
+
 function filterPartsBySubTab(category, parts) {
-  if (!CATEGORIES_WITH_SUBTABS.has(category)) return parts;
-  const wantCash = state.subTab[category] === "cash";
-  return parts.filter(p => Boolean(p.cash) === wantCash);
+  let filtered = parts;
+  if (CATEGORIES_WITH_SUBTABS.has(category)) {
+    const wantCash = state.subTab[category] === "cash";
+    filtered = filtered.filter(p => Boolean(p.cash) === wantCash);
+  }
+  const q = (state.search[category] || "").trim().toLowerCase();
+  if (q) {
+    filtered = filtered.filter(p =>
+      p.id.toLowerCase().includes(q) ||
+      (p.name && p.name.toLowerCase().includes(q))
+    );
+  }
+  return filtered;
 }
 
 function renderSubTabs(category, parts) {
   if (!$subtabs) return;
   $subtabs.innerHTML = "";
-  if (parts === null) {
-    $subtabs.hidden = true;
-    return;
-  }
+  // The wrapping row stays visible regardless — it always carries
+  // the search input. ``$subtabs`` only holds the per-category
+  // sub-tab buttons, which can legitimately be empty (Body / Head)
+  // or populated with TYPE / COLOR controls.
+  if (parts === null) return;
   if (COLOR_CONFIG[category]) {
     renderColorSubTabs(category);
-    $subtabs.hidden = false;
     return;
   }
-  if (!CATEGORIES_WITH_SUBTABS.has(category)) {
-    $subtabs.hidden = true;
-    return;
-  }
-  $subtabs.hidden = false;
+  if (!CATEGORIES_WITH_SUBTABS.has(category)) return;
 
   const counts = { nonCash: 0, cash: 0 };
   for (const p of parts) (p.cash ? counts.cash++ : counts.nonCash++);

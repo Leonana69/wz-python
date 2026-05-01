@@ -235,18 +235,50 @@
 }
 .char-tabs button:hover:not(.active) { background: #4a4d54; }
 
-/* Cash / Non-Cash filter strip — only shown for categories where
- * ``info/cash`` produces a meaningful split (everything except
- * Body / Head). Sits between the main category tabs and the grid. */
-.char-subtabs {
+/* Row that holds the sub-tab strip on the left and a search input
+ * on the right. Always visible — for Body / Head (no sub-tabs) the
+ * left-hand ``.char-subtabs`` is just empty and the search input
+ * is the only content. */
+.char-subtabs-row {
   display: flex;
-  gap: 4px;
+  align-items: center;
+  gap: 8px;
   padding: 6px 12px;
   background: #232428;
   border-bottom: 1px solid #1a1b1d;
   font-size: 12px;
-  align-items: center;
+  min-height: 32px;
 }
+
+/* Cash / Non-Cash filter strip — only populated for categories where
+ * ``info/cash`` produces a meaningful split (everything except
+ * Body / Head). Hair / Face populate it with color swatches instead. */
+.char-subtabs {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* Search input — always placed on the right edge of the sub-tab row
+ * (``margin-left: auto`` floats it past whatever the sub-tab strip
+ * filled in to its left). */
+.char-search {
+  margin-left: auto;
+  flex: 0 0 auto;
+  min-width: 160px;
+  background: #2b2d31;
+  color: #d6d6d6;
+  border: 1px solid #1a1b1d;
+  border-radius: 3px;
+  padding: 3px 8px;
+  font: inherit;
+}
+.char-search:focus {
+  outline: none;
+  border-color: #e8b96b;
+}
+.char-search::placeholder { color: #777; }
 .char-subtabs .subtab-label {
   color: #888;
   margin-right: 4px;

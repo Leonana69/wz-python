@@ -43,7 +43,17 @@
 
     <section class="char-pickers">
       <nav class="char-tabs" id="char-tabs"></nav>
-      <nav class="char-subtabs" id="char-subtabs" hidden></nav>
+      <div class="char-subtabs-row" id="char-subtabs-row">
+        <nav class="char-subtabs" id="char-subtabs"></nav>
+        <input
+          type="search"
+          class="char-search"
+          id="char-search"
+          placeholder="Search by name or ID…"
+          autocomplete="off"
+          spellcheck="false"
+        >
+      </div>
       <div class="char-grid" id="char-grid">
         <p class="hint">Pick a category to load parts.</p>
       </div>
