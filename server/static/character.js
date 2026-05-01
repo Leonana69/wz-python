@@ -9,6 +9,15 @@ const CATEGORIES = [
   "Cape", "Shield", "Weapon", "FaceAcc", "Glass", "Earring",
 ];
 
+// Categories that get a Cash / Non-Cash sub-tab strip. Limited to
+// gear slots (the wearable equipment categories) — Body / Head are
+// always non-cash character bases, and Hair / Face are character
+// looks rather than equipment, so they keep the simple flat grid.
+const CATEGORIES_WITH_SUBTABS = new Set([
+  "Cap", "Coat", "Longcoat", "Pants", "Shoes", "Glove",
+  "Cape", "Shield", "Weapon", "FaceAcc", "Glass", "Earring",
+]);
+
 // One known sensible default per category — used to seed a "fresh" character
 // so the first preview isn't an empty PNG.
 const DEFAULTS = {
@@ -103,10 +112,48 @@ const state = {
   earType: "humanEar",
   headEarTypes: ["humanEar"],
   headEarCache: new Map(),
+  // Cash / Non-Cash filter, kept per-category so switching tabs keeps
+  // each one's last selection. Defaults to "non-cash" so the first
+  // visit to a tab shows the in-game gear (cash items are gear-shop
+  // variants, less likely to be the user's first pick).
+  subTab: {},
+  // Hair color index 0..7 (0=black). Each style ID's last digit
+  // encodes color; the deduped style entry from the server lists
+  // which color indices it ships under ``colors``. Changing this
+  // re-skins every visible hair thumbnail and, if a Hair is
+  // equipped, swaps the equipped ID to the new color variant.
+  hairColor: 0,
 };
+
+// Hair color palette — index → {label, swatch-css}. Order matches the
+// last-digit convention in the WZ data: 0 black, 1 red, 2 orange,
+// 3 yellow, 4 green, 5 blue, 6 purple, 7 brown.
+const HAIR_COLORS = [
+  { name: "Black",  swatch: "#1a1a1a" },
+  { name: "Red",    swatch: "#c43c3c" },
+  { name: "Orange", swatch: "#dd7b2a" },
+  { name: "Yellow", swatch: "#e0c350" },
+  { name: "Green",  swatch: "#5b9b4a" },
+  { name: "Blue",   swatch: "#3a6fa8" },
+  { name: "Purple", swatch: "#7b4a9b" },
+  { name: "Brown",  swatch: "#7a4a2c" },
+];
+
+function colorVariantId(baseId, color) {
+  // baseId encodes color in its last digit; replace with the picked
+  // index (kept as a single 0..7 character).
+  return baseId.slice(0, -1) + String(color);
+}
+
+function pickHairColor(availableColors, requested) {
+  if (!availableColors || availableColors.length === 0) return 0;
+  if (availableColors.includes(requested)) return requested;
+  return availableColors[0];
+}
 
 const $img = document.getElementById("char-img");
 const $tabs = document.getElementById("char-tabs");
+const $subtabs = document.getElementById("char-subtabs");
 const $grid = document.getElementById("char-grid");
 const $equipped = document.getElementById("char-equipped");
 const $scale = document.getElementById("char-scale");
@@ -133,6 +180,10 @@ function selectTab(category) {
 // ── part listing ──────────────────────────────────────────────────
 async function loadCategory(category) {
   $grid.classList.add("loading");
+  // Hide the sub-tab strip until we know the part list — otherwise
+  // the sub-tab bar from a previous category lingers under the new
+  // tab during the parts fetch.
+  renderSubTabs(category, null);
   let parts = state.parts.get(category);
   if (!parts) {
     try {
@@ -147,8 +198,129 @@ async function loadCategory(category) {
       return;
     }
   }
-  renderGrid(category, parts);
+  renderSubTabs(category, parts);
+  renderGrid(category, filterPartsBySubTab(category, parts));
   $grid.classList.remove("loading");
+}
+
+function filterPartsBySubTab(category, parts) {
+  if (!CATEGORIES_WITH_SUBTABS.has(category)) return parts;
+  const wantCash = state.subTab[category] === "cash";
+  return parts.filter(p => Boolean(p.cash) === wantCash);
+}
+
+function renderSubTabs(category, parts) {
+  if (!$subtabs) return;
+  $subtabs.innerHTML = "";
+  if (parts === null) {
+    $subtabs.hidden = true;
+    return;
+  }
+  if (category === "Hair") {
+    renderHairColorSubTabs();
+    $subtabs.hidden = false;
+    return;
+  }
+  if (!CATEGORIES_WITH_SUBTABS.has(category)) {
+    $subtabs.hidden = true;
+    return;
+  }
+  $subtabs.hidden = false;
+
+  const counts = { nonCash: 0, cash: 0 };
+  for (const p of parts) (p.cash ? counts.cash++ : counts.nonCash++);
+
+  // Default to "non-cash" the first time a category is visited; preserve
+  // a user's prior selection on subsequent visits.
+  if (!state.subTab[category]) state.subTab[category] = "non-cash";
+  const active = state.subTab[category];
+
+  const label = document.createElement("span");
+  label.className = "subtab-label";
+  label.textContent = "Type";
+  $subtabs.appendChild(label);
+
+  const make = (key, name, count) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.classList.toggle("active", key === active);
+    btn.dataset.subtab = key;
+    btn.append(document.createTextNode(name + " "));
+    const c = document.createElement("span");
+    c.className = "subtab-count";
+    c.textContent = `(${count})`;
+    btn.appendChild(c);
+    btn.addEventListener("click", () => selectSubTab(category, key));
+    $subtabs.appendChild(btn);
+  };
+  make("non-cash", "Non-Cash", counts.nonCash);
+  make("cash",     "Cash",     counts.cash);
+}
+
+function renderHairColorSubTabs() {
+  const label = document.createElement("span");
+  label.className = "subtab-label";
+  label.textContent = "Color";
+  $subtabs.appendChild(label);
+  for (let i = 0; i < HAIR_COLORS.length; i++) {
+    const c = HAIR_COLORS[i];
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.color = String(i);
+    btn.classList.add("color-btn");
+    btn.classList.toggle("active", i === state.hairColor);
+    btn.title = c.name;
+    const swatch = document.createElement("span");
+    swatch.className = "color-swatch";
+    swatch.style.background = c.swatch;
+    btn.appendChild(swatch);
+    btn.appendChild(document.createTextNode(c.name));
+    btn.addEventListener("click", () => selectHairColor(i));
+    $subtabs.appendChild(btn);
+  }
+}
+
+function selectSubTab(category, key) {
+  if (state.subTab[category] === key) return;
+  state.subTab[category] = key;
+  for (const b of $subtabs.querySelectorAll("button")) {
+    b.classList.toggle("active", b.dataset.subtab === key);
+  }
+  const parts = state.parts.get(category);
+  if (parts) renderGrid(category, filterPartsBySubTab(category, parts));
+}
+
+function selectHairColor(color) {
+  if (state.hairColor === color) return;
+  state.hairColor = color;
+  for (const b of $subtabs.querySelectorAll("button.color-btn")) {
+    b.classList.toggle("active", Number(b.dataset.color) === color);
+  }
+  // Re-skin every visible hair tile to the new color and update the
+  // equipped highlight (the equipped ID may shift to the new variant).
+  const parts = state.parts.get("Hair");
+  if (parts) renderGrid("Hair", parts);
+  // If a Hair is equipped, swap to the matching color variant — pick
+  // the requested color when the equipped style ships it, otherwise
+  // fall back to the first color the style does ship. The boot
+  // default seeds Hair without ``baseId`` / ``colors``; derive a
+  // base from the equipped ID and assume the canonical 0..7 palette
+  // so the swap still works without waiting for the parts list.
+  const eq = state.equipped.Hair;
+  if (eq) {
+    const baseId = eq.baseId ?? colorVariantId(eq.id, 0);
+    const colors = eq.colors ?? [0, 1, 2, 3, 4, 5, 6, 7];
+    const target = pickHairColor(colors, color);
+    const newId = colorVariantId(baseId, target);
+    if (newId !== eq.id) {
+      eq.id = newId;
+      eq.iconPaths = iconPathsFor("Hair", newId);
+      eq.baseId = baseId;
+      eq.colors = colors;
+      renderEquipped();
+      refreshCompose();
+    }
+  }
 }
 
 // Progressive renderer: only mount the first ``BATCH_SIZE`` tiles, then
@@ -243,20 +415,29 @@ function renderGrid(category, parts) {
 
 function makeTile(category, part, equippedId) {
   const tile = document.createElement("div");
-  tile.className = "part-tile" + (part.id === equippedId ? " equipped" : "");
-  tile.dataset.id = part.id;
-  tile.title = part.id;
 
-  // Server returns icon_paths (list); fall back to icon_path (legacy
-  // single-string) and finally to client-side rule reconstruction so
-  // the tile renders even if the server response shape changes.
-  const candidates =
-    part.icon_paths && part.icon_paths.length ? part.icon_paths
-    : part.icon_path ? [part.icon_path]
-    : iconPathsFor(category, part.id);
+  // Hair tiles represent a style (one entry per ``id // 10`` group);
+  // the displayed thumb and the equipped ID swap to the variant for
+  // the active color. Other categories use the part ID as-is.
+  let displayId = part.id;
+  let candidates;
+  if (category === "Hair") {
+    const color = pickHairColor(part.colors, state.hairColor);
+    displayId = colorVariantId(part.id, color);
+    candidates = iconPathsFor("Hair", displayId);
+  } else {
+    candidates =
+      part.icon_paths && part.icon_paths.length ? part.icon_paths
+      : part.icon_path ? [part.icon_path]
+      : iconPathsFor(category, displayId);
+  }
+
+  tile.className = "part-tile" + (displayId === equippedId ? " equipped" : "");
+  tile.dataset.id = displayId;
+  tile.title = displayId;
 
   const thumb = document.createElement("img");
-  thumb.alt = part.id;
+  thumb.alt = displayId;
   thumb.loading = "lazy";
   setIconWithFallback(thumb, candidates, () => {
     // All candidate canvases failed — swap to a textual placeholder so
@@ -269,11 +450,14 @@ function makeTile(category, part, equippedId) {
 
   const pid = document.createElement("div");
   pid.className = "pid";
-  pid.textContent = part.id;
+  pid.textContent = displayId;
   tile.appendChild(pid);
 
   tile.addEventListener("click", () => {
-    equipPart(category, part.id, candidates);
+    const extra = category === "Hair"
+      ? { baseId: part.id, colors: part.colors }
+      : null;
+    equipPart(category, displayId, candidates, extra);
   });
   return tile;
 }
@@ -290,14 +474,14 @@ const SLOT_CONFLICTS = {
 };
 
 // ── equipped list / compose ───────────────────────────────────────
-async function equipPart(category, id, iconPaths) {
+async function equipPart(category, id, iconPaths, extra) {
   // Accept either the new candidate list or a legacy single string for
   // backwards compatibility with anything still passing one path.
   const paths = Array.isArray(iconPaths)
     ? iconPaths
     : iconPaths ? [iconPaths]
     : iconPathsFor(category, id);
-  state.equipped[category] = { id, iconPaths: paths };
+  state.equipped[category] = { id, iconPaths: paths, ...(extra || {}) };
   for (const conflicting of SLOT_CONFLICTS[category] || []) {
     delete state.equipped[conflicting];
   }

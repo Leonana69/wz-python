@@ -76,6 +76,16 @@ CATEGORIES: Tuple[str, ...] = (
     "Cape", "Shield", "FaceAcc", "Glass", "Earring", "Weapon",
 )
 
+# Categories for which ``list_parts`` reads ``info/cash`` so the UI can
+# split the grid into Cash / Non-Cash sub-tabs. Skipped for Body / Head
+# (always non-cash character bases) and Hair / Face (character looks,
+# and parsing 16k Hair imgs just to set a flag is a 30+s first-load
+# regression nobody wants if the UI isn't filtering on it anyway).
+_CASH_FILTERED_CATEGORIES: frozenset = frozenset({
+    "Cap", "Coat", "Longcoat", "Pants", "Shoes", "Glove",
+    "Cape", "Shield", "FaceAcc", "Glass", "Earring", "Weapon",
+})
+
 CATEGORY_DIR: Dict[str, str] = {
     "Body": "",
     "Head": "",
@@ -444,6 +454,61 @@ def _is_cash_weapon(equip_id: str) -> bool:
     return bool(equip_id) and equip_id.startswith("0170")
 
 
+def _dedupe_hair_by_color(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collapse 8-variant hair color groups (``id // 10`` shared) to a
+    single entry per style, keeping the smallest-numbered variant as
+    the canonical ``id`` and exposing the available color indices
+    (0..7) under ``colors``. Outlier styles that ship fewer than 8
+    colors keep whatever subset the WZ actually has."""
+    grouped: Dict[int, Dict[str, Any]] = {}
+    for entry in parts:
+        n = int(entry["id"])
+        base = n // 10
+        color = n % 10
+        existing = grouped.get(base)
+        if existing is None:
+            new_entry = dict(entry)
+            new_entry["colors"] = [color]
+            grouped[base] = new_entry
+        else:
+            existing["colors"].append(color)
+            # Smaller IDs win as the canonical entry so the icon and
+            # default render reflect the leftmost color in the swatch
+            # row (typically black, color 0).
+            if n < int(existing["id"]):
+                existing["id"] = entry["id"]
+                existing["icon_paths"] = entry["icon_paths"]
+                existing["icon_path"] = entry["icon_path"]
+    out = list(grouped.values())
+    for e in out:
+        e["colors"].sort()
+    out.sort(key=lambda r: int(r["id"]))
+    return out
+
+
+def _read_cash_flag(img: WzImage) -> bool:
+    """True when the image's ``info/cash`` is a non-zero int.
+
+    Body / Head don't ship an ``info`` subdir at all, so they always
+    return False — which matches reality (the character bases aren't
+    cash items). Other categories typically carry ``info/cash = 0``
+    for the regular ID range and ``info/cash = 1`` for cash-shop
+    variants; the pre-built ID prefix isn't a reliable signal because
+    cash and non-cash IDs share the same 4-digit prefix in stock data.
+    """
+    try:
+        info = img.parse().get("info")
+    except Exception:
+        return False
+    if not isinstance(info, WzSubProperty):
+        return False
+    cash = info.get("cash")
+    try:
+        return bool(cash and getattr(cash, "value", 0))
+    except Exception:
+        return False
+
+
 def _has_action(node: WzSubProperty, action: str) -> bool:
     """True if ``<node>/<action>/0`` resolves to a real SubProperty
     (handles UOLs that redirect e.g. ``41/stand2`` → ``../43/stand2``)."""
@@ -741,10 +806,26 @@ class CharacterRenderer:
             # Back-compat: keep ``icon_path`` set to the first candidate
             # so older clients that expected a single string still work.
             entry["icon_path"] = paths[0]
+            # Read ``info/cash`` only for categories the UI offers a
+            # cash / non-cash sub-tab on — parsing the img on others
+            # (Hair: 16k imgs, ~30s) is a wasted first-load regression
+            # because the response field would never be consumed.
+            if category in _CASH_FILTERED_CATEGORIES:
+                entry["cash"] = _read_cash_flag(img)
             results.append(entry)
 
         # Natural sort by ID.
         results.sort(key=lambda r: int(r["id"]))
+
+        # Hair styles: the last digit encodes color
+        # (0 black, 1 red, 2 orange, 3 yellow, 4 green, 5 blue, 6 purple,
+        # 7 brown). Roughly 98% of styles ship all 8 variants as
+        # consecutive IDs (e.g., 00030000–00030007). Collapse the list
+        # to one entry per style, keep the smallest variant as ``id``,
+        # and surface the available ``colors`` so the client can build
+        # a color picker that disables missing colors.
+        if category == "Hair":
+            results = _dedupe_hair_by_color(results)
         return results
 
     # ── pose discovery ──────────────────────────────────────────────────

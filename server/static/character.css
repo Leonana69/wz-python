@@ -225,6 +225,62 @@
 }
 .char-tabs button:hover:not(.active) { background: #4a4d54; }
 
+/* Cash / Non-Cash filter strip — only shown for categories where
+ * ``info/cash`` produces a meaningful split (everything except
+ * Body / Head). Sits between the main category tabs and the grid. */
+.char-subtabs {
+  display: flex;
+  gap: 4px;
+  padding: 6px 12px;
+  background: #232428;
+  border-bottom: 1px solid #1a1b1d;
+  font-size: 12px;
+  align-items: center;
+}
+.char-subtabs .subtab-label {
+  color: #888;
+  margin-right: 4px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.char-subtabs button {
+  background: #2b2d31;
+  color: #c5c5c5;
+  border: 1px solid #1a1b1d;
+  border-radius: 3px;
+  padding: 3px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+.char-subtabs button.active {
+  background: #1e1f22;
+  color: #e8b96b;
+  border-color: #e8b96b;
+}
+.char-subtabs button:hover:not(.active) { background: #3a3d44; }
+.char-subtabs .subtab-count {
+  color: #777;
+  margin-left: 2px;
+  font-size: 10px;
+}
+
+/* Hair-color sub-tab. Each button shows a color swatch + label so the
+ * mapping (0=black, 1=red, …, 7=brown) doesn't have to be memorized. */
+.char-subtabs button.color-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px 3px 6px;
+}
+.char-subtabs .color-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid #1a1b1d;
+  flex: 0 0 12px;
+}
+
 .char-grid {
   flex: 1;
   /* Flex children default to ``min-height: auto``, which makes them grow
