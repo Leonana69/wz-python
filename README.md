@@ -77,6 +77,8 @@ In the browser, right-click any node for export options:
 
 ## Character Builder
 
+![Character Builder screenshot](docs/character_builder.png)
+
 When the loaded archive is `Character.wz` (legacy or hierarchical),
 the header gains a "Character Builder" link that opens a static
 character composer at `/character`:
