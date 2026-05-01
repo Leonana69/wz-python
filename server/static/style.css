@@ -332,6 +332,8 @@ table.props {
 table.props td { padding: 3px 10px 3px 0; vertical-align: top; }
 table.props td:first-child { color: #888; width: 130px; }
 table.props td:last-child { color: #d6d6d6; word-break: break-all; }
+table.props a.uol-target-link { color: #6ab7ff; text-decoration: none; }
+table.props a.uol-target-link:hover { text-decoration: underline; }
 
 .canvas-viewer {
   margin: 12px 0;

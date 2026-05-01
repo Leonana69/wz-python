@@ -365,6 +365,76 @@ def _run_json_bundle_job(job_id: str, target, label: str, reader_lock: threading
             pass
 
 
+def _walk_sounds(node, current_path: str = "") -> Iterator[Tuple[str, Any]]:
+    """Yield every (path, WzSoundProperty) reachable from ``node``."""
+    from wzpy.properties import WzSoundProperty, WzSubProperty, WzProperty
+    from wzpy.wz_file import WzDirectory
+    from wzpy.wz_image import WzImage
+    if isinstance(node, WzSoundProperty):
+        yield current_path, node
+        return
+    if isinstance(node, WzDirectory):
+        children = list(node.subdirs.items()) + list(node.images.items())
+        for name, child in children:
+            yield from _walk_sounds(child, f"{current_path}/{name}" if current_path else name)
+        return
+    if isinstance(node, WzImage):
+        node.parse()
+        for c in node.children():
+            yield from _walk_sounds(c, f"{current_path}/{c.name}" if current_path else c.name)
+        return
+    if isinstance(node, WzProperty):
+        for c in node.children():
+            yield from _walk_sounds(c, f"{current_path}/{c.name}" if current_path else c.name)
+
+
+def _build_sound_zip(node, layout: str) -> bytes:
+    """Pack every Sound payload under ``node`` into a ZIP as MP3.
+
+    WZ Sound properties carry MP3 audio bytes after a WAVEFORMATEX
+    header (see :func:`_default_mp3_header`); we strip the header
+    and emit the raw audio so the result is a real, playable .mp3
+    file. Unknown / non-MP3 sounds get the raw payload anyway —
+    a media player will still recognize MP3 sync bytes if present
+    and ignore garbage prefixes."""
+    buf = io.BytesIO()
+    seen_names: Dict[str, int] = {}
+    count = 0
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for path, sound in _walk_sounds(node):
+            data = _read_sound_bytes(sound)
+            if not data:
+                continue
+            if layout == "flat":
+                name = path.replace("/", "_") + ".mp3"
+            else:
+                name = f"{path}.mp3"
+            if name in seen_names:
+                seen_names[name] += 1
+                stem, ext = name.rsplit(".", 1)
+                name = f"{stem}_{seen_names[name]}.{ext}"
+            else:
+                seen_names[name] = 0
+            zf.writestr(name, data)
+            count += 1
+    return buf.getvalue() if count else b""
+
+
+def _read_sound_bytes(sound) -> bytes:
+    """Pull the audio payload off either the staged ``_data`` or the
+    source mmap. Mirrors the logic in /api/sound."""
+    if getattr(sound, "_data", None) is not None:
+        return sound._data
+    if sound._wz_image is None:
+        return b""
+    r = sound._wz_image.wz_file.reader
+    keep = r.position
+    r.seek(sound._data_offset)
+    data = r.read(sound._data_length)
+    r.seek(keep)
+    return data
+
+
 def _build_image_zip(node, layout: str, region: str) -> bytes:
     """Decode every Canvas under ``node`` and pack into a ZIP."""
     buf = io.BytesIO()
@@ -510,7 +580,7 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
                 abort(404, "cannot descend further")
         return node, ""
 
-    def _children_of(node: Any) -> List[Dict[str, Any]]:
+    def _children_of(node: Any, image_path: Optional[str] = None) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         if isinstance(node, WzDirectory):
             for name in sorted(node.subdirs, key=_natural_key):
@@ -521,11 +591,39 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         if isinstance(node, (WzImage, WzProperty)):
             children = sorted(node.children(), key=lambda p: _natural_key(p.name))
             for c in children:
-                out.append(_describe_property(c))
+                out.append(_describe_property(c, image_path=image_path))
             return out
         return out
 
-    def _describe_property(p: WzProperty) -> Dict[str, Any]:
+    def _resolve_uol_target(uol_prop: WzUolProperty) -> Optional[WzProperty]:
+        """Follow a UOL chain to its non-UOL target. Resolution starts from
+        the UOL's parent (matching MapleLib's WzUolProperty.LinkValue) and
+        bails on cycles or paths that escape the .img tree."""
+        seen = set()
+        cur: Optional[WzProperty] = uol_prop
+        for _ in range(16):  # depth cap; chains beyond this are pathological
+            if cur is None or not isinstance(cur, WzUolProperty):
+                return cur
+            if id(cur) in seen:
+                return None
+            seen.add(id(cur))
+            target_str = cur.value
+            if not target_str or cur.parent is None:
+                return None
+            cur = cur.parent.get(target_str)
+        return None
+
+    def _in_image_path(p: WzProperty) -> str:
+        """Slash-joined path from the .img root to ``p`` (excludes the root
+        SubProperty's own name, which mirrors the image filename)."""
+        parts: List[str] = []
+        cur: Optional[WzProperty] = p
+        while cur is not None and cur.parent is not None:
+            parts.append(cur.name)
+            cur = cur.parent
+        return "/".join(reversed(parts))
+
+    def _describe_property(p: WzProperty, image_path: Optional[str] = None) -> Dict[str, Any]:
         d: Dict[str, Any] = {"name": p.name, "kind": p.type_name, "leaf": True}
         if isinstance(p, WzSubProperty):
             # ``has_children`` is O(1); calling ``children()`` would allocate
@@ -564,6 +662,34 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
                 d["encoding"] = p._encoding
                 d["payload_length"] = p._payload_length
                 d["indirected"] = p._indirected
+
+        # UOL: resolve the chain so the client can inline the referenced
+        # value (image, audio, scalar) instead of just showing the path.
+        if isinstance(p, WzUolProperty):
+            target = _resolve_uol_target(p)
+            if target is not None:
+                d["target_kind"] = target.type_name
+                if image_path is not None:
+                    in_img = _in_image_path(target)
+                    d["target_path"] = (
+                        f"{image_path}/{in_img}" if in_img else image_path
+                    )
+                if isinstance(target, WzCanvasProperty):
+                    d["target_width"] = target.width
+                    d["target_height"] = target.height
+                    d["target_format"] = target.format + target.format2
+                    d["target_renderable"] = target.has_pixels()
+                elif isinstance(target, WzSoundProperty):
+                    d["target_length_ms"] = target.length_ms
+                    d["target_bytes"] = target.value
+                elif isinstance(target, WzVectorProperty):
+                    d["target_x"] = target.x
+                    d["target_y"] = target.y
+                elif not isinstance(target, WzSubProperty):
+                    try:
+                        d["target_value"] = target.value
+                    except Exception:
+                        pass
         return d
 
     # ── routes ───────────────────────────────────────────────────────
@@ -586,11 +712,11 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             prop = node.get(remaining)
             if prop is None:
                 abort(404)
-            children = _children_of(prop)
+            children = _children_of(prop, image_path=node.path)
             kind = prop.type_name
         elif isinstance(node, WzImage):
             node.parse()
-            children = _children_of(node)
+            children = _children_of(node, image_path=node.path)
             kind = "Image"
         else:
             children = _children_of(node)
@@ -617,7 +743,9 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
     def api_property(subpath: str) -> Response:
         node, remaining = _resolve(unquote(subpath))
         target: Any = node
+        image_path: Optional[str] = None
         if isinstance(node, WzImage):
+            image_path = node.path
             if remaining:
                 target = node.get(remaining)
             else:
@@ -626,10 +754,11 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             abort(404)
         if target is None:
             abort(404)
-        return jsonify(_describe_property(target) if isinstance(target, WzProperty) else {
-            "name": getattr(target, "name", ""),
-            "kind": "Directory",
-        })
+        return jsonify(
+            _describe_property(target, image_path=image_path)
+            if isinstance(target, WzProperty)
+            else {"name": getattr(target, "name", ""), "kind": "Directory"}
+        )
 
     @app.route("/api/canvas/<path:subpath>.png")
     def api_canvas(subpath: str) -> Response:
@@ -1033,6 +1162,29 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             headers={
                 "Content-Disposition":
                     f'attachment; filename="{_safe_filename(subpath, "images_" + layout + ".zip")}"',
+            },
+        )
+
+    @app.route("/api/export/sounds/", defaults={"subpath": ""})
+    @app.route("/api/export/sounds/<path:subpath>")
+    def api_export_sounds(subpath: str) -> Response:
+        """Bundle every Sound under ``subpath`` into a ZIP of .mp3
+        files. ``layout`` mirrors /api/export/images: ``nested``
+        keeps the WZ tree as folder structure, ``flat`` collapses
+        path separators to underscores."""
+        target = _resolve_target(subpath)
+        layout = request.args.get("layout", "nested")
+        if layout not in ("nested", "flat"):
+            abort(400, "layout must be 'nested' or 'flat'")
+        zip_bytes = _build_sound_zip(target, layout=layout)
+        if not zip_bytes:
+            abort(404, "no sounds in this subtree")
+        return Response(
+            zip_bytes,
+            mimetype="application/zip",
+            headers={
+                "Content-Disposition":
+                    f'attachment; filename="{_safe_filename(subpath, "sounds_" + layout + ".zip")}"',
             },
         )
 

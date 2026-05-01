@@ -635,6 +635,10 @@ function showContextMenuFor(x, y, labelPath, fullPath, kind) {
     () => triggerDownload(`/api/export/images/${enc}?layout=nested`));
   addItem("Export images (flatten into one folder)",
     () => triggerDownload(`/api/export/images/${enc}?layout=flat`));
+  addItem("Export sounds (keep tree structure)",
+    () => triggerDownload(`/api/export/sounds/${enc}?layout=nested`));
+  addItem("Export sounds (flatten into one folder)",
+    () => triggerDownload(`/api/export/sounds/${enc}?layout=flat`));
 
   // Position; clamp to viewport so the menu doesn't get clipped at edges.
   contextMenuEl.hidden = false;
@@ -964,6 +968,19 @@ function makeCrumbs(path) {
 // listeners are removed instead of accumulating forever.
 let activeViewerAbort = null;
 
+// Navigate the detail panel to ``path`` without touching the tree
+// (expansion of intermediate nodes is best-effort and would fight with
+// virtualization). Used by UOL target links — fetches the target's
+// description and re-renders showDetail.
+async function revealAndSelect(path) {
+  try {
+    const meta = await fetchJson(`/api/property/${encodeURI(path)}`);
+    showDetail(path, meta);
+  } catch (err) {
+    console.warn(`[uol-link] could not load ${path}: ${err.message}`);
+  }
+}
+
 function showDetail(path, child) {
   if (activeViewerAbort) {
     activeViewerAbort.abort();
@@ -995,6 +1012,19 @@ function showDetail(path, child) {
     const td2 = document.createElement("td");
     if (k === "value" && EDITABLE_KINDS.has(child.kind)) {
       td2.appendChild(makeValueEditor(path, child, v));
+    } else if (k === "target_path" && typeof v === "string") {
+      // Clickable jump-to-target so the user can navigate to the node
+      // the UOL points at.
+      const a = document.createElement("a");
+      a.href = "#";
+      a.textContent = v;
+      a.dataset.path = v;
+      a.className = "uol-target-link";
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        revealAndSelect(v);
+      });
+      td2.appendChild(a);
     } else {
       td2.textContent = JSON.stringify(v);
     }
@@ -1011,6 +1041,23 @@ function showDetail(path, child) {
     audio.controls = true;
     audio.src = `/api/sound/${encodeURI(path)}`;
     detailEl.appendChild(audio);
+  }
+  // UOL: inline the referenced value so the user sees the actual image,
+  // sound, or scalar instead of just the relative path string.
+  if (child.kind === "UOL" && child.target_kind && child.target_path) {
+    if (child.target_kind === "Canvas" && child.target_renderable) {
+      detailEl.appendChild(makeCanvasViewer(child.target_path, {
+        name: child.name,
+        width: child.target_width,
+        height: child.target_height,
+        format: child.target_format,
+      }, { readOnly: true }));
+    } else if (child.target_kind === "Sound") {
+      const audio = document.createElement("audio");
+      audio.controls = true;
+      audio.src = `/api/sound/${encodeURI(child.target_path)}`;
+      detailEl.appendChild(audio);
+    }
   }
   // Animation hint: when a SubProperty's children include numbered
   // Canvases (the WZ pattern for animation frames), offer a Play
@@ -1031,7 +1078,8 @@ function showDetail(path, child) {
 // Wheel zooms toward the cursor, drag pans, +/- and 0 keys work while the
 // viewer is focused, and image-rendering: pixelated keeps sprites crisp.
 
-function makeCanvasViewer(path, meta) {
+function makeCanvasViewer(path, meta, options = {}) {
+  const readOnly = !!options.readOnly;
   const ac = new AbortController();
   activeViewerAbort = ac;
   const root = document.createElement("div");
@@ -1055,18 +1103,21 @@ function makeCanvasViewer(path, meta) {
   toolbar.appendChild(btn("4×", "4× actual size", () => setZoom(4)));
 
   // Hidden file picker; clicking the Replace button proxies to it. Keeps
-  // the toolbar layout uncluttered.
-  const filePicker = document.createElement("input");
-  filePicker.type = "file";
-  filePicker.accept = "image/*";
-  filePicker.style.display = "none";
-  toolbar.appendChild(filePicker);
-  const replaceBtn = btn("Replace…",
+  // the toolbar layout uncluttered. Suppressed for read-only viewers
+  // (e.g. UOL targets — replacing through a symlink is ambiguous).
+  const filePicker = readOnly ? null : document.createElement("input");
+  const replaceBtn = readOnly ? null : btn("Replace…",
     "Replace this canvas with an uploaded image (must fit the original byte slot)",
     () => filePicker.click());
-  replaceBtn.classList.add("replace-btn");
-  toolbar.appendChild(replaceBtn);
-  filePicker.addEventListener("change", async () => {
+  if (!readOnly) {
+    filePicker.type = "file";
+    filePicker.accept = "image/*";
+    filePicker.style.display = "none";
+    toolbar.appendChild(filePicker);
+    replaceBtn.classList.add("replace-btn");
+    toolbar.appendChild(replaceBtn);
+  }
+  if (!readOnly) filePicker.addEventListener("change", async () => {
     const file = filePicker.files && filePicker.files[0];
     if (!file) return;
     const fd = new FormData();
