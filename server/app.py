@@ -803,9 +803,20 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         poses = renderer.get_weapon_poses(equip_id)
         return jsonify({"id": equip_id, "poses": poses})
 
+    @app.route("/api/character/ear_types/<equip_id>")
+    def api_character_ear_types(equip_id: str) -> Response:
+        """Return the ear-canvas names the given Head image ships with
+        (e.g. ``humanEar``, ``lefEar``, ``highlefEar``) so the UI can
+        offer a selector when the Head has more than one option."""
+        renderer = _get_character_renderer(app, region)
+        if renderer is None:
+            abort(404, "Character.wz not loaded")
+        ears = renderer.get_ear_types(equip_id)
+        return jsonify({"id": equip_id, "ear_types": ears})
+
     @app.route("/api/character/compose")
     def api_character_compose() -> Response:
-        from wzpy.character import CharacterRenderer, SUPPORTED_POSES
+        from wzpy.character import CharacterRenderer, DEFAULT_EAR_TYPE, SUPPORTED_POSES
         renderer = _get_character_renderer(app, region)
         if renderer is None:
             abort(404, "Character.wz not loaded")
@@ -816,8 +827,9 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         pose = request.args.get("pose", "").strip() or None
         if pose is not None and pose not in SUPPORTED_POSES:
             pose = None  # silently fall through to auto-detect
+        ear_type = request.args.get("ear", "").strip() or DEFAULT_EAR_TYPE
         try:
-            img = renderer.compose(ids, pose=pose)
+            img = renderer.compose(ids, pose=pose, ear_type=ear_type)
         except Exception as exc:
             print(f"  [compose error] {exc}", flush=True)
             abort(500, f"compose failed: {exc}")

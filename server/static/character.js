@@ -96,6 +96,13 @@ const state = {
   weaponPoses: ["stand1"],  // poses the currently-equipped weapon supports
   // Cache of weapon → poses so re-equipping doesn't re-fetch.
   weaponPoseCache: new Map(),
+  // Ear-type state — which canvas under ``Head/<id>.img/front/`` is
+  // composited alongside ``head``. Defaults to "humanEar" (round); some
+  // Heads also ship "lefEar" (pointed) and "highlefEar" (tall pointed).
+  // The selector is only exposed when the Head has more than one option.
+  earType: "humanEar",
+  headEarTypes: ["humanEar"],
+  headEarCache: new Map(),
 };
 
 const $img = document.getElementById("char-img");
@@ -301,6 +308,9 @@ async function equipPart(category, id, iconPaths) {
   if (category === "Weapon") {
     await syncWeaponPose(id);
   }
+  if (category === "Head") {
+    await syncHeadEars(id);
+  }
   renderEquipped();
   refreshCompose();
 }
@@ -315,6 +325,11 @@ function unequipPart(category) {
     state.pose = "stand1";
     renderPoseControls();
   }
+  if (category === "Head") {
+    state.headEarTypes = ["humanEar"];
+    state.earType = "humanEar";
+    renderEarControls();
+  }
   renderEquipped();
   refreshCompose();
   if (state.activeTab === category) {
@@ -322,6 +337,35 @@ function unequipPart(category) {
       tile.classList.remove("equipped");
     }
   }
+}
+
+async function syncHeadEars(headId) {
+  let ears = state.headEarCache.get(headId);
+  if (!ears) {
+    try {
+      const resp = await fetch(`/api/character/ear_types/${headId}`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const json = await resp.json();
+      ears = Array.isArray(json.ear_types) ? json.ear_types : [];
+    } catch (err) {
+      console.warn("ear_types fetch failed:", err);
+      ears = [];
+    }
+    state.headEarCache.set(headId, ears);
+  }
+  // Trust whatever the Head ships. If no ear canvases at all, fall
+  // back to a single ``humanEar`` placeholder so the ear-type query
+  // string stays well-formed; the renderer will simply find no
+  // matching canvas and skip the ear, matching how the real client
+  // handles a ``EarType`` with no backing canvas.
+  const options = ears.length ? ears.slice() : ["humanEar"];
+  state.headEarTypes = options;
+  if (!options.includes(state.earType)) {
+    // Prefer humanEar when the Head ships it, otherwise pick the
+    // first option so the selector and the render stay in sync.
+    state.earType = options.includes("humanEar") ? "humanEar" : options[0];
+  }
+  renderEarControls();
 }
 
 async function syncWeaponPose(weaponId) {
@@ -441,6 +485,46 @@ function renderPoseControls() {
   }
 }
 
+// Friendly labels for the canvas names exposed by ``Head/<id>.img/front/``.
+// Anything else falls through to the raw canvas name so custom ears
+// (e.g. dataset mods) still show up identifiably.
+const EAR_LABELS = {
+  humanEar: "Human",
+  lefEar: "Elf",
+  highlefEar: "High Elf",
+};
+
+function renderEarControls() {
+  const host = document.getElementById("char-ear");
+  if (!host) return;
+  host.innerHTML = "";
+  if (state.headEarTypes.length < 2) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  const label = document.createElement("span");
+  label.className = "ear-label";
+  label.textContent = "Ear";
+  host.appendChild(label);
+  const select = document.createElement("select");
+  select.id = "char-ear-select";
+  for (const name of state.headEarTypes) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = EAR_LABELS[name] || name;
+    if (name === state.earType) opt.selected = true;
+    select.appendChild(opt);
+  }
+  select.addEventListener("change", () => {
+    if (select.value !== state.earType) {
+      state.earType = select.value;
+      refreshCompose();
+    }
+  });
+  host.appendChild(select);
+}
+
 async function refreshCompose() {
   const ids = Object.values(state.equipped).map(s => s.id);
   if (ids.length === 0) {
@@ -452,6 +536,7 @@ async function refreshCompose() {
   const url =
     `/api/character/compose?ids=${ids.join(",")}` +
     `&pose=${encodeURIComponent(state.pose)}` +
+    `&ear=${encodeURIComponent(state.earType)}` +
     `&scale=${scale}&_=${seq}`;
   // Use a fetch+blob round-trip so we can drop the result if it's stale,
   // and so the image doesn't flicker while a new one loads.
@@ -496,7 +581,11 @@ $export.addEventListener("click", () => {
   if (state.equipped.Weapon) {
     await syncWeaponPose(state.equipped.Weapon.id);
   }
+  if (state.equipped.Head) {
+    await syncHeadEars(state.equipped.Head.id);
+  }
   renderPoseControls();
+  renderEarControls();
   renderEquipped();
   refreshCompose();
 })();

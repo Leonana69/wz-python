@@ -102,6 +102,25 @@
 }
 .char-pose input[type="radio"] { margin: 0; cursor: pointer; }
 
+/* Ear-type selector — only shown when the equipped Head ships more than
+ * one ear canvas under ``front/`` (humanEar / lefEar / highlefEar). */
+.char-ear {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #aaa;
+}
+.char-ear .ear-label { color: #aaa; margin-right: 2px; }
+.char-ear select {
+  background: #2b2d31;
+  color: #d6d6d6;
+  border: 1px solid #1a1b1d;
+  padding: 3px 6px;
+  border-radius: 3px;
+  font: inherit;
+}
+
 .char-stage h3 {
   margin: 8px 0 4px;
   font-size: 12px;

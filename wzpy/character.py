@@ -321,6 +321,13 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
 SUPPORTED_POSES: Tuple[str, ...] = ("stand1", "stand2")
 DEFAULT_POSE = "stand1"
 
+# Each Head image ships its ``head`` canvas alongside one or more ear
+# variants under ``front/`` (e.g. ``humanEar``, ``lefEar``,
+# ``highlefEar``). The real client picks one to render based on the
+# character's race; we mirror that by filtering Head canvases to keep
+# only ``head`` plus the canvas matching the selected ``ear_type``.
+DEFAULT_EAR_TYPE = "humanEar"
+
 
 def _frame_paths(category: str, pose: str) -> Tuple[str, ...]:
     """Return ordered candidate frame paths for collecting render leaves.
@@ -514,6 +521,7 @@ def _render_root(img: WzImage, category: str, equip_id: str, pose: str) -> WzPro
 def _collect_part_canvases(
     img: WzImage, category: str, equip_id: str, pose: str,
     pkg_root: Optional[WzDirectory] = None,
+    ear_type: str = DEFAULT_EAR_TYPE,
 ) -> List[Tuple[str, WzCanvasProperty, WzCanvasProperty]]:
     """Return ``(leaf_name, metadata_canvas, pixel_canvas)`` triples to render.
 
@@ -526,7 +534,12 @@ def _collect_part_canvases(
     ``z``). When no link is present, both fields point at the same
     canvas. ``pkg_root`` is the WZ root used for absolute outlink
     navigation; when ``None`` (legacy single-file Character.wz), only
-    ``_inlink`` resolves."""
+    ``_inlink`` resolves.
+
+    For Head, ``front/`` siblings other than ``head`` are treated as ear
+    variants and filtered to just the one matching ``ear_type`` —
+    matching MapleNecrocer's per-frame visibility filter so we don't
+    composite (e.g.) ``humanEar`` and ``lefEar`` on top of each other."""
     base = _render_root(img, category, equip_id, pose)
     seen_ids: set = set()
     out: List[Tuple[str, WzCanvasProperty, WzCanvasProperty]] = []
@@ -536,6 +549,15 @@ def _collect_part_canvases(
         if not isinstance(node, WzSubProperty):
             continue
         for child in node.children():
+            # For Head, every sibling of ``head`` is treated as an ear
+            # variant (matches MapleNecrocer's per-frame visibility
+            # filter in ``MapleCharacter.cs:1218``). Filter is name-based
+            # rather than path-based because ``stand1/0`` UOLs into
+            # ``front`` — without this the UOL'd ears get collected
+            # before we ever reach ``front`` and the dedupe table hides
+            # them from the explicit ``front`` filter.
+            if category == "Head" and child.name not in ("head", ear_type):
+                continue
             target = _resolve_uol(child) if isinstance(child, WzUolProperty) else child
             if not isinstance(target, WzCanvasProperty):
                 continue
@@ -753,6 +775,31 @@ class CharacterRenderer:
                     break
         return seen
 
+    def get_ear_types(self, equip_id: str) -> List[str]:
+        """Return the ear-canvas names a Head image ships with.
+
+        Walks ``Head/<id>.img/front/`` and returns every child canvas
+        name except ``head`` (which is the face/scalp). Stock GMS v83
+        Heads ship a single ear, but custom Heads can carry multiple
+        (e.g. ``humanEar``, ``lefEar``, ``highlefEar``) and the client
+        picks one to render via ``compose(..., ear_type=...)``."""
+        if category_for_id(equip_id) != "Head":
+            return []
+        img = self._open_part(equip_id)
+        if img is None:
+            return []
+        front = img.parse().get("front")
+        if not isinstance(front, WzSubProperty):
+            return []
+        out: List[str] = []
+        for child in front.children():
+            if child.name == "head":
+                continue
+            target = _resolve_uol(child) if isinstance(child, WzUolProperty) else child
+            if isinstance(target, WzCanvasProperty):
+                out.append(child.name)
+        return out
+
     def detect_pose(self, equip_ids: List[str], requested: Optional[str] = None) -> str:
         """Pick a pose for a composite. Honors ``requested`` if the
         equipped weapon supports it; otherwise falls back to the
@@ -768,12 +815,21 @@ class CharacterRenderer:
             return requested
         return poses[0]
 
-    def compose(self, equip_ids: List[str], pose: Optional[str] = None) -> Image.Image:
+    def compose(
+        self, equip_ids: List[str], pose: Optional[str] = None,
+        ear_type: str = DEFAULT_EAR_TYPE,
+    ) -> Image.Image:
         """Render the equipped parts as a single RGBA :class:`PIL.Image`.
 
         ``pose`` is one of ``"stand1"`` / ``"stand2"`` and drives which
         body / coat / weapon canvases get pulled. If ``None`` (or an
-        unsupported value) we auto-detect from the equipped weapon."""
+        unsupported value) we auto-detect from the equipped weapon.
+
+        ``ear_type`` is the canvas name under ``Head/<id>.img/front/``
+        to render alongside ``head`` (e.g. ``humanEar``, ``lefEar``,
+        ``highlefEar``). If the Head image doesn't ship a matching
+        canvas the ear simply doesn't render — call
+        :meth:`get_ear_types` first to enumerate what's available."""
         pose = self.detect_pose(equip_ids, pose)
         # Step 1: Per-part canvas collection.
         placements: List[_Placement] = []
@@ -786,6 +842,7 @@ class CharacterRenderer:
                 continue
             for leaf_name, canvas, pixel_canvas in _collect_part_canvases(
                 img, cat, eid, pose, pkg_root=self.wz.root,
+                ear_type=ear_type,
             ):
                 placements.append(_Placement(
                     equip_id=eid, category=cat, name=leaf_name,
