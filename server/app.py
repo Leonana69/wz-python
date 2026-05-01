@@ -484,6 +484,31 @@ from wzpy.canvas import decode_canvas
 from wzpy.wz_file import WzDirectory
 
 
+def _character_supported(wz: "WzFile") -> bool:
+    """A Character.wz is recognized by the equip-shape root: top-level
+    ``Hair``/``Coat``/``Cap`` etc. directories. We probe a couple to avoid
+    false positives on look-alike WZs."""
+    root = wz.root
+    needed = {"Hair", "Coat", "Face"}
+    return needed.issubset(set(root.subdirs))
+
+
+def _get_character_renderer(app: "Flask", region: str):
+    """Lazy-build a CharacterRenderer once per Flask app and reuse it.
+    Reading zmap + walking dirs is cheap, but calling list_parts() per
+    request would otherwise re-do that scan every time."""
+    cached = app.config.get("CHARACTER_RENDERER")
+    if cached is not None:
+        return cached
+    from wzpy.character import CharacterRenderer
+    wz = app.config["WZ"]
+    if not _character_supported(wz):
+        return None
+    renderer = CharacterRenderer(wz, region=region)
+    app.config["CHARACTER_RENDERER"] = renderer
+    return renderer
+
+
 def _score_root_printability(wz: "WzFile") -> float:
     """Fraction of bytes in root directory entry names that look like
     printable ASCII. With the right region key, names like ``"Map"`` /
@@ -695,12 +720,77 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
     # ── routes ───────────────────────────────────────────────────────
     @app.route("/")
     def index() -> str:
+        # ``has_character`` toggles a "Character Builder" link in the header
+        # — the builder only makes sense when a Character.wz is loaded.
         return render_template(
             "index.html",
             wz_name=wz_path,
             wz_version=wz.version,
             wz_region=region,
+            has_character=_character_supported(wz),
         )
+
+    @app.route("/character")
+    def character_builder() -> str:
+        if not _character_supported(wz):
+            abort(404, "Character builder requires a Character.wz")
+        return render_template(
+            "character.html",
+            wz_name=wz_path,
+            wz_version=wz.version,
+            wz_region=region,
+        )
+
+    @app.route("/api/character/parts/<category>")
+    def api_character_parts(category: str) -> Response:
+        from wzpy.character import CATEGORIES, CharacterRenderer
+        if category not in CATEGORIES:
+            abort(404, f"unknown category {category!r}")
+        renderer = _get_character_renderer(app, region)
+        if renderer is None:
+            abort(404, "Character.wz not loaded")
+        items = renderer.list_parts(category)
+        return jsonify({"category": category, "parts": items})
+
+    @app.route("/api/character/weapon_poses/<equip_id>")
+    def api_character_weapon_poses(equip_id: str) -> Response:
+        """Return which static poses (stand1, stand2, or both) the given
+        weapon ships with so the UI knows whether to show a pose toggle."""
+        renderer = _get_character_renderer(app, region)
+        if renderer is None:
+            abort(404, "Character.wz not loaded")
+        poses = renderer.get_weapon_poses(equip_id)
+        return jsonify({"id": equip_id, "poses": poses})
+
+    @app.route("/api/character/compose")
+    def api_character_compose() -> Response:
+        from wzpy.character import CharacterRenderer, SUPPORTED_POSES
+        renderer = _get_character_renderer(app, region)
+        if renderer is None:
+            abort(404, "Character.wz not loaded")
+        ids_param = request.args.get("ids", "").strip()
+        ids = [s for s in ids_param.split(",") if s.strip()]
+        if not ids:
+            abort(400, "missing or empty ?ids=")
+        pose = request.args.get("pose", "").strip() or None
+        if pose is not None and pose not in SUPPORTED_POSES:
+            pose = None  # silently fall through to auto-detect
+        try:
+            img = renderer.compose(ids, pose=pose)
+        except Exception as exc:
+            print(f"  [compose error] {exc}", flush=True)
+            abort(500, f"compose failed: {exc}")
+        scale = max(1, min(8, int(request.args.get("scale", "2"))))
+        if scale != 1:
+            img = img.resize(
+                (img.width * scale, img.height * scale), Image.NEAREST,
+            )
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return Response(buf.getvalue(), mimetype="image/png", headers={
+            "Cache-Control": "no-store",  # interactive — selection changes
+            "X-Resolved-Pose": renderer.detect_pose(ids, pose),
+        })
 
     @app.route("/api/tree")
     @app.route("/api/tree/")

@@ -1,0 +1,275 @@
+/* ── character builder layout ─────────────────────────────────────── */
+
+.character-page header h1 .sub {
+  color: #999;
+  font-weight: normal;
+  margin-left: 4px;
+}
+.character-page .back-link {
+  color: #8ab4ff;
+  text-decoration: none;
+  margin-left: auto;
+  font-size: 12px;
+}
+.character-page .back-link:hover { text-decoration: underline; }
+
+/* Inherit display:flex from the base ``main`` rule in style.css instead
+ * of overriding it to grid — grid's implicit row track was sizing to
+ * content, growing the panel to ~1500 tiles tall and defeating the
+ * inner ``overflow-y``. Pure flex propagates the viewport-bounded
+ * height through to the scrollable grid reliably. */
+.char-main {
+  min-height: 0;
+}
+
+.char-stage {
+  flex: 0 0 320px;
+  min-width: 0;
+  background: #232428;
+  border-right: 1px solid #1a1b1d;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+}
+
+.char-preview {
+  background:
+    repeating-conic-gradient(#3a3d44 0deg 90deg, #2b2d31 90deg 180deg) 0 0 / 20px 20px;
+  border: 1px solid #1a1b1d;
+  border-radius: 4px;
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+}
+.char-preview img {
+  image-rendering: pixelated;
+  max-width: 100%;
+  height: auto;
+}
+
+.char-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.char-controls label {
+  color: #aaa;
+  font-size: 12px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.char-controls select {
+  background: #2b2d31;
+  color: #d6d6d6;
+  border: 1px solid #1a1b1d;
+  padding: 3px 6px;
+  border-radius: 3px;
+  font: inherit;
+}
+.char-controls button {
+  margin-left: auto;
+  background: #3a4d6f;
+  color: #d6d6d6;
+  border: 1px solid #1a1b1d;
+  border-radius: 3px;
+  padding: 4px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+.char-controls button:hover { background: #4d6592; }
+
+/* Pose toggle — only shown when the equipped weapon supports both
+ * stand1 (one-handed) and stand2 (two-handed). */
+.char-pose {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #aaa;
+}
+.char-pose .pose-label { color: #aaa; margin-right: 2px; }
+.char-pose label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+  color: #c5c5c5;
+}
+.char-pose input[type="radio"] { margin: 0; cursor: pointer; }
+
+.char-stage h3 {
+  margin: 8px 0 4px;
+  font-size: 12px;
+  color: #999;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.equipped-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.equipped-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #2b2d31;
+  border: 1px solid #1a1b1d;
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+  font-size: 12px;
+}
+.equipped-list li.hint {
+  color: #777;
+  font-style: italic;
+  font-family: inherit;
+  background: transparent;
+  border: 1px dashed #2e2f33;
+}
+.equipped-list .eq-thumb {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  background: #1e1f22;
+  border: 1px solid #1a1b1d;
+  border-radius: 2px;
+}
+.equipped-list .eq-thumb-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.equipped-list .eq-cat {
+  background: #3a3d44;
+  color: #c5c5c5;
+  padding: 1px 6px;
+  border-radius: 2px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-family: inherit;
+}
+.equipped-list .eq-id { color: #d6d6d6; flex: 1; }
+.equipped-list .eq-remove {
+  background: transparent;
+  color: #c25555;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
+}
+.equipped-list .eq-remove:hover { color: #ff7777; }
+
+.char-pickers {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.char-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 8px 8px 0;
+  background: #2b2d31;
+  border-bottom: 1px solid #1a1b1d;
+}
+.char-tabs button {
+  background: #3a3d44;
+  color: #c5c5c5;
+  border: 1px solid #1a1b1d;
+  border-bottom: none;
+  border-radius: 3px 3px 0 0;
+  padding: 4px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+.char-tabs button.active {
+  background: #1e1f22;
+  color: #e8b96b;
+  border-color: #1a1b1d;
+}
+.char-tabs button:hover:not(.active) { background: #4a4d54; }
+
+.char-grid {
+  flex: 1;
+  /* Flex children default to ``min-height: auto``, which makes them grow
+   * to fit content — that defeats the ``overflow-y: auto`` and hides the
+   * scrollbar. Setting it to 0 lets the grid shrink to its flex track
+   * size and scroll the overflow. */
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(60px, 1fr));
+  gap: 6px;
+  align-content: start;
+  background: #1e1f22;
+}
+.char-grid .hint {
+  grid-column: 1 / -1;
+  color: #777;
+  font-style: italic;
+}
+.char-grid .part-tile {
+  background: #2b2d31;
+  border: 1px solid #1a1b1d;
+  border-radius: 3px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 4px;
+  cursor: pointer;
+  position: relative;
+}
+.char-grid .part-tile:hover { border-color: #e8b96b; }
+.char-grid .part-tile.equipped { border-color: #5e8a3a; }
+.char-grid .part-tile img {
+  image-rendering: pixelated;
+  max-width: 48px;
+  max-height: 48px;
+  height: auto;
+  width: auto;
+}
+.char-grid .part-tile .pid {
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+  font-size: 10px;
+  color: #777;
+  margin-top: 4px;
+  word-break: break-all;
+  text-align: center;
+}
+.char-grid .part-tile .placeholder {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #555;
+  font-size: 10px;
+  background: #1e1f22;
+}
+
+.char-grid.loading { opacity: 0.5; }
+/* Sentinel for IntersectionObserver-driven progressive batching of part
+ * tiles — invisible but takes up a row so the observer fires before the
+ * user actually reaches the end of the rendered tiles. */
+.char-grid-sentinel {
+  grid-column: 1 / -1;
+  height: 1px;
+}

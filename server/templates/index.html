@@ -13,6 +13,9 @@
       <span class="badge">v{{ wz_version }}</span>
       <span class="path">{{ wz_name }}</span>
     </div>
+    {% if has_character %}
+    <a class="char-link" href="{{ url_for('character_builder') }}">Character Builder →</a>
+    {% endif %}
     <div id="save-slot"></div>
   </header>
 

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Character Builder — wzpy</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='character.css') }}">
+</head>
+<body data-wz-name="{{ wz_name }}" class="character-page">
+  <header>
+    <h1>wzpy <span class="sub">— Character Builder</span></h1>
+    <div class="meta">
+      <span class="badge">{{ wz_region }}</span>
+      <span class="badge">v{{ wz_version }}</span>
+      <span class="path">{{ wz_name }}</span>
+    </div>
+    <a class="back-link" href="{{ url_for('index') }}">← Tree browser</a>
+  </header>
+
+  <main class="char-main">
+    <section class="char-stage">
+      <div class="char-preview">
+        <img id="char-img" alt="character preview">
+      </div>
+      <div class="char-controls">
+        <label>Scale
+          <select id="char-scale">
+            <option value="1">×1</option>
+            <option value="2" selected>×2</option>
+            <option value="4">×4</option>
+            <option value="8">×8</option>
+          </select>
+        </label>
+        <div id="char-pose" class="char-pose" hidden></div>
+        <button id="char-export" type="button">Save PNG</button>
+      </div>
+      <h3>Equipped</h3>
+      <ul id="char-equipped" class="equipped-list">
+        <li class="hint">No items yet — pick parts from the right.</li>
+      </ul>
+    </section>
+
+    <section class="char-pickers">
+      <nav class="char-tabs" id="char-tabs"></nav>
+      <div class="char-grid" id="char-grid">
+        <p class="hint">Pick a category to load parts.</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='character.js') }}"></script>
+</body>
+</html>
