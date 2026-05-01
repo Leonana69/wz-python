@@ -756,13 +756,23 @@ def _collect_part_canvases(
     matching MapleNecrocer's per-frame visibility filter so we don't
     composite (e.g.) ``humanEar`` and ``lefEar`` on top of each other.
 
-    Frame paths are tried in priority order — the first canvas that
-    claims a given ``z`` slot wins, fallback paths only fill in z
-    slots the primary didn't ship. Without this, caps that ship a
-    ``default/default`` rest frame plus a per-pose ``stand1/0/...``
-    action frame both ``z='cap'`` (e.g. 01003559's ``stand1/0/default``
-    and 01001090's ``stand1/0/default1``) composite both bitmaps at
-    the same anchor and the user sees a doubled cap."""
+    Frame paths are tried in priority order and treated as
+    EXCLUSIVE: the first path that produces any canvases wins and
+    later paths are skipped. ``stand1/0`` typically UOLs to the
+    canvases that live under ``default`` / ``front`` for Hair /
+    Head / standard caps, so UOL resolution + the existing
+    ``id()``-based dedup already collapses them to the same
+    placements. The exclusive walk fixes caps that ship distinct
+    placeholders in both paths — 01003843's ``default/default``
+    (z=``capOverHairOverHair``, a static rest frame) and
+    ``stand1/0/0`` (z=``capOverHair``, a real action frame) both
+    rendered before, doubling the cap. Caps with only a
+    ``default/default`` (no ``stand1/0`` body) still render
+    because the empty primary path leaves ``out_before == len(out)``
+    and the loop falls through to ``default``.
+
+    Within a single path the z-slot dedup still fires as a safety
+    net so any same-z duplicates inside one frame collapse cleanly."""
     base = _render_root(img, category, equip_id, pose)
     seen_ids: set = set()
     seen_zslots: set = set()
@@ -772,6 +782,7 @@ def _collect_part_canvases(
         node = _resolve_uol(node) if isinstance(node, WzUolProperty) else node
         if not isinstance(node, WzSubProperty):
             continue
+        out_before = len(out)
         for child in node.children():
             # For Head, every sibling of ``head`` is treated as an ear
             # variant (matches MapleNecrocer's per-frame visibility
@@ -823,6 +834,10 @@ def _collect_part_canvases(
             if z_slot is not None:
                 seen_zslots.add(z_slot)
             out.append((child.name, target, pixels))
+        if len(out) > out_before:
+            # Primary path produced canvases — don't walk the
+            # fallback path. See docstring.
+            break
     return out
 
 
