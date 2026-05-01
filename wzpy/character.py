@@ -747,16 +747,16 @@ def _collect_part_canvases(
     matching MapleNecrocer's per-frame visibility filter so we don't
     composite (e.g.) ``humanEar`` and ``lefEar`` on top of each other.
 
-    Frame paths are tried in priority order — the first occurrence of
-    a leaf name wins, fallback paths only fill in leaf names the
-    primary didn't ship. Without this, caps like 01003559 — which
-    duplicates its frames as both ``default/default`` and
-    ``stand1/0/default`` (different ``_Canvas`` outlink targets, same
-    ``z='cap'``) — composite both bitmaps on top of each other and
-    the user sees a doubled cap."""
+    Frame paths are tried in priority order — the first canvas that
+    claims a given ``z`` slot wins, fallback paths only fill in z
+    slots the primary didn't ship. Without this, caps that ship a
+    ``default/default`` rest frame plus a per-pose ``stand1/0/...``
+    action frame both ``z='cap'`` (e.g. 01003559's ``stand1/0/default``
+    and 01001090's ``stand1/0/default1``) composite both bitmaps at
+    the same anchor and the user sees a doubled cap."""
     base = _render_root(img, category, equip_id, pose)
     seen_ids: set = set()
-    seen_names: set = set()
+    seen_zslots: set = set()
     out: List[Tuple[str, WzCanvasProperty, WzCanvasProperty]] = []
     for path in _frame_paths(category, pose):
         node = base.get(path)
@@ -764,11 +764,6 @@ def _collect_part_canvases(
         if not isinstance(node, WzSubProperty):
             continue
         for child in node.children():
-            # Drop a leaf name we've already collected from a higher-
-            # priority frame path (see the docstring note about
-            # duplicated cap canvases).
-            if child.name in seen_names:
-                continue
             # For Head, every sibling of ``head`` is treated as an ear
             # variant (matches MapleNecrocer's per-frame visibility
             # filter in ``MapleCharacter.cs:1218``). Filter is name-based
@@ -791,6 +786,15 @@ def _collect_part_canvases(
                 continue
             if id(target) in seen_ids:
                 continue
+            # Skip a canvas whose z slot is already covered by an
+            # earlier frame-path. ``z`` is read after the canvas-type
+            # check (cheap — just a child lookup) and ``None`` z
+            # slots are NOT deduped because the heuristic anchor
+            # falls back to per-canvas placement and treating them
+            # all as a single slot would drop legitimate layers.
+            z_slot = _z_slot(target)
+            if z_slot is not None and z_slot in seen_zslots:
+                continue
             # Resolve _outlink/_inlink (a no-op when neither child is
             # present, returns the original canvas). For hierarchical
             # packs the placeholder is 1×1 and the link target carries
@@ -807,7 +811,8 @@ def _collect_part_canvases(
             if not pixels.has_pixels():
                 continue
             seen_ids.add(id(target))
-            seen_names.add(child.name)
+            if z_slot is not None:
+                seen_zslots.add(z_slot)
             out.append((child.name, target, pixels))
     return out
 
