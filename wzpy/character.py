@@ -182,25 +182,22 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     # Body / torso reference.
     "shieldBelowBody",
     "weaponBelowBody",
-    "hairBelowBody",
-    # Cap and cap-accessory canvases whose z says "below body" — they
-    # belong with the rest of the *BelowBody cluster, BEFORE ``body``,
-    # so the body draws on top of them. Caps like 01001036 split into
-    # two canvases (``default/default`` z=``cap`` plus
-    # ``default/defaultAc`` z=``capBelowBody``); without these slots
-    # in the back-of-body cluster, the ``Ac`` half drew over the
-    # torso.
+    # Back-of-cap canvases sit BEFORE ``hairBelowBody`` so long hair
+    # hangs in front of brims / hood-wraps / back-pieces (e.g.
+    # 01002437's ``defaultAc`` z=``capBelowBody``) instead of the
+    # cap covering the hair. Body still draws on top so the brim
+    # disappears behind the torso.
     #
-    # ``capBelowHead`` and ``capBelowHair`` live here too: their
-    # names read "below head" / "below hair" but the WZ authors that
-    # use them (01003934's ``defaultBack``, 01003817's ``defaultAc``
-    # — back-hanging cap parts on full helmets) want the body to
-    # cover them, so they belong in the back-of-body cluster rather
-    # than just-below-head / just-below-hair.
+    # Caps like 01001036 / 01000000 (``defaultAc`` z=``capBelowBody``
+    # / ``capAccessoryBelowBody``) and the back-hanging full-helmet
+    # parts on 01003934 (``capBelowHead``) / 01003817 (``capBelowHair``)
+    # all share this "behind everything except for whatever body /
+    # back hair covers them" placement.
     "capBelowHead",
     "capBelowHair",
     "capBelowBody",
     "capAccessoryBelowBody",
+    "hairBelowBody",
     "body",
     # Pants / shoes stack (behind body parts that overlap).
     "backPantsBelowShoes",
