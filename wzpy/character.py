@@ -191,11 +191,14 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     # in the back-of-body cluster, the ``Ac`` half drew over the
     # torso.
     #
-    # ``capBelowHead`` lives here too: its name reads "below head"
-    # but the WZ authors that use it (e.g., 01003934's ``defaultBack``
-    # — a back-hanging cap part) want the body to cover it, so it
-    # belongs in the back-of-body cluster rather than just-below-head.
+    # ``capBelowHead`` and ``capBelowHair`` live here too: their
+    # names read "below head" / "below hair" but the WZ authors that
+    # use them (01003934's ``defaultBack``, 01003817's ``defaultAc``
+    # — back-hanging cap parts on full helmets) want the body to
+    # cover them, so they belong in the back-of-body cluster rather
+    # than just-below-head / just-below-hair.
     "capBelowHead",
+    "capBelowHair",
     "capBelowBody",
     "capAccessoryBelowBody",
     "body",
