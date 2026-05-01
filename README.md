@@ -242,9 +242,10 @@ run.py                 convenience entry point for the web UI
 
 ## Reference
 
-- `Harepacker-resurrected/docs/wz-format/wz-file-overview.md`
-- `Harepacker-resurrected/docs/wz-format/wz-format-history.md`
-- `Harepacker-resurrected/docs/wz-format/canvas-outlink-system.md`
+Built with reference to two upstream projects, with thanks to their authors:
+
+- [lastbattle/Harepacker-resurrected](https://github.com/lastbattle/Harepacker-resurrected) — WZ format documentation and the canonical C# parser this implementation was checked against.
+- [Elem8100/MapleNecrocer](https://github.com/Elem8100/MapleNecrocer) — character renderer and avatar-form logic that informed the Character Builder's z-order, vslot handling, and ear / pose rules.
 
 ## License
 
