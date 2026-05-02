@@ -1218,29 +1218,34 @@ class CharacterRenderer:
         #
         # 2. Per-canvas TRANSLATION COMPENSATION. The body's per-frame
         #    bitmap is a different size each frame (21 → 22 → 23 px
-        #    wide for stock body 00002000) and the navel sits at a
-        #    different point within each bitmap. Aligning by the
-        #    bitmap CENTER (rather than top-left or navel) splits
-        #    the breathing expansion symmetrically between the left
-        #    and right edges so the body silhouette looks like it's
-        #    breathing in place instead of translating right then
-        #    snapping back. Coat / longcoat / pants / glove ship
+        #    wide and 1px taller for stock body 00002000) and the
+        #    navel sits at a different point within each bitmap. We
+        #    pin the body bitmap by its RIGHT edge to frame 0's right
+        #    edge so the chest expansion always grows leftward —
+        #    that's the direction MapleStory's standby breathing
+        #    actually goes (the character faces left so its chest /
+        #    front IS the bitmap's left side), and a left-only
+        #    expansion reads as "breathing in place" instead of
+        #    "shifting right". Coat / longcoat / pants / glove ship
         #    per-frame bitmaps tuned to track the body, so we apply
         #    ``-delta`` to every placement whose pixel canvas isn't
-        #    shared with frame 0 (i.e., the per-frame parts). Hair /
-        #    cap / face / earring etc. UOL into ``default`` and share
-        #    pixel canvases with frame 0, so they stay on their
-        #    frozen anchor positions.
+        #    shared with frame 0. Hair / cap / face / earring etc.
+        #    UOL into ``default`` and share pixel canvases with frame
+        #    0, so they stay on their frozen anchor positions.
         frame0_canvases: Dict[Tuple[str, str], Any] = {}
-        body_center_0: Optional[Tuple[int, int]] = None
+        body_anchor_0: Optional[Tuple[int, int]] = None
 
-        def _body_center(pls: List[_Placement]) -> Optional[Tuple[int, int]]:
+        def _body_anchor(pls: List[_Placement]) -> Optional[Tuple[int, int]]:
+            """Use the body bitmap's RIGHT edge + TOP edge as the
+            stable reference. Right edge stays put across frames
+            (chest puffs leftward); vertical alignment stays at
+            the bitmap top so the head / shoulders don't drift."""
             for pl in pls:
                 if pl.category == "Body" and pl.name == "body" \
                         and pl.top_left is not None:
                     return (
-                        pl.top_left[0] + pl.pixel_canvas.width // 2,
-                        pl.top_left[1] + pl.pixel_canvas.height // 2,
+                        pl.top_left[0] + pl.pixel_canvas.width,
+                        pl.top_left[1],
                     )
             return None
 
@@ -1255,12 +1260,12 @@ class CharacterRenderer:
                 frozen_anchors = anchors
                 for pl in placements:
                     frame0_canvases[(pl.equip_id, pl.name)] = pl.pixel_canvas
-                body_center_0 = _body_center(placements)
+                body_anchor_0 = _body_anchor(placements)
             else:
-                body_center_now = _body_center(placements)
-                if body_center_0 is not None and body_center_now is not None:
-                    dx = body_center_0[0] - body_center_now[0]
-                    dy = body_center_0[1] - body_center_now[1]
+                body_anchor_now = _body_anchor(placements)
+                if body_anchor_0 is not None and body_anchor_now is not None:
+                    dx = body_anchor_0[0] - body_anchor_now[0]
+                    dy = body_anchor_0[1] - body_anchor_now[1]
                     if dx or dy:
                         for pl in placements:
                             if pl.top_left is None:
