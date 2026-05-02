@@ -939,8 +939,9 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         if pose is not None and pose not in SUPPORTED_POSES:
             pose = None  # silently fall through to auto-detect
         ear_type = request.args.get("ear", "").strip() or DEFAULT_EAR_TYPE
+        flip = request.args.get("flip", "").lower() in ("1", "true", "yes")
         try:
-            img = renderer.compose(ids, pose=pose, ear_type=ear_type)
+            img = renderer.compose(ids, pose=pose, ear_type=ear_type, flip=flip)
         except Exception as exc:
             print(f"  [compose error] {exc}", flush=True)
             abort(500, f"compose failed: {exc}")
