@@ -225,8 +225,6 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     "backMailChest",
     # Mail / coat torso.
     "shieldBelowArm",
-    "gloveWristBelowMailArm",
-    "gloveBelowMailArm",
     "mailArmBelowHeadOverMailChest",
     "mailArmBelowHead",
     "armBelowHeadOverMailChest",
@@ -250,6 +248,11 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     # not "above everything". My earlier fallback put it at the very
     # end of the zmap which masked weapons and hands.
     "mailChestOverHighest",
+    # ``gloveOverBody`` is the back-side glove slot (e.g. 01082794's
+    # lGlove anchored on the off-side of navel). It renders ON TOP
+    # of body / pants / coat so the back hand peeks out, but the
+    # weapon (held in front) and the front arm sit ABOVE it.
+    "gloveOverBody",
     # Default weapon slot ("weapon" / "Weapon"): tucked between the
     # coat/mail and the arm so a held sword shows in front of the
     # torso garments but the arm + hand sit on top of the grip — what
@@ -264,6 +267,14 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     "arm",
     "armOverHair",
     "armOverHairBelowWeapon",
+    # ``gloveBelowMailArm`` / ``gloveWristBelowMailArm`` go AFTER
+    # the bare arm so the gloved hand replaces the body's skin-
+    # colored arm canvas (otherwise the arm covers the glove —
+    # e.g. 01082794's rGlove sat at the same screen position as
+    # ``arm`` and was invisible). They still go before ``mailArm``
+    # so a coat sleeve, when present, covers the glove cuff.
+    "gloveWristBelowMailArm",
+    "gloveBelowMailArm",
     # Coat / longcoat sleeve goes ON TOP of the bare arm — otherwise
     # the body image's skin-colored arm canvas covers the sleeve and
     # mailArm becomes invisible.
@@ -290,7 +301,6 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     "gloveWrist",
     "gloveWristOverBody",
     "glove",
-    "gloveOverBody",
     # Head, ear, face.
     "head",
     "ear",
