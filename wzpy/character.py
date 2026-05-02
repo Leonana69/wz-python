@@ -1298,19 +1298,16 @@ class CharacterRenderer:
                         continue
                     anchor_name = _determine_anchor(pl.canvas, pl.category)
                     if anchor_name in head_derived:
-                        # Head-attached placements with per-frame
-                        # canvases. Keep the per-frame pixel canvas
-                        # so the cap visibly cycles through its 3
-                        # bitmap frames, but pin top_left to frame
-                        # 0's so the bitmap doesn't translate on
-                        # screen. The cap art still "breathes" via
-                        # the differing bitmaps; only the per-frame
-                        # origin shift (which would slide the whole
-                        # silhouette relative to the static head) is
-                        # discarded.
-                        f0_tl = frame0_top_lefts.get(key)
-                        if f0_tl is not None:
-                            pl.top_left = f0_tl
+                        # Head-attached placement (cap / face / hair
+                        # variants whose canvases differ per frame).
+                        # Leave the natural anchor placement alone:
+                        # ``top_left = brow_world - origin`` already
+                        # keeps the brow attached to the (frozen)
+                        # head's brow. Any apparent "wobble" is the
+                        # artist's encoded breathing — silhouette
+                        # puffing around a fixed attachment point.
+                        # Don't apply the body-delta translation
+                        # because the cap doesn't track the body.
                         continue
                     # Body-attached per-frame placement — apply the
                     # body's right-edge translation compensation so
