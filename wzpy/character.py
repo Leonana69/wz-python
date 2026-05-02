@@ -1299,32 +1299,20 @@ class CharacterRenderer:
                     anchor_name = _determine_anchor(pl.canvas, pl.category)
                     if anchor_name in head_derived:
                         # Head-attached placements with per-frame
-                        # canvases (cap 01000127's per-frame
-                        # ``default``, etc.). Raw alignment keeps the
-                        # brow at the frozen position but the bitmap
-                        # silhouette wobbles because per-frame
-                        # bitmap widths change. Pinning to frame 0's
-                        # top_left shifts the brow off the head when
-                        # origin differs. Center-align the bitmap
-                        # against frame 0's center — mirrors the
-                        # body's right-edge compensation strategy
-                        # for the same kind of breathing-as-bitmap-
-                        # resize problem.
+                        # canvases. Some caps ship subtly-different
+                        # bitmaps per frame (size changes, origin
+                        # shifts) that read as a wobble relative to
+                        # the otherwise-static head. Substitute
+                        # frame 0's pixel canvas + frame 0's
+                        # top_left so the cap renders identically
+                        # across the cycle. The cap loses its own
+                        # breathing animation (rare in practice for
+                        # caps anyway) but stops drifting on the
+                        # head.
                         f0_tl = frame0_top_lefts.get(key)
-                        f0_c = frame0_canvases.get(key)
-                        if f0_tl is None or f0_c is None:
-                            continue
-                        f0_cx = f0_tl[0] + f0_c.width // 2
-                        f0_cy = f0_tl[1] + f0_c.height // 2
-                        cur_cx = pl.top_left[0] + pl.pixel_canvas.width // 2
-                        cur_cy = pl.top_left[1] + pl.pixel_canvas.height // 2
-                        ddx = f0_cx - cur_cx
-                        ddy = f0_cy - cur_cy
-                        if ddx or ddy:
-                            pl.top_left = (
-                                pl.top_left[0] + ddx,
-                                pl.top_left[1] + ddy,
-                            )
+                        if f0_canvas is not None and f0_tl is not None:
+                            pl.pixel_canvas = f0_canvas
+                            pl.top_left = f0_tl
                         continue
                     # Body-attached per-frame placement — apply the
                     # body's right-edge translation compensation so
