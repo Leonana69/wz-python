@@ -1292,17 +1292,39 @@ class CharacterRenderer:
                         continue
                     key = (pl.equip_id, pl.name)
                     f0_canvas = frame0_canvases.get(key)
-                    f0_top_left = frame0_top_lefts.get(key)
-                    # Head-attached placements (cap, hair, face,
-                    # earring, glass) stay at frame 0's position no
-                    # matter whether their canvas differs per frame.
-                    anchor_name = _determine_anchor(pl.canvas, pl.category)
-                    if anchor_name in head_derived and f0_top_left is not None:
-                        pl.top_left = f0_top_left
-                        continue
                     # Same pixel canvas as frame 0 — UOL'd static
                     # piece; leave on frozen anchor.
                     if f0_canvas is pl.pixel_canvas:
+                        continue
+                    anchor_name = _determine_anchor(pl.canvas, pl.category)
+                    if anchor_name in head_derived:
+                        # Head-attached placements with per-frame
+                        # canvases (cap 01000127's per-frame
+                        # ``default``, etc.). Raw alignment keeps the
+                        # brow at the frozen position but the bitmap
+                        # silhouette wobbles because per-frame
+                        # bitmap widths change. Pinning to frame 0's
+                        # top_left shifts the brow off the head when
+                        # origin differs. Center-align the bitmap
+                        # against frame 0's center — mirrors the
+                        # body's right-edge compensation strategy
+                        # for the same kind of breathing-as-bitmap-
+                        # resize problem.
+                        f0_tl = frame0_top_lefts.get(key)
+                        f0_c = frame0_canvases.get(key)
+                        if f0_tl is None or f0_c is None:
+                            continue
+                        f0_cx = f0_tl[0] + f0_c.width // 2
+                        f0_cy = f0_tl[1] + f0_c.height // 2
+                        cur_cx = pl.top_left[0] + pl.pixel_canvas.width // 2
+                        cur_cy = pl.top_left[1] + pl.pixel_canvas.height // 2
+                        ddx = f0_cx - cur_cx
+                        ddy = f0_cy - cur_cy
+                        if ddx or ddy:
+                            pl.top_left = (
+                                pl.top_left[0] + ddx,
+                                pl.top_left[1] + ddy,
+                            )
                         continue
                     # Body-attached per-frame placement — apply the
                     # body's right-edge translation compensation so
