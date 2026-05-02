@@ -458,14 +458,18 @@ def _cap_hidden_hair_canvases(vslot: Optional[str]) -> Optional[frozenset]:
     return frozenset()
 
 
-def _frame_paths(category: str, pose: str) -> Tuple[str, ...]:
+def _frame_paths(category: str, pose: str, frame: int = 0) -> Tuple[str, ...]:
     """Return ordered candidate frame paths for collecting render leaves.
 
     Pose-aware: ``stand2`` swaps in the two-handed body / coat / weapon
-    canvases. Hair / cap / face / accessories ignore pose because their
-    static canvases live under ``default`` (and ``stand1/0`` /
-    ``stand2/0`` only contain UOLs back to default)."""
-    pf = f"{pose}/0"
+    canvases. ``frame`` selects which sub-frame of the pose to render
+    — Body's ``stand1`` ships ``0`` / ``1`` / ``2`` (the standby
+    breathing animation), and most equipment imgs follow suit so the
+    full character can be cycled 0→1→2→1 in the preview. Hair / cap
+    / face / accessories ignore pose AND frame because their static
+    canvases live under ``default`` (the per-pose ``stand*`` subtrees
+    are just UOLs back to it)."""
+    pf = f"{pose}/{frame}"
     if category == "Body":      return (pf,)
     if category == "Head":      return (pf, "front")
     if category == "Hair":      return (pf, "default")
@@ -743,6 +747,7 @@ def _collect_part_canvases(
     pkg_root: Optional[WzDirectory] = None,
     ear_type: str = DEFAULT_EAR_TYPE,
     hide_hair: frozenset = frozenset(),
+    frame: int = 0,
 ) -> List[Tuple[str, WzCanvasProperty, WzCanvasProperty]]:
     """Return ``(leaf_name, metadata_canvas, pixel_canvas)`` triples to render.
 
@@ -783,7 +788,7 @@ def _collect_part_canvases(
     seen_ids: set = set()
     seen_zslots: set = set()
     out: List[Tuple[str, WzCanvasProperty, WzCanvasProperty]] = []
-    for path in _frame_paths(category, pose):
+    for path in _frame_paths(category, pose, frame):
         node = base.get(path)
         node = _resolve_uol(node) if isinstance(node, WzUolProperty) else node
         if not isinstance(node, WzSubProperty):
@@ -1137,6 +1142,7 @@ class CharacterRenderer:
         self, equip_ids: List[str], pose: Optional[str] = None,
         ear_type: str = DEFAULT_EAR_TYPE,
         flip: bool = False,
+        frame: int = 0,
     ) -> Image.Image:
         """Render the equipped parts as a single RGBA :class:`PIL.Image`.
 
@@ -1184,7 +1190,7 @@ class CharacterRenderer:
                 continue
             for leaf_name, canvas, pixel_canvas in _collect_part_canvases(
                 img, cat, eid, pose, pkg_root=self.wz.root,
-                ear_type=ear_type, hide_hair=hide_hair_set,
+                ear_type=ear_type, hide_hair=hide_hair_set, frame=frame,
             ):
                 placements.append(_Placement(
                     equip_id=eid, category=cat, name=leaf_name,

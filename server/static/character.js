@@ -1077,34 +1077,75 @@ function positionTooltip(tile) {
   $tooltip.style.top = `${top}px`;
 }
 
+// MapleStory's standby breathing animation cycles ``stand1`` frames
+// 0 → 1 → 2 → 1 then repeats. Body's stand1 ships ``delay=500``
+// (ms) per frame in stock data; equipment imgs don't ship explicit
+// delays so we use the body delay as the canonical tempo.
+const PREVIEW_FRAME_CYCLE = [0, 1, 2, 1];
+const PREVIEW_FRAME_DELAY_MS = 500;
+
+// Blob URLs for the three rendered frames (indices 0/1/2). We hold
+// onto them between refreshes so Save PNG can grab frame 0 directly,
+// and so changing scale / facing doesn't briefly drop the preview.
+let _previewFrameUrls = [null, null, null];
+let _previewTimer = 0;
+let _previewCycleIdx = 0;
+
+function _stopPreviewAnimation() {
+  if (_previewTimer) {
+    clearInterval(_previewTimer);
+    _previewTimer = 0;
+  }
+}
+
+function _revokePreviewFrames() {
+  for (const u of _previewFrameUrls) if (u) URL.revokeObjectURL(u);
+  _previewFrameUrls = [null, null, null];
+}
+
 async function refreshCompose() {
   const ids = Object.values(state.equipped).map(s => s.id);
   if (ids.length === 0) {
+    _stopPreviewAnimation();
+    _revokePreviewFrames();
     $img.removeAttribute("src");
     return;
   }
   const seq = ++state.composeSeq;
   const scale = $scale.value || "2";
-  const url =
+  const buildUrl = (frame) =>
     `/api/character/compose?ids=${ids.join(",")}` +
     `&pose=${encodeURIComponent(state.pose)}` +
     `&ear=${encodeURIComponent(state.earType)}` +
     (state.facing === "right" ? "&flip=1" : "") +
+    `&frame=${frame}` +
     `&scale=${scale}&_=${seq}`;
-  // Use a fetch+blob round-trip so we can drop the result if it's stale,
-  // and so the image doesn't flicker while a new one loads.
+  // Fetch all three stand1 frames in parallel so the cycle can
+  // start as soon as the slowest blob arrives. Each frame is a
+  // small PNG (a few KB) so the cost over a single fetch is
+  // basically just one extra round-trip.
   try {
-    const resp = await trackedFetch(url);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const blob = await resp.blob();
+    const resps = await Promise.all([0, 1, 2].map(f => trackedFetch(buildUrl(f))));
+    for (const r of resps) {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    }
+    const blobs = await Promise.all(resps.map(r => r.blob()));
     if (seq !== state.composeSeq) return;  // a newer compose superseded us
-    if ($img.dataset.blobUrl) URL.revokeObjectURL($img.dataset.blobUrl);
-    const blobUrl = URL.createObjectURL(blob);
-    $img.dataset.blobUrl = blobUrl;
-    $img.src = blobUrl;
+    _stopPreviewAnimation();
+    _revokePreviewFrames();
+    _previewFrameUrls = blobs.map(b => URL.createObjectURL(b));
+    // Display frame 0 immediately so a slow tab switch doesn't
+    // blank out the preview between fetches.
+    _previewCycleIdx = 0;
+    $img.src = _previewFrameUrls[PREVIEW_FRAME_CYCLE[0]];
+    _previewTimer = setInterval(() => {
+      _previewCycleIdx = (_previewCycleIdx + 1) % PREVIEW_FRAME_CYCLE.length;
+      const frame = PREVIEW_FRAME_CYCLE[_previewCycleIdx];
+      $img.src = _previewFrameUrls[frame];
+    }, PREVIEW_FRAME_DELAY_MS);
     // The server reports the pose it actually used (auto-detect path);
     // sync state so the toggle always reflects what's on screen.
-    const resolved = resp.headers.get("X-Resolved-Pose");
+    const resolved = resps[0].headers.get("X-Resolved-Pose");
     if (resolved && resolved !== state.pose
         && state.weaponPoses.includes(resolved)) {
       state.pose = resolved;
@@ -1126,9 +1167,13 @@ for (const radio of document.querySelectorAll('input[name="char-facing"]')) {
   });
 }
 $export.addEventListener("click", () => {
-  if (!$img.src) return;
+  // Always export the static frame 0 — the user's hovered preview
+  // could be on any frame of the breathing cycle, but the saved
+  // PNG should be the canonical idle pose.
+  const url = _previewFrameUrls[0];
+  if (!url) return;
   const a = document.createElement("a");
-  a.href = $img.src;
+  a.href = url;
   const ids = Object.values(state.equipped).map(s => s.id).join("-");
   a.download = `character_${ids || "empty"}.png`;
   a.click();

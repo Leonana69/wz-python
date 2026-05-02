@@ -941,7 +941,16 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         ear_type = request.args.get("ear", "").strip() or DEFAULT_EAR_TYPE
         flip = request.args.get("flip", "").lower() in ("1", "true", "yes")
         try:
-            img = renderer.compose(ids, pose=pose, ear_type=ear_type, flip=flip)
+            frame = int(request.args.get("frame", "0"))
+        except ValueError:
+            frame = 0
+        # Clamp to the body's standby range. Frames beyond 2 don't
+        # exist in stock data; let other parts fall back to default.
+        frame = max(0, min(2, frame))
+        try:
+            img = renderer.compose(
+                ids, pose=pose, ear_type=ear_type, flip=flip, frame=frame,
+            )
         except Exception as exc:
             print(f"  [compose error] {exc}", flush=True)
             abort(500, f"compose failed: {exc}")
@@ -1388,19 +1397,27 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             ``child.name`` that the canvas URL needs (so api_canvas
             lands on either the SubProperty wrapper or the deeper
             UOL leaf — both follow UOLs after the recent fix).
-            ``(None, None)`` when no bitmap is found."""
+            ``(None, None)`` when no bitmap is found.
+
+            Walks every leaf inside the wrapping SubProperty rather
+            than checking a hardcoded name list — different equipment
+            uses different leaf names (Cap: ``default``/``defaultAc``,
+            Longcoat: ``mail``/``mailArm``, Pants: ``pants``,
+            Glove: ``lGlove``/``rGlove``, Weapon: ``weapon``, …) and
+            we want the inline ▶ Play animation button to work for
+            all of them. Picks the first leaf with pixels in WZ
+            order, which matches how the in-game animation looks
+            since the primary canvas (``mail``, ``default``,
+            ``weapon``…) always comes first in stock data."""
             if isinstance(child, WzCanvasProperty) and child.has_pixels():
                 return child, ""
             if isinstance(child, WzSubProperty):
-                for name in ("default", "0"):
-                    sub = child.get(name)
-                    if sub is None:
-                        continue
+                for sub in child.children():
                     target_node = sub
                     if isinstance(target_node, WzUolProperty):
                         target_node = _resolve_uol_target(target_node)
                     if isinstance(target_node, WzCanvasProperty) and target_node.has_pixels():
-                        return target_node, f"/{name}"
+                        return target_node, f"/{sub.name}"
             return None, None
 
         frames: List[Dict[str, Any]] = []
