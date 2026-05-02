@@ -1242,7 +1242,16 @@ class CharacterRenderer:
         #    UOL into ``default`` and share pixel canvases with frame
         #    0, so they stay on their frozen anchor positions.
         frame0_canvases: Dict[Tuple[str, str], Any] = {}
+        frame0_top_lefts: Dict[Tuple[str, str], Tuple[int, int]] = {}
         body_anchor_0: Optional[Tuple[int, int]] = None
+
+        # Anchors that hang off the head — placements that resolve
+        # to one of these should stay locked to frame 0's position
+        # regardless of whether their pixel canvas changes per
+        # frame, otherwise per-frame cap art (e.g., 01000090,
+        # 01000108, 01000127) makes the cap drift relative to the
+        # static head.
+        head_derived = frozenset({"brow", "neck", "handMove"})
 
         def _body_anchor(pls: List[_Placement]) -> Optional[Tuple[int, int]]:
             """Use the body bitmap's RIGHT edge + TOP edge as the
@@ -1269,25 +1278,40 @@ class CharacterRenderer:
                 frozen_anchors = anchors
                 for pl in placements:
                     frame0_canvases[(pl.equip_id, pl.name)] = pl.pixel_canvas
+                    if pl.top_left is not None:
+                        frame0_top_lefts[(pl.equip_id, pl.name)] = pl.top_left
                 body_anchor_0 = _body_anchor(placements)
             else:
                 body_anchor_now = _body_anchor(placements)
+                dx = dy = 0
                 if body_anchor_0 is not None and body_anchor_now is not None:
                     dx = body_anchor_0[0] - body_anchor_now[0]
                     dy = body_anchor_0[1] - body_anchor_now[1]
+                for pl in placements:
+                    if pl.top_left is None:
+                        continue
+                    key = (pl.equip_id, pl.name)
+                    f0_canvas = frame0_canvases.get(key)
+                    f0_top_left = frame0_top_lefts.get(key)
+                    # Head-attached placements (cap, hair, face,
+                    # earring, glass) stay at frame 0's position no
+                    # matter whether their canvas differs per frame.
+                    anchor_name = _determine_anchor(pl.canvas, pl.category)
+                    if anchor_name in head_derived and f0_top_left is not None:
+                        pl.top_left = f0_top_left
+                        continue
+                    # Same pixel canvas as frame 0 — UOL'd static
+                    # piece; leave on frozen anchor.
+                    if f0_canvas is pl.pixel_canvas:
+                        continue
+                    # Body-attached per-frame placement — apply the
+                    # body's right-edge translation compensation so
+                    # it tracks the (now-stable) body.
                     if dx or dy:
-                        for pl in placements:
-                            if pl.top_left is None:
-                                continue
-                            f0_canvas = frame0_canvases.get(
-                                (pl.equip_id, pl.name)
-                            )
-                            if f0_canvas is pl.pixel_canvas:
-                                continue
-                            pl.top_left = (
-                                pl.top_left[0] + dx,
-                                pl.top_left[1] + dy,
-                            )
+                        pl.top_left = (
+                            pl.top_left[0] + dx,
+                            pl.top_left[1] + dy,
+                        )
             per_frame.append(placements)
 
         all_pls = [p for fr in per_frame for p in fr if p.top_left is not None]
