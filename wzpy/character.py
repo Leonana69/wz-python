@@ -1460,6 +1460,17 @@ class CharacterRenderer:
             slot = pl.z_slot
             if slot is None:
                 return self._z_index(slot)
+            # Stand1 is the one-handed rest pose: only the front arm
+            # is visible and one-handed weapons should hang from the
+            # hand with the arm covering the grip. Some weapons (e.g.
+            # 01312058) are authored with z='weaponOverArm' — a slot
+            # at the top of the zmap meant for stand2 polearms held
+            # vertically — which floats the entire blade in front of
+            # the body. Demote to 'weapon' so the arm sits over the
+            # grip like every other one-handed weapon.
+            if pose == "stand1" and pl.category == "Weapon" \
+                    and slot == "weaponOverArm":
+                slot = "weapon"
             rule = _OVER_CAP_REMAP.get(slot)
             if rule is None:
                 return self._z_index(slot)
