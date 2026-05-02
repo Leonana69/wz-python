@@ -1210,12 +1210,20 @@ class CharacterRenderer:
 
         per_frame: List[List[_Placement]] = []
         frozen_anchors: Optional[Dict[str, Tuple[int, int]]] = None
+        # Body is rendered using frame 0's bitmap for every cycle
+        # frame. The breathing motion encoded in the WZ data shifts
+        # the torso a few pixels each frame, which reads as a
+        # distracting wobble at preview scale; locking the body to
+        # frame 0 keeps the torso visually stable while equipment
+        # like coat sleeves still animate via their own per-frame
+        # canvases.
         for f in frames:
             placements, anchors = self._build_placements(
                 equip_ids, pose, ear_type,
                 hide_hair_full, hide_hair_set, cap_vslot_tokens, f,
                 frozen_anchors=frozen_anchors,
                 return_anchors=True,
+                body_frame=0,
             )
             if frozen_anchors is None:
                 # First frame becomes the canonical anchor frame for
@@ -1249,6 +1257,7 @@ class CharacterRenderer:
         cap_vslot_tokens: frozenset, frame: int,
         frozen_anchors: Optional[Dict[str, Tuple[int, int]]] = None,
         return_anchors: bool = False,
+        body_frame: Optional[int] = None,
     ):
         """Collect, anchor, and z-sort placements for a single frame.
 
@@ -1262,6 +1271,15 @@ class CharacterRenderer:
         downstream placement — keeps head / hair / cap / face /
         weapon at fixed image positions across frames so only the
         body bitmap actually breathes on screen.
+
+        ``body_frame`` overrides the frame index used for the Body
+        category only — :meth:`compose_animation` pins it to 0 so
+        the body bitmap stays fixed across the cycling preview while
+        other equipment (coat sleeves, capes, weapons with their own
+        per-frame data) still animate. Without that, the body's
+        per-frame bitmap shifts the torso left/up/down each frame —
+        breathing motion that's faithful to the WZ data but reads
+        as a wobble in the small preview.
 
         Returns the placements list, or ``(placements, world_anchors)``
         when ``return_anchors=True``.
@@ -1277,9 +1295,10 @@ class CharacterRenderer:
             img = self._open_part(eid)
             if img is None:
                 continue
+            f_for_part = body_frame if (body_frame is not None and cat == "Body") else frame
             for leaf_name, canvas, pixel_canvas in _collect_part_canvases(
                 img, cat, eid, pose, pkg_root=self.wz.root,
-                ear_type=ear_type, hide_hair=hide_hair_set, frame=frame,
+                ear_type=ear_type, hide_hair=hide_hair_set, frame=f_for_part,
             ):
                 placements.append(_Placement(
                     equip_id=eid, category=cat, name=leaf_name,
