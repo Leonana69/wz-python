@@ -165,7 +165,11 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     "backHairBelowCap",
     "backHairOverCape",
     "backCape",
-    "cape",
+    # ``cape`` itself moves to AFTER mailArm / outfit layers so cape
+    # canvases that are meant to be visible from the front (e.g.
+    # 01102164's ``capeArm`` — a backpack-strap accessory that
+    # passes over the chest) render on top of the coat and pants.
+    # The actual cape cloth uses ``capeBelowBody`` and stays here.
     "capeBelowBody",
     "backShieldBelowBody",
     "backShield",
@@ -266,6 +270,11 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     "mailArm",
     "mailArmOverHair",
     "mailArmOverHairBelowWeapon",
+    # Cape / capeArm canvases authored to sit IN FRONT of the
+    # outfit (e.g. 01102164's backpack strap with ``z='cape'``).
+    # Real hanging-cloth cape canvases use ``capeBelowBody`` up in
+    # the back-of-body cluster and aren't affected by this slot.
+    "cape",
     "weaponOverArmBelowHead",
     "weaponBelowHand",
     "hand",
