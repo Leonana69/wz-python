@@ -1186,25 +1186,41 @@ class CharacterRenderer:
         flip: bool = False,
         frames: Tuple[int, ...] = (0, 1, 2),
     ) -> List[Image.Image]:
-        """Compose multiple frames at consistent image dimensions.
+        """Compose multiple frames at consistent image dimensions and
+        with frozen anchor positions across frames.
 
-        Each frame's per-part placements are computed independently
-        (anchor-chained from its own body canvas), then the union of
-        every frame's content bounding box is taken so all returned
-        images share the same canvas size and have the navel at the
-        same image-space pixel. The cycling preview animation can
-        cross-fade between them without the body wobbling on screen.
+        The body's per-frame canvas advertises slightly different
+        anchor offsets — neck moves zig-zag ``(4,-11) → (3,-12) →
+        (2,-11)`` for body 00002000, hand drifts by ~1px each frame
+        — so equipment that anchors on neck (head / hair / cap /
+        face) or hand (weapon) wobbles in lockstep with the
+        breathing animation. To keep the animated preview from
+        looking jittery, we render frame 0 normally, capture its
+        world-anchor map, and reuse those frozen anchors when
+        building placements for frames 1+2. The body bitmap itself
+        still gets its per-frame artwork (so the chest visibly
+        breathes), only the *positions* of dependent parts stay
+        locked. Then the union of every frame's bbox is taken so
+        all returned images share canvas dimensions and the navel
+        sits at the same image-space pixel.
         """
         pose = self.detect_pose(equip_ids, pose)
         hide_hair_full, hide_hair_set, cap_vslot_tokens = \
             self._cap_hair_filter(equip_ids)
 
         per_frame: List[List[_Placement]] = []
+        frozen_anchors: Optional[Dict[str, Tuple[int, int]]] = None
         for f in frames:
-            placements = self._build_placements(
+            placements, anchors = self._build_placements(
                 equip_ids, pose, ear_type,
                 hide_hair_full, hide_hair_set, cap_vslot_tokens, f,
+                frozen_anchors=frozen_anchors,
+                return_anchors=True,
             )
+            if frozen_anchors is None:
+                # First frame becomes the canonical anchor frame for
+                # the whole cycle.
+                frozen_anchors = anchors
             per_frame.append(placements)
 
         all_pls = [p for fr in per_frame for p in fr if p.top_left is not None]
@@ -1231,10 +1247,24 @@ class CharacterRenderer:
         equip_ids: List[str], pose: str, ear_type: str,
         hide_hair_full: bool, hide_hair_set: frozenset,
         cap_vslot_tokens: frozenset, frame: int,
-    ) -> List[_Placement]:
+        frozen_anchors: Optional[Dict[str, Tuple[int, int]]] = None,
+        return_anchors: bool = False,
+    ):
         """Collect, anchor, and z-sort placements for a single frame.
+
         Shared between :meth:`compose` (one frame) and
-        :meth:`compose_animation` (multiple frames at consistent bbox).
+        :meth:`compose_animation` (multiple frames at consistent
+        bbox). When ``frozen_anchors`` is provided, the body /
+        sub-body canvases position themselves normally (their own
+        per-frame navel still goes to world (0, 0)) but DO NOT
+        register their other map anchors (neck / hand / lHand etc.).
+        Instead, the supplied ``frozen_anchors`` are used for every
+        downstream placement — keeps head / hair / cap / face /
+        weapon at fixed image positions across frames so only the
+        body bitmap actually breathes on screen.
+
+        Returns the placements list, or ``(placements, world_anchors)``
+        when ``return_anchors=True``.
         """
         cap_covers_hair = hide_hair_full or bool(hide_hair_set)
         placements: List[_Placement] = []
@@ -1259,7 +1289,7 @@ class CharacterRenderer:
                 ))
 
         if not placements:
-            return placements
+            return (placements, {}) if return_anchors else placements
 
         def order_key(pl: _Placement) -> Tuple[int, int]:
             if pl.category == "Body":
@@ -1269,7 +1299,15 @@ class CharacterRenderer:
             return (2, 0)
         placements.sort(key=order_key)
 
-        world_anchors: Dict[str, Tuple[int, int]] = {}
+        # When frozen_anchors is set, downstream parts read from those
+        # values and the body's anchor contributions are suppressed
+        # (its bitmap still positions itself via its own navel
+        # offset → world(0,0), but other anchor wobbles don't leak
+        # through). Without it, behaviour matches the original
+        # single-frame compose path.
+        world_anchors: Dict[str, Tuple[int, int]] = (
+            dict(frozen_anchors) if frozen_anchors is not None else {}
+        )
         body_anchored = False
 
         for pl in placements:
@@ -1277,7 +1315,8 @@ class CharacterRenderer:
                 navel = pl.map_anchors.get("navel", (0, 0))
                 pl.top_left = (-pl.origin[0] - navel[0],
                                -pl.origin[1] - navel[1])
-                self._register_anchors(pl, world_anchors, overwrite=True)
+                if frozen_anchors is None:
+                    self._register_anchors(pl, world_anchors, overwrite=True)
                 body_anchored = True
                 continue
 
@@ -1291,7 +1330,8 @@ class CharacterRenderer:
                     anchor_world[0] - pl.origin[0] - map_pt[0],
                     anchor_world[1] - pl.origin[1] - map_pt[1],
                 )
-            self._register_anchors(pl, world_anchors, overwrite=False)
+            if frozen_anchors is None:
+                self._register_anchors(pl, world_anchors, overwrite=False)
 
         def z_for(pl: _Placement) -> int:
             slot = pl.z_slot
@@ -1307,7 +1347,7 @@ class CharacterRenderer:
                 slot = target
             return self._z_index(slot)
         placements.sort(key=z_for)
-        return placements
+        return (placements, world_anchors) if return_anchors else placements
 
     def _render_placements(
         self, placements: List[_Placement], *, flip: bool = False,
