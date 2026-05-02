@@ -221,8 +221,9 @@ main { display: flex; flex: 1; overflow: hidden; }
 
 #tree-panel {
   width: 380px;
-  min-width: 240px;
-  resize: horizontal;
+  min-width: 200px;
+  max-width: 80vw;
+  flex: 0 0 auto;
   overflow: auto;
   background: #232428;
   border-right: 1px solid #1a1b1d;
@@ -231,6 +232,47 @@ main { display: flex; flex: 1; overflow: hidden; }
      the viewport changes height — every fold/expand otherwise causes a tiny
      scroll-correction jank pass. */
   overflow-anchor: none;
+}
+
+/* Vertical drag handle between #tree-panel and #detail-panel. JS in
+ * app.js wires mousedown → mousemove → mouseup to update the panel's
+ * width and persists the value to localStorage so it survives reloads. */
+.resize-handle {
+  flex: 0 0 5px;
+  background: #1a1b1d;
+  cursor: col-resize;
+  position: relative;
+  user-select: none;
+}
+.resize-handle:hover,
+.resize-handle.dragging {
+  background: #e8b96b;
+}
+.resize-handle:focus-visible {
+  outline: 2px solid #e8b96b;
+  outline-offset: -2px;
+}
+/* Widen the hit area without making the visual bar wider — a 9px-wide
+ * invisible pseudo-element overlays each side of the 5px bar. */
+.resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -2px;
+  right: -2px;
+}
+body.resizing-tree {
+  cursor: col-resize;
+  user-select: none;
+}
+body.resizing-tree iframe,
+body.resizing-tree #detail img,
+body.resizing-tree #detail canvas {
+  /* While dragging, mouse events that would otherwise hit child iframes
+     or media tags steal focus from the listener; pointer-events:none
+     keeps the drag stream flowing into the document handler. */
+  pointer-events: none;
 }
 
 /* Search box pinned above the tree. Server-side ``/api/search``

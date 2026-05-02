@@ -2197,3 +2197,59 @@ async function init() {
 }
 
 init();
+
+// ── tree-panel resize ────────────────────────────────────────────
+// Drag handle between the tree and detail panels. Width persists to
+// localStorage so it survives reloads. min/max are enforced in JS so the
+// drag preview matches what CSS would clamp on commit.
+(function setupTreeResize() {
+  const handle = document.getElementById("tree-resize-handle");
+  if (!handle || !treePanel) return;
+  const STORAGE_KEY = "wzpy.treePanelWidth";
+  const MIN_W = 200;
+  const clampMax = () => Math.max(MIN_W, Math.floor(window.innerWidth * 0.8));
+  const apply = (px) => {
+    const w = Math.min(clampMax(), Math.max(MIN_W, px));
+    treePanel.style.width = w + "px";
+    return w;
+  };
+  const stored = parseInt(localStorage.getItem(STORAGE_KEY) || "", 10);
+  if (Number.isFinite(stored) && stored > 0) apply(stored);
+  let dragging = false;
+  const onMove = (ev) => {
+    if (!dragging) return;
+    apply(ev.clientX - treePanel.getBoundingClientRect().left);
+  };
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove("resizing-tree");
+    handle.classList.remove("dragging");
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+    const w = parseInt(treePanel.style.width, 10);
+    if (Number.isFinite(w)) localStorage.setItem(STORAGE_KEY, String(w));
+  };
+  handle.addEventListener("mousedown", (ev) => {
+    ev.preventDefault();
+    dragging = true;
+    document.body.classList.add("resizing-tree");
+    handle.classList.add("dragging");
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  });
+  // Keyboard nudge for accessibility — Left/Right arrow shifts 16px,
+  // Shift+Left/Right shifts 64px. Useful when the user has tabbed to
+  // the handle and a precise width is needed.
+  handle.addEventListener("keydown", (ev) => {
+    let delta = 0;
+    if (ev.key === "ArrowLeft") delta = -1;
+    else if (ev.key === "ArrowRight") delta = 1;
+    else return;
+    ev.preventDefault();
+    const step = ev.shiftKey ? 64 : 16;
+    const cur = treePanel.getBoundingClientRect().width;
+    const w = apply(cur + delta * step);
+    localStorage.setItem(STORAGE_KEY, String(w));
+  });
+})();
