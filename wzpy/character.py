@@ -1210,20 +1210,19 @@ class CharacterRenderer:
 
         per_frame: List[List[_Placement]] = []
         frozen_anchors: Optional[Dict[str, Tuple[int, int]]] = None
-        # Body is rendered using frame 0's bitmap for every cycle
-        # frame. The breathing motion encoded in the WZ data shifts
-        # the torso a few pixels each frame, which reads as a
-        # distracting wobble at preview scale; locking the body to
-        # frame 0 keeps the torso visually stable while equipment
-        # like coat sleeves still animate via their own per-frame
-        # canvases.
+        # Body uses its per-frame bitmap so the chest visibly breathes
+        # — that motion is part of the WZ data and equipment like
+        # coat ``mailArm`` ships per-frame canvases tuned to track it.
+        # Anchors are still frozen at frame 0 so head / hair / cap /
+        # face stay locked to the navel-relative position the WZ
+        # author intended for that particular pose, instead of
+        # following the body's per-frame neck / hand wobble.
         for f in frames:
             placements, anchors = self._build_placements(
                 equip_ids, pose, ear_type,
                 hide_hair_full, hide_hair_set, cap_vslot_tokens, f,
                 frozen_anchors=frozen_anchors,
                 return_anchors=True,
-                body_frame=0,
             )
             if frozen_anchors is None:
                 # First frame becomes the canonical anchor frame for
