@@ -1299,19 +1299,17 @@ class CharacterRenderer:
                     anchor_name = _determine_anchor(pl.canvas, pl.category)
                     if anchor_name in head_derived:
                         # Head-attached placements with per-frame
-                        # canvases. Some caps ship subtly-different
-                        # bitmaps per frame (size changes, origin
-                        # shifts) that read as a wobble relative to
-                        # the otherwise-static head. Substitute
-                        # frame 0's pixel canvas + frame 0's
-                        # top_left so the cap renders identically
-                        # across the cycle. The cap loses its own
-                        # breathing animation (rare in practice for
-                        # caps anyway) but stops drifting on the
-                        # head.
+                        # canvases. Keep the per-frame pixel canvas
+                        # so the cap visibly cycles through its 3
+                        # bitmap frames, but pin top_left to frame
+                        # 0's so the bitmap doesn't translate on
+                        # screen. The cap art still "breathes" via
+                        # the differing bitmaps; only the per-frame
+                        # origin shift (which would slide the whole
+                        # silhouette relative to the static head) is
+                        # discarded.
                         f0_tl = frame0_top_lefts.get(key)
-                        if f0_canvas is not None and f0_tl is not None:
-                            pl.pixel_canvas = f0_canvas
+                        if f0_tl is not None:
                             pl.top_left = f0_tl
                         continue
                     # Body-attached per-frame placement — apply the
