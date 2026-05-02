@@ -1292,11 +1292,17 @@ class CharacterRenderer:
                         continue
                     key = (pl.equip_id, pl.name)
                     f0_canvas = frame0_canvases.get(key)
-                    # Same pixel canvas as frame 0 — UOL'd static
-                    # piece; leave on frozen anchor.
-                    if f0_canvas is pl.pixel_canvas:
-                        continue
                     anchor_name = _determine_anchor(pl.canvas, pl.category)
+                    # Same pixel canvas as frame 0 AND head-derived
+                    # anchor — UOL'd static piece glued to the frozen
+                    # head; leave it. Body-anchored placements with
+                    # UOL'd canvases (e.g., shoes 01070000 sharing
+                    # one bitmap across all 3 frames) still need the
+                    # body-delta compensation below to track the
+                    # animated body.
+                    if f0_canvas is pl.pixel_canvas \
+                            and anchor_name in head_derived:
+                        continue
                     if anchor_name in head_derived:
                         # Head-attached placement (cap / face / hair
                         # variants whose canvases differ per frame).
