@@ -1210,13 +1210,31 @@ class CharacterRenderer:
 
         per_frame: List[List[_Placement]] = []
         frozen_anchors: Optional[Dict[str, Tuple[int, int]]] = None
-        # Body uses its per-frame bitmap so the chest visibly breathes
-        # — that motion is part of the WZ data and equipment like
-        # coat ``mailArm`` ships per-frame canvases tuned to track it.
-        # Anchors are still frozen at frame 0 so head / hair / cap /
-        # face stay locked to the navel-relative position the WZ
-        # author intended for that particular pose, instead of
-        # following the body's per-frame neck / hand wobble.
+        # Frame-0 placements drive two things across the rest of the
+        # cycle:
+        #
+        # 1. ``frozen_anchors`` — head / hair / cap / face anchor on
+        #    the values frame 0 registered, so they stay still.
+        #
+        # 2. Per-canvas TRANSLATION COMPENSATION. The body's per-frame
+        #    bitmap encodes the breathing motion as a small translation
+        #    of the body's bitmap-relative-to-navel position (~2 px
+        #    horizontal, ~1 px vertical zig-zag). Coat / longcoat /
+        #    pants / glove etc. ship per-frame bitmaps tuned to track
+        #    that same translation — so as the body wobbles, every
+        #    body-attached piece wobbles in lockstep. The user wants
+        #    the breathing DEFORMATION (changing chest bitmap) but
+        #    not the TRANSLATION. We compute the body's delta vs
+        #    frame 0 for each cycle frame and apply ``-delta`` to
+        #    every placement whose pixel canvas isn't shared with
+        #    frame 0 (i.e., the per-frame parts). Hair / cap /
+        #    earring / face etc. UOL into ``default`` so they share
+        #    pixel canvases with frame 0 and keep their frozen
+        #    positions; body + coat + sleeves get the compensation
+        #    and end up visually static while their bitmaps still
+        #    deform.
+        frame0_canvases: Dict[Tuple[str, str], Any] = {}
+        body_top_left_0: Optional[Tuple[int, int]] = None
         for f in frames:
             placements, anchors = self._build_placements(
                 equip_ids, pose, ear_type,
@@ -1225,9 +1243,44 @@ class CharacterRenderer:
                 return_anchors=True,
             )
             if frozen_anchors is None:
-                # First frame becomes the canonical anchor frame for
-                # the whole cycle.
                 frozen_anchors = anchors
+                # Capture frame 0's per-canvas identity and body
+                # position so subsequent frames can compensate.
+                for pl in placements:
+                    frame0_canvases[(pl.equip_id, pl.name)] = pl.pixel_canvas
+                for pl in placements:
+                    if pl.category == "Body" and pl.name == "body" \
+                            and pl.top_left is not None:
+                        body_top_left_0 = pl.top_left
+                        break
+            else:
+                # Compute the body's translation away from frame 0 in
+                # this cycle frame; the compensation is its negation.
+                body_now: Optional[Tuple[int, int]] = None
+                for pl in placements:
+                    if pl.category == "Body" and pl.name == "body" \
+                            and pl.top_left is not None:
+                        body_now = pl.top_left
+                        break
+                if body_top_left_0 is not None and body_now is not None:
+                    dx = body_top_left_0[0] - body_now[0]
+                    dy = body_top_left_0[1] - body_now[1]
+                    if dx or dy:
+                        for pl in placements:
+                            if pl.top_left is None:
+                                continue
+                            f0_canvas = frame0_canvases.get(
+                                (pl.equip_id, pl.name)
+                            )
+                            # Same pixel canvas as frame 0 → it's a
+                            # static UOL'd piece (hair, cap default,
+                            # etc.); leave it on its frozen anchor.
+                            if f0_canvas is pl.pixel_canvas:
+                                continue
+                            pl.top_left = (
+                                pl.top_left[0] + dx,
+                                pl.top_left[1] + dy,
+                            )
             per_frame.append(placements)
 
         all_pls = [p for fr in per_frame for p in fr if p.top_left is not None]
