@@ -1113,29 +1113,33 @@ async function refreshCompose() {
   }
   const seq = ++state.composeSeq;
   const scale = $scale.value || "2";
-  const buildUrl = (frame) =>
-    `/api/character/compose?ids=${ids.join(",")}` +
+  // Single-request fetch returns frames 0/1/2 as base64 PNGs all at
+  // the SAME canvas dimensions and with the navel at the same
+  // image-space pixel — without that shared bbox the body bitmap's
+  // per-frame leans (the breathing motion) push hair / cap / weapon
+  // around because they're anchored relative to the body's navel,
+  // and the cycling preview wobbles.
+  const url =
+    `/api/character/compose_animation?ids=${ids.join(",")}` +
     `&pose=${encodeURIComponent(state.pose)}` +
     `&ear=${encodeURIComponent(state.earType)}` +
     (state.facing === "right" ? "&flip=1" : "") +
-    `&frame=${frame}` +
     `&scale=${scale}&_=${seq}`;
-  // Fetch all three stand1 frames in parallel so the cycle can
-  // start as soon as the slowest blob arrives. Each frame is a
-  // small PNG (a few KB) so the cost over a single fetch is
-  // basically just one extra round-trip.
   try {
-    const resps = await Promise.all([0, 1, 2].map(f => trackedFetch(buildUrl(f))));
-    for (const r of resps) {
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    }
-    const blobs = await Promise.all(resps.map(r => r.blob()));
+    const resp = await trackedFetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
     if (seq !== state.composeSeq) return;  // a newer compose superseded us
+    if (!Array.isArray(data.frames) || data.frames.length === 0) return;
+    const blobs = data.frames.map(b64 => {
+      const bin = atob(b64);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      return new Blob([arr], { type: "image/png" });
+    });
     _stopPreviewAnimation();
     _revokePreviewFrames();
     _previewFrameUrls = blobs.map(b => URL.createObjectURL(b));
-    // Display frame 0 immediately so a slow tab switch doesn't
-    // blank out the preview between fetches.
     _previewCycleIdx = 0;
     $img.src = _previewFrameUrls[PREVIEW_FRAME_CYCLE[0]];
     _previewTimer = setInterval(() => {
@@ -1143,12 +1147,11 @@ async function refreshCompose() {
       const frame = PREVIEW_FRAME_CYCLE[_previewCycleIdx];
       $img.src = _previewFrameUrls[frame];
     }, PREVIEW_FRAME_DELAY_MS);
-    // The server reports the pose it actually used (auto-detect path);
-    // sync state so the toggle always reflects what's on screen.
-    const resolved = resps[0].headers.get("X-Resolved-Pose");
-    if (resolved && resolved !== state.pose
-        && state.weaponPoses.includes(resolved)) {
-      state.pose = resolved;
+    // Sync the pose toggle to whatever the server actually used
+    // (auto-detect path).
+    if (data.resolved_pose && data.resolved_pose !== state.pose
+        && state.weaponPoses.includes(data.resolved_pose)) {
+      state.pose = data.resolved_pose;
       renderPoseControls();
     }
   } catch (err) {
@@ -1166,17 +1169,39 @@ for (const radio of document.querySelectorAll('input[name="char-facing"]')) {
     }
   });
 }
-$export.addEventListener("click", () => {
-  // Always export the static frame 0 — the user's hovered preview
-  // could be on any frame of the breathing cycle, but the saved
-  // PNG should be the canonical idle pose.
-  const url = _previewFrameUrls[0];
-  if (!url) return;
-  const a = document.createElement("a");
-  a.href = url;
-  const ids = Object.values(state.equipped).map(s => s.id).join("-");
-  a.download = `character_${ids || "empty"}.png`;
-  a.click();
+$export.addEventListener("click", async () => {
+  // Save PNG always exports the canonical frame 0 — the user's
+  // hovered preview could be on any frame of the breathing cycle.
+  // We fetch a fresh single-frame compose instead of reusing
+  // ``_previewFrameUrls[0]`` because the cycling preview frames are
+  // padded to the union bbox of all three frames (so the body
+  // doesn't wobble); the export should be tightly cropped to the
+  // actual content for a clean-edged PNG.
+  const ids = Object.values(state.equipped).map(s => s.id);
+  if (ids.length === 0) return;
+  const scale = $scale.value || "2";
+  const url =
+    `/api/character/compose?ids=${ids.join(",")}` +
+    `&pose=${encodeURIComponent(state.pose)}` +
+    `&ear=${encodeURIComponent(state.earType)}` +
+    (state.facing === "right" ? "&flip=1" : "") +
+    `&frame=0` +
+    `&scale=${scale}`;
+  try {
+    const resp = await trackedFetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = `character_${ids.join("-") || "empty"}.png`;
+    a.click();
+    // Revoke after the click handler returns so the browser has a
+    // chance to grab the bytes.
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+  } catch (err) {
+    console.warn("export failed:", err);
+  }
 });
 
 // ── boot ──────────────────────────────────────────────────────────

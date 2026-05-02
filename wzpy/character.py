@@ -1143,6 +1143,7 @@ class CharacterRenderer:
         ear_type: str = DEFAULT_EAR_TYPE,
         flip: bool = False,
         frame: int = 0,
+        bbox: Optional[Tuple[int, int, int, int]] = None,
     ) -> Image.Image:
         """Render the equipped parts as a single RGBA :class:`PIL.Image`.
 
@@ -1158,26 +1159,84 @@ class CharacterRenderer:
 
         ``flip=True`` mirrors the final composite horizontally, which
         is how MapleStory renders a right-facing character — the
-        bitmaps are authored facing left and flipped at draw time."""
+        bitmaps are authored facing left and flipped at draw time.
+
+        ``bbox`` overrides the auto-computed content bounding box
+        ``(min_x, min_y, max_x, max_y)`` in world coordinates. Used
+        by :meth:`compose_animation` to render every frame at the
+        same image size with the navel at the same image-space
+        pixel — without this, hair / cap stay put while the body
+        bitmap leans left and right between frames (the body's per-
+        frame canvas position differs by a few pixels) so the body
+        appears to wobble in the cycling preview."""
         pose = self.detect_pose(equip_ids, pose)
-        # Resolve the cap's vslot string into the set of Hair canvases
-        # it covers — or to ``None`` when the cap is a full helmet that
-        # hides every Hair canvas. Done before collecting canvases so we
-        # can skip the Hair part wholesale in the helmet case (saves
-        # parsing a hair img we'd discard anyway) and otherwise narrow
-        # the per-canvas filter inside ``_collect_part_canvases``.
         hide_hair_full, hide_hair_set, cap_vslot_tokens = \
             self._cap_hair_filter(equip_ids)
-        # ``*OverCap`` glasses / face accs need to sit BEHIND the
-        # bangs whenever the bangs are actually visible — otherwise
-        # the glass renders on top of hair that's covering the
-        # forehead. A cap with vslot ``Cp`` / ``CpH5`` (CapType 0)
-        # doesn't hide any hair, so the bangs are still visible and
-        # we treat it like "no cap" for this layering. Only caps
-        # that hide at least one hair canvas trigger the OverCap
-        # slot's top-of-stack behaviour.
+        placements = self._build_placements(
+            equip_ids, pose, ear_type,
+            hide_hair_full, hide_hair_set, cap_vslot_tokens, frame,
+        )
+        if not placements:
+            return Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+        return self._render_placements(placements, flip=flip, bbox=bbox)
+
+    def compose_animation(
+        self, equip_ids: List[str], pose: Optional[str] = None,
+        ear_type: str = DEFAULT_EAR_TYPE,
+        flip: bool = False,
+        frames: Tuple[int, ...] = (0, 1, 2),
+    ) -> List[Image.Image]:
+        """Compose multiple frames at consistent image dimensions.
+
+        Each frame's per-part placements are computed independently
+        (anchor-chained from its own body canvas), then the union of
+        every frame's content bounding box is taken so all returned
+        images share the same canvas size and have the navel at the
+        same image-space pixel. The cycling preview animation can
+        cross-fade between them without the body wobbling on screen.
+        """
+        pose = self.detect_pose(equip_ids, pose)
+        hide_hair_full, hide_hair_set, cap_vslot_tokens = \
+            self._cap_hair_filter(equip_ids)
+
+        per_frame: List[List[_Placement]] = []
+        for f in frames:
+            placements = self._build_placements(
+                equip_ids, pose, ear_type,
+                hide_hair_full, hide_hair_set, cap_vslot_tokens, f,
+            )
+            per_frame.append(placements)
+
+        all_pls = [p for fr in per_frame for p in fr if p.top_left is not None]
+        if not all_pls:
+            return [Image.new("RGBA", (1, 1), (0, 0, 0, 0)) for _ in frames]
+        bbox = (
+            min(p.top_left[0] for p in all_pls),
+            min(p.top_left[1] for p in all_pls),
+            max(p.top_left[0] + p.pixel_canvas.width for p in all_pls),
+            max(p.top_left[1] + p.pixel_canvas.height for p in all_pls),
+        )
+        return [
+            self._render_placements(pls, flip=flip, bbox=bbox)
+            if pls else Image.new(
+                "RGBA",
+                (max(1, bbox[2] - bbox[0]), max(1, bbox[3] - bbox[1])),
+                (0, 0, 0, 0),
+            )
+            for pls in per_frame
+        ]
+
+    def _build_placements(
+        self,
+        equip_ids: List[str], pose: str, ear_type: str,
+        hide_hair_full: bool, hide_hair_set: frozenset,
+        cap_vslot_tokens: frozenset, frame: int,
+    ) -> List[_Placement]:
+        """Collect, anchor, and z-sort placements for a single frame.
+        Shared between :meth:`compose` (one frame) and
+        :meth:`compose_animation` (multiple frames at consistent bbox).
+        """
         cap_covers_hair = hide_hair_full or bool(hide_hair_set)
-        # Step 1: Per-part canvas collection.
         placements: List[_Placement] = []
         for eid in equip_ids:
             cat = category_for_id(eid)
@@ -1200,12 +1259,8 @@ class CharacterRenderer:
                 ))
 
         if not placements:
-            return Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+            return placements
 
-        # Step 2: Place body's "body" canvas first to anchor world (0, 0)
-        # at body's navel. Then process the rest in priority order so body
-        # sub-parts (arm, lHand, hand) and head are placed before
-        # downstream parts that depend on them.
         def order_key(pl: _Placement) -> Tuple[int, int]:
             if pl.category == "Body":
                 return (0, 0 if pl.name == "body" else 1)
@@ -1219,10 +1274,6 @@ class CharacterRenderer:
 
         for pl in placements:
             if pl.category == "Body" and pl.name == "body" and not body_anchored:
-                # The canonical body. Place its navel at world (0, 0).
-                # Map values are origin-relative, so:
-                #   navel_world = top_left + origin + map[navel] = (0, 0)
-                #   → top_left = -origin - map[navel]
                 navel = pl.map_anchors.get("navel", (0, 0))
                 pl.top_left = (-pl.origin[0] - navel[0],
                                -pl.origin[1] - navel[1])
@@ -1234,9 +1285,6 @@ class CharacterRenderer:
             anchor_world = world_anchors.get(anchor_name)
             map_pt = pl.map_anchors.get(anchor_name, (0, 0))
             if anchor_world is None:
-                # No matching world anchor (rare — happens when the user
-                # composes only a weapon with no body, etc.). Fall back to
-                # placing the canvas's origin at world (0, 0).
                 pl.top_left = (-pl.origin[0], -pl.origin[1])
             else:
                 pl.top_left = (
@@ -1245,13 +1293,6 @@ class CharacterRenderer:
                 )
             self._register_anchors(pl, world_anchors, overwrite=False)
 
-        # Step 3: Sort by z-slot back-to-front and composite. The
-        # remap rules in ``_OVER_CAP_REMAP`` rewrite a canvas's
-        # declared z-slot when either the equipped cap (if any)
-        # doesn't hide hair (``not cap_covers_hair``) OR the cap's
-        # vslot lists the accessory's slot token (covering the
-        # accessory area regardless of bangs). See the comment on
-        # ``_OVER_CAP_REMAP`` for the why.
         def z_for(pl: _Placement) -> int:
             slot = pl.z_slot
             if slot is None:
@@ -1266,21 +1307,28 @@ class CharacterRenderer:
                 slot = target
             return self._z_index(slot)
         placements.sort(key=z_for)
+        return placements
 
-        # Bounding box uses the *pixel* canvas dimensions — for
-        # hierarchical packs ``pl.canvas`` is a 1×1 placeholder and the
-        # real pixels live on ``pl.pixel_canvas`` in a sibling _Canvas
-        # WZ. (For legacy single-file Character.wz they're the same
-        # object so this is a no-op.)
-        min_x = min(p.top_left[0] for p in placements if p.top_left is not None)
-        min_y = min(p.top_left[1] for p in placements if p.top_left is not None)
-        max_x = max(p.top_left[0] + p.pixel_canvas.width
-                    for p in placements if p.top_left is not None)
-        max_y = max(p.top_left[1] + p.pixel_canvas.height
-                    for p in placements if p.top_left is not None)
+    def _render_placements(
+        self, placements: List[_Placement], *, flip: bool = False,
+        bbox: Optional[Tuple[int, int, int, int]] = None,
+    ) -> Image.Image:
+        """Composite the supplied placements into a single image. When
+        ``bbox`` is None, the canvas is the tight bounding box of
+        ``placements``; otherwise it's the supplied
+        ``(min_x, min_y, max_x, max_y)`` so multiple frames can
+        share dimensions and a stable navel position."""
+        if bbox is None:
+            min_x = min(p.top_left[0] for p in placements if p.top_left is not None)
+            min_y = min(p.top_left[1] for p in placements if p.top_left is not None)
+            max_x = max(p.top_left[0] + p.pixel_canvas.width
+                        for p in placements if p.top_left is not None)
+            max_y = max(p.top_left[1] + p.pixel_canvas.height
+                        for p in placements if p.top_left is not None)
+        else:
+            min_x, min_y, max_x, max_y = bbox
         width = max(1, max_x - min_x)
         height = max(1, max_y - min_y)
-
         composite = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         for pl in placements:
             if pl.top_left is None:

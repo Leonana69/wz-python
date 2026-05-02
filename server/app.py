@@ -966,6 +966,66 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             "X-Resolved-Pose": renderer.detect_pose(ids, pose),
         })
 
+    @app.route("/api/character/compose_animation")
+    def api_character_compose_animation() -> Response:
+        """Compose stand1 frames 0/1/2 at a SHARED bounding box and
+        return them base64-encoded inside a JSON envelope.
+
+        Each frame's per-part anchor math runs independently (so the
+        body's per-frame position is faithful), but the union of all
+        frames' content bboxes is taken before rendering — that way
+        the navel sits at the same image-space pixel in every frame
+        and the cycling preview animation doesn't wobble. The client
+        decodes each base64 string into a Blob and cycles them with
+        a setInterval. (Why not a single sprite-sheet PNG? — would
+        require an HTML restructure to ``<div background-image>``;
+        base64 keeps the existing ``<img src=blob>`` swap path
+        working with no markup changes.)
+        """
+        import base64
+        from wzpy.character import CharacterRenderer, DEFAULT_EAR_TYPE, SUPPORTED_POSES
+        renderer = _get_character_renderer(app, region)
+        if renderer is None:
+            abort(404, "Character.wz not loaded")
+        ids_param = request.args.get("ids", "").strip()
+        ids = [s for s in ids_param.split(",") if s.strip()]
+        if not ids:
+            abort(400, "missing or empty ?ids=")
+        pose = request.args.get("pose", "").strip() or None
+        if pose is not None and pose not in SUPPORTED_POSES:
+            pose = None
+        ear_type = request.args.get("ear", "").strip() or DEFAULT_EAR_TYPE
+        flip = request.args.get("flip", "").lower() in ("1", "true", "yes")
+        try:
+            scale = max(1, min(8, int(request.args.get("scale", "2"))))
+        except ValueError:
+            scale = 2
+        try:
+            frames_imgs = renderer.compose_animation(
+                ids, pose=pose, ear_type=ear_type, flip=flip,
+                frames=(0, 1, 2),
+            )
+        except Exception as exc:
+            print(f"  [compose_animation error] {exc}", flush=True)
+            abort(500, f"compose_animation failed: {exc}")
+        if scale != 1:
+            frames_imgs = [
+                f.resize((f.width * scale, f.height * scale), Image.NEAREST)
+                for f in frames_imgs
+            ]
+        encoded: List[str] = []
+        for f in frames_imgs:
+            buf = io.BytesIO()
+            f.save(buf, format="PNG")
+            encoded.append(base64.b64encode(buf.getvalue()).decode("ascii"))
+        return jsonify({
+            "frames": encoded,
+            "count": len(encoded),
+            "width": frames_imgs[0].width if frames_imgs else 0,
+            "height": frames_imgs[0].height if frames_imgs else 0,
+            "resolved_pose": renderer.detect_pose(ids, pose),
+        })
+
     @app.route("/api/search")
     def api_search() -> Response:
         """Walk the WZ tree and return nodes whose name contains the
