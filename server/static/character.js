@@ -126,6 +126,11 @@ const state = {
   // re-skins every visible thumbnail in that category and, if a
   // member is equipped, swaps the equipped ID to the new variant.
   colorByCategory: { Hair: 0, Face: 0 },
+  // Facing direction. ``"left"`` is the canonical orientation in
+  // which Character.wz authors the bitmaps; ``"right"`` flips the
+  // final composite horizontally on the server (a simple
+  // ``Image.FLIP_LEFT_RIGHT``).
+  facing: "left",
 };
 
 // Per-category color configuration. ``palette`` is a list of
@@ -822,30 +827,76 @@ const _equipInfoCache = new Map();
 let _tooltipHoverId = null;        // ID currently being hovered
 let _tooltipHoverTile = null;      // DOM node currently being hovered
 
-// Friendly names for ``info/sfx`` (weapon-type indicator). Anything
-// not listed falls through to the raw token so we still show
-// something useful for unfamiliar values.
-const SFX_LABELS = {
-  swordS:  "One-Handed Sword",
-  swordL:  "Two-Handed Sword",
-  swordB:  "Two-Handed BW",
-  swordK:  "Katara",
-  swordZB: "Zero (Burning)",
-  swordZL: "Zero (Lazuli)",
-  mace:    "One-Handed BW",
-  axe:     "Axe",
-  spear:   "Spear",
-  poleArm: "Polearm",
-  bow:     "Bow",
-  cBow:    "Crossbow",
-  dualBow: "Dual Bowgun",
-  gun:     "Gun",
-  cannon:  "Cannon",
-  knuckle: "Knuckle",
-  tGlove:  "Claw",
-  cane:    "Cane",
-  barehands:"Bare Hands",
+// Weapon type by ID prefix. ``info/sfx`` only carries the swing /
+// sound token, which collides across genuinely-different weapon
+// types (a 1H sword and a dagger both report ``sfx='swordS'``), so
+// the canonical discriminator is the equip ID prefix:
+//
+//   * 4-digit (``id // 1000``) is checked first — used where a
+//     class block sub-classifies on the 5th digit (1212/1213/...,
+//     1252/1253/..., 1402/1403/1404).
+//   * 3-digit (``id // 10000``) is the fallback for everything else.
+//
+// 121 / 125 / 140 deliberately have NO 3-digit entry — only their
+// 4-digit children — so unknown 4-digit codes within those blocks
+// return null rather than a misleading parent label.
+const WEAPON_TYPE_BY_PREFIX_4D = {
+  1212: "Shining Rod",
+  1213: "Bladecaster",
+  1214: "Whispershot",
+  1215: "Sword",
+  1252: "Memorial Staff",
+  1253: "Celestial Light",
+  1254: "Fan",
+  1402: "Two-Handed Sword",
+  1403: "Martial Brace",
+  1404: "Chakram",
 };
+const WEAPON_TYPE_BY_PREFIX_3D = {
+  122: "Soul Shooter",
+  123: "Desperado",
+  124: "Whip Blade",
+  126: "Psy-limiter",
+  127: "Chain",
+  128: "Lucent Gauntlet",
+  129: "Ritual Fan",
+  130: "One-Handed Sword",
+  131: "One-Handed Axe",
+  132: "One-Handed BW",
+  133: "Dagger",
+  134: "Katara",
+  135: "Secondary Weapon",
+  136: "Cane",
+  137: "Wand",
+  138: "Staff",
+  141: "Two-Handed Axe",
+  142: "Two-Handed BW",
+  143: "Spear",
+  144: "Polearm",
+  145: "Bow",
+  146: "Crossbow",
+  147: "Claw",
+  148: "Knuckle",
+  149: "Gun",
+  150: "Shovel",
+  151: "Pickaxe",
+  152: "Dual Bowguns",
+  153: "Hand Cannon",
+  154: "Katana",
+  155: "Fan",
+  156: "Lapis",
+  157: "Lazuli",
+  158: "Arm Cannon",
+  159: "Ancient Bow",
+};
+
+function weaponTypeFor(equipId) {
+  const n = Number(equipId);
+  if (!Number.isFinite(n)) return null;
+  return WEAPON_TYPE_BY_PREFIX_4D[Math.floor(n / 1000)]
+      ?? WEAPON_TYPE_BY_PREFIX_3D[Math.floor(n / 10000)]
+      ?? null;
+}
 
 const ATTACK_SPEED_LABELS = {
   2: "Faster (2)", 3: "Faster (3)", 4: "Fast (4)",
@@ -929,9 +980,14 @@ function renderTooltipBody(equipId, category, info) {
     ? `<h4>${escapeHtml(info.__name)}</h4><div class="tt-meta">${equipId}</div>`
     : `<h4>${equipId}</h4>`;
   let header = nameLine;
-  if (info.sfx) {
-    const label = SFX_LABELS[info.sfx] || info.sfx;
-    header += `<div class="tt-meta">${label}</div>`;
+  // Resolve the weapon type from the equip ID prefix; fall back to
+  // ``info/sfx`` only when the prefix isn't in the lookup table
+  // (rare — modded packs / event weapons). For non-weapons the
+  // category itself (Cap, Coat, …) is already obvious from context
+  // and we leave this line off.
+  if (category === "Weapon") {
+    const label = weaponTypeFor(equipId) || info.sfx || null;
+    if (label) header += `<div class="tt-meta">${escapeHtml(label)}</div>`;
   }
   sections.push(header);
 
@@ -1033,6 +1089,7 @@ async function refreshCompose() {
     `/api/character/compose?ids=${ids.join(",")}` +
     `&pose=${encodeURIComponent(state.pose)}` +
     `&ear=${encodeURIComponent(state.earType)}` +
+    (state.facing === "right" ? "&flip=1" : "") +
     `&scale=${scale}&_=${seq}`;
   // Use a fetch+blob round-trip so we can drop the result if it's stale,
   // and so the image doesn't flicker while a new one loads.
@@ -1060,6 +1117,14 @@ async function refreshCompose() {
 
 // ── controls ──────────────────────────────────────────────────────
 $scale.addEventListener("change", refreshCompose);
+for (const radio of document.querySelectorAll('input[name="char-facing"]')) {
+  radio.addEventListener("change", () => {
+    if (radio.checked && state.facing !== radio.value) {
+      state.facing = radio.value;
+      refreshCompose();
+    }
+  });
+}
 $export.addEventListener("click", () => {
   if (!$img.src) return;
   const a = document.createElement("a");
