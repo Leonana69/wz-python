@@ -1217,24 +1217,33 @@ class CharacterRenderer:
         #    the values frame 0 registered, so they stay still.
         #
         # 2. Per-canvas TRANSLATION COMPENSATION. The body's per-frame
-        #    bitmap encodes the breathing motion as a small translation
-        #    of the body's bitmap-relative-to-navel position (~2 px
-        #    horizontal, ~1 px vertical zig-zag). Coat / longcoat /
-        #    pants / glove etc. ship per-frame bitmaps tuned to track
-        #    that same translation — so as the body wobbles, every
-        #    body-attached piece wobbles in lockstep. The user wants
-        #    the breathing DEFORMATION (changing chest bitmap) but
-        #    not the TRANSLATION. We compute the body's delta vs
-        #    frame 0 for each cycle frame and apply ``-delta`` to
-        #    every placement whose pixel canvas isn't shared with
-        #    frame 0 (i.e., the per-frame parts). Hair / cap /
-        #    earring / face etc. UOL into ``default`` so they share
-        #    pixel canvases with frame 0 and keep their frozen
-        #    positions; body + coat + sleeves get the compensation
-        #    and end up visually static while their bitmaps still
-        #    deform.
+        #    bitmap is a different size each frame (21 → 22 → 23 px
+        #    wide for stock body 00002000) and the navel sits at a
+        #    different point within each bitmap. Aligning by the
+        #    bitmap CENTER (rather than top-left or navel) splits
+        #    the breathing expansion symmetrically between the left
+        #    and right edges so the body silhouette looks like it's
+        #    breathing in place instead of translating right then
+        #    snapping back. Coat / longcoat / pants / glove ship
+        #    per-frame bitmaps tuned to track the body, so we apply
+        #    ``-delta`` to every placement whose pixel canvas isn't
+        #    shared with frame 0 (i.e., the per-frame parts). Hair /
+        #    cap / face / earring etc. UOL into ``default`` and share
+        #    pixel canvases with frame 0, so they stay on their
+        #    frozen anchor positions.
         frame0_canvases: Dict[Tuple[str, str], Any] = {}
-        body_top_left_0: Optional[Tuple[int, int]] = None
+        body_center_0: Optional[Tuple[int, int]] = None
+
+        def _body_center(pls: List[_Placement]) -> Optional[Tuple[int, int]]:
+            for pl in pls:
+                if pl.category == "Body" and pl.name == "body" \
+                        and pl.top_left is not None:
+                    return (
+                        pl.top_left[0] + pl.pixel_canvas.width // 2,
+                        pl.top_left[1] + pl.pixel_canvas.height // 2,
+                    )
+            return None
+
         for f in frames:
             placements, anchors = self._build_placements(
                 equip_ids, pose, ear_type,
@@ -1244,27 +1253,14 @@ class CharacterRenderer:
             )
             if frozen_anchors is None:
                 frozen_anchors = anchors
-                # Capture frame 0's per-canvas identity and body
-                # position so subsequent frames can compensate.
                 for pl in placements:
                     frame0_canvases[(pl.equip_id, pl.name)] = pl.pixel_canvas
-                for pl in placements:
-                    if pl.category == "Body" and pl.name == "body" \
-                            and pl.top_left is not None:
-                        body_top_left_0 = pl.top_left
-                        break
+                body_center_0 = _body_center(placements)
             else:
-                # Compute the body's translation away from frame 0 in
-                # this cycle frame; the compensation is its negation.
-                body_now: Optional[Tuple[int, int]] = None
-                for pl in placements:
-                    if pl.category == "Body" and pl.name == "body" \
-                            and pl.top_left is not None:
-                        body_now = pl.top_left
-                        break
-                if body_top_left_0 is not None and body_now is not None:
-                    dx = body_top_left_0[0] - body_now[0]
-                    dy = body_top_left_0[1] - body_now[1]
+                body_center_now = _body_center(placements)
+                if body_center_0 is not None and body_center_now is not None:
+                    dx = body_center_0[0] - body_center_now[0]
+                    dy = body_center_0[1] - body_center_now[1]
                     if dx or dy:
                         for pl in placements:
                             if pl.top_left is None:
@@ -1272,9 +1268,6 @@ class CharacterRenderer:
                             f0_canvas = frame0_canvases.get(
                                 (pl.equip_id, pl.name)
                             )
-                            # Same pixel canvas as frame 0 → it's a
-                            # static UOL'd piece (hair, cap default,
-                            # etc.); leave it on its frozen anchor.
                             if f0_canvas is pl.pixel_canvas:
                                 continue
                             pl.top_left = (
