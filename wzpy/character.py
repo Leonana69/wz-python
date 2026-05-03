@@ -426,8 +426,37 @@ def _parse_vslot_tokens(vslot: Optional[str]) -> frozenset:
 # masquerading as a fallback for missing ``default/hairBelowBody``,
 # which is wrong: hair styles without ``hairBelowBody`` simply don't
 # show flowing hair behind the torso in front-facing poses.
-SUPPORTED_POSES: Tuple[str, ...] = ("stand1", "stand2")
+# Curated set of action subtrees the static builder exposes. The first
+# two are rest poses (one-handed / two-handed) — every weapon ships
+# them and the breathing-anchor stabilization in
+# :meth:`CharacterRenderer.compose_animation` is tuned for them. The
+# rest are real-motion actions (locomotion, alert, attacks); their
+# multi-frame canvases animate naturally and we do NOT freeze head
+# anchors across frames for those (see the ``stabilize`` branch in
+# ``compose_animation``).
+SUPPORTED_POSES: Tuple[str, ...] = (
+    "stand1", "stand2",
+    "walk1", "walk2",
+    "alert",
+    "jump",
+    "prone", "proneStab",
+    "sit",
+    "fly",
+    "ladder", "rope",
+    "heal",
+    "swingO1", "swingO2", "swingO3",
+    "swingT1", "swingT2", "swingT3",
+    "stabO1", "stabO2",
+    "stabT1", "stabT2",
+    "shoot1", "shoot2", "shootF",
+    "dead",
+)
 DEFAULT_POSE = "stand1"
+
+# Subset used by ``_render_root``'s cash-weapon fallback (when the
+# requested pose isn't authored in any numeric weapon-num child).
+# Cash weapons always ship a rest pose so this tiny set is enough.
+_WEAPON_FALLBACK_POSES: Tuple[str, ...] = ("stand1", "stand2")
 
 # Each Head image ships its ``head`` canvas alongside one or more ear
 # variants under ``front/`` (e.g. ``humanEar``, ``lefEar``,
@@ -749,8 +778,12 @@ def _render_root(img: WzImage, category: str, equip_id: str, pose: str) -> WzPro
             home = _pose_data_home(c, pose)
             if home is not None:
                 return home
-        # Second pass: any supported pose (rare; weapon ships only one).
-        for p in SUPPORTED_POSES:
+        # Second pass: any rest pose (rare; weapon ships only one).
+        # Limited to stand1/stand2 because cash weapons are weapons —
+        # the action poses (walk1, swing*, stab*, …) are all UOLs back
+        # to a rest pose, and falling back to those would just chase
+        # a UOL chain that the first pass already covered.
+        for p in _WEAPON_FALLBACK_POSES:
             for c in numeric:
                 home = _pose_data_home(c, p)
                 if home is not None:
@@ -1055,11 +1088,11 @@ class CharacterRenderer:
 
     # ── pose discovery ──────────────────────────────────────────────────
     def get_weapon_poses(self, equip_id: str) -> List[str]:
-        """Return the static-pose actions a weapon ships with: some
-        subset of ``("stand1", "stand2")``. One-handed weapons usually
-        return ``["stand1"]``, two-handed weapons ``["stand2"]``, and
-        a few weapons (~96 of 1220 in stock GMS v83) return both — those
-        are the ones the UI should expose a pose toggle for."""
+        """Return the action subtrees a weapon ships with — the subset
+        of :data:`SUPPORTED_POSES` whose ``<pose>/0`` resolves to a
+        real frame on this weapon. The UI uses this to filter the
+        pose dropdown so the user only sees poses the equipped
+        weapon actually has art for."""
         if category_for_id(equip_id) != "Weapon":
             return []
         img = self._open_part(equip_id)
@@ -1080,6 +1113,39 @@ class CharacterRenderer:
                     seen.append(p)
                     break
         return seen
+
+    def pose_frame_delays(
+        self, pose: str, body_id: str = "00002000",
+    ) -> List[int]:
+        """Return per-frame delays (ms) for the given pose, read from
+        ``Body/<body_id>.img/<pose>/<n>/delay``. The list length is
+        the number of authored frames; an empty list means the body
+        doesn't ship this pose. Frames missing an explicit ``delay``
+        default to 100 ms — same fallback the Maple client uses for
+        single-frame actions like ``prone`` / ``sit`` that ship no
+        delay because they're held until interrupted."""
+        img = self._open_part(body_id)
+        if img is None:
+            return []
+        node = img.parse().get(pose)
+        node = _resolve_uol(node) if isinstance(node, WzUolProperty) else node
+        if not isinstance(node, WzSubProperty):
+            return []
+        frames = sorted(
+            (c for c in node.children() if c.name.isdigit()),
+            key=lambda c: int(c.name),
+        )
+        out: List[int] = []
+        for fr in frames:
+            d = fr.get("delay") if isinstance(fr, WzSubProperty) else None
+            d = _resolve_uol(d) if isinstance(d, WzUolProperty) else d
+            v = getattr(d, "value", None) if d is not None else None
+            try:
+                ms = int(v) if v is not None else 0
+            except (TypeError, ValueError):
+                ms = 0
+            out.append(ms if ms > 0 else 100)
+        return out
 
     def _cap_hair_filter(
         self, equip_ids: List[str],
@@ -1203,29 +1269,53 @@ class CharacterRenderer:
         self, equip_ids: List[str], pose: Optional[str] = None,
         ear_type: str = DEFAULT_EAR_TYPE,
         flip: bool = False,
-        frames: Tuple[int, ...] = (0, 1, 2),
+        frames: Optional[Tuple[int, ...]] = None,
     ) -> List[Image.Image]:
-        """Compose multiple frames at consistent image dimensions and
-        with frozen anchor positions across frames.
+        """Compose multiple frames at consistent image dimensions.
 
-        The body's per-frame canvas advertises slightly different
-        anchor offsets — neck moves zig-zag ``(4,-11) → (3,-12) →
-        (2,-11)`` for body 00002000, hand drifts by ~1px each frame
-        — so equipment that anchors on neck (head / hair / cap /
-        face) or hand (weapon) wobbles in lockstep with the
-        breathing animation. To keep the animated preview from
-        looking jittery, we render frame 0 normally, capture its
-        world-anchor map, and reuse those frozen anchors when
-        building placements for frames 1+2. The body bitmap itself
+        For ``stand1`` / ``stand2`` the body's per-frame canvas
+        advertises slightly different anchor offsets — neck moves
+        zig-zag ``(4,-11) → (3,-12) → (2,-11)`` for body 00002000,
+        hand drifts by ~1px each frame — so equipment that anchors
+        on neck (head / hair / cap / face) or hand (weapon) wobbles
+        in lockstep with the breathing animation. To keep the
+        animated preview from looking jittery, we render frame 0
+        normally, capture its world-anchor map, and reuse those
+        frozen anchors for the rest of the cycle. The body bitmap
         still gets its per-frame artwork (so the chest visibly
         breathes), only the *positions* of dependent parts stay
-        locked. Then the union of every frame's bbox is taken so
-        all returned images share canvas dimensions and the navel
-        sits at the same image-space pixel.
+        locked. Then the union of every frame's bbox is taken so all
+        returned images share canvas dimensions and the navel sits
+        at the same image-space pixel.
+
+        For action poses (``walk1``, ``swingO1``, ``jump``, …) the
+        body's per-frame anchor changes ARE the motion (the leg
+        swings forward, the head bobs with the stride) and freezing
+        them would defeat the animation. Those poses skip the
+        breathing stabilization and let every part follow the body's
+        per-frame anchors naturally, so cap / hair / weapon track
+        the head and hand the way the in-game client renders them.
+
+        ``frames`` defaults to the actual frame count of the equipped
+        body's pose subtree; pass an explicit tuple to render only a
+        slice (e.g. ``(0,)`` for a single still).
         """
         pose = self.detect_pose(equip_ids, pose)
         hide_hair_full, hide_hair_set, cap_vslot_tokens = \
             self._cap_hair_filter(equip_ids)
+
+        if frames is None:
+            body_id = next(
+                (e for e in equip_ids if category_for_id(e) == "Body"),
+                "00002000",
+            )
+            n = len(self.pose_frame_delays(pose, body_id))
+            frames = tuple(range(n)) if n > 0 else (0,)
+
+        # Breathing stabilization is meaningful only for the
+        # in-place rest poses. Other poses are real motion and need
+        # natural per-frame anchors.
+        stabilize = pose in ("stand1", "stand2")
 
         per_frame: List[List[_Placement]] = []
         frozen_anchors: Optional[Dict[str, Tuple[int, int]]] = None
@@ -1284,6 +1374,13 @@ class CharacterRenderer:
                 frozen_anchors=frozen_anchors,
                 return_anchors=True,
             )
+            if not stabilize:
+                # Action poses: leave every frame's anchors alone so
+                # the natural per-frame motion (stride, swing, head
+                # bob) is preserved. We still pad to the union bbox
+                # below so the cycling preview canvas size is stable.
+                per_frame.append(placements)
+                continue
             if frozen_anchors is None:
                 frozen_anchors = anchors
                 for pl in placements:
@@ -1471,6 +1568,67 @@ class CharacterRenderer:
             if pose == "stand1" and pl.category == "Weapon" \
                     and slot == "weaponOverArm":
                 slot = "weapon"
+            # Poses where both the held weapon and the gripping
+            # arm need to render IN FRONT of the head — i.e. the
+            # arm + weapon cross the face area and the natural z
+            # slots (``weapon`` / ``weaponBelowArm`` at indices
+            # ~262/264, ``arm`` / ``armOverHair`` at ~267/268) sit
+            # BEFORE ``head`` (305), so the head/face ends up
+            # covering them.
+            #
+            # Covers: prone / proneStab (lying face-down with arm
+            # extended forward); shoot1 / shoot2 / shootF (ranged
+            # firing stance, weapon held out at face level);
+            # swingT1 (2H side wind-up, blade can pass the face);
+            # stabO1 / stabO2 (1H thrust at face level).
+            #
+            # Promote the weapon to ``weaponOverHand`` (351) and
+            # the gripping arm to ``handOverHair`` (358), preserving
+            # the natural arm-over-grip ordering (hand sits above
+            # weapon). ``armOverHairBelowWeapon`` is left alone —
+            # the slot's name explicitly says it should stay below
+            # the weapon (used for the back arm in swingT1 frames
+            # 0/1, paired with ``armOverHair`` for the front arm).
+            elif pose in (
+                "prone", "proneStab",
+                "shoot1", "shoot2", "shootF",
+                "swingT1",
+                "stabO1", "stabO2",
+            ):
+                if pl.category == "Weapon" \
+                        and slot in ("weapon", "weaponBelowArm"):
+                    slot = "weaponOverHand"
+                elif pl.category == "Body" and slot in (
+                    "arm", "armOverHair",
+                ):
+                    slot = "handOverHair"
+            # Two-handed swing / stab: the weapon is already
+            # authored above the head (``weaponOverBody`` /
+            # ``weaponOverGlove`` at 349-352), but the gripping
+            # ``arm`` leaf is at ``arm`` / ``armBelowHead`` /
+            # ``armBelowHeadOverMailChest`` — far below — so the
+            # weapon covers the grip. Promote those plain arm
+            # slots to ``handOverHair`` so both gripping hands
+            # render above the blade, matching the in-game look.
+            #
+            # ``swingT3`` is the overhead wind-up, and frame 2's
+            # recoil canvas is authored with ``armBelowHead``
+            # specifically so the head covers the gripping hand as
+            # it crosses the face — promoting it would render the
+            # arm OVER the face. That frame already pairs with
+            # ``weaponBelowBody`` so the natural layering puts
+            # weapon < arm < head without any remap; we just skip
+            # the promotion for ``armBelowHead`` in that pose.
+            elif pose in (
+                "swingT2", "stabT1", "stabT2",
+            ) and pl.category == "Body" and slot in (
+                "arm", "armBelowHead", "armBelowHeadOverMailChest",
+            ):
+                slot = "handOverHair"
+            elif pose == "swingT3" and pl.category == "Body" and slot in (
+                "arm", "armBelowHeadOverMailChest",
+            ):
+                slot = "handOverHair"
             rule = _OVER_CAP_REMAP.get(slot)
             if rule is None:
                 return self._z_index(slot)

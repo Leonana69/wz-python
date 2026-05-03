@@ -102,8 +102,10 @@
   padding: 6px 12px;
 }
 
-/* Pose toggle — only shown when the equipped weapon supports both
- * stand1 (one-handed) and stand2 (two-handed). */
+/* Pose dropdown — lists every pose the equipped Body authors,
+ * narrowed to the equipped weapon's supported subset when one is
+ * equipped. Hidden only if the body ships zero supported poses
+ * (which never happens with stock data). */
 .char-pose {
   display: flex;
   align-items: center;
@@ -112,14 +114,14 @@
   color: #aaa;
 }
 .char-pose .pose-label { color: #aaa; margin-right: 2px; }
-.char-pose label {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  cursor: pointer;
-  color: #c5c5c5;
+.char-pose select {
+  background: #2b2d31;
+  color: #d6d6d6;
+  border: 1px solid #1a1b1d;
+  padding: 3px 6px;
+  border-radius: 3px;
+  font: inherit;
 }
-.char-pose input[type="radio"] { margin: 0; cursor: pointer; }
 
 /* Facing toggle — same shape as the pose toggle. Always visible
  * (no equipment dependency); just a server-side horizontal flip

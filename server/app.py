@@ -851,13 +851,33 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
 
     @app.route("/api/character/weapon_poses/<equip_id>")
     def api_character_weapon_poses(equip_id: str) -> Response:
-        """Return which static poses (stand1, stand2, or both) the given
-        weapon ships with so the UI knows whether to show a pose toggle."""
+        """Return the action subtrees a weapon ships with — a subset
+        of :data:`SUPPORTED_POSES` (stand1/stand2/walk1/swing*/…). The
+        UI uses it to filter the pose dropdown so the user only sees
+        poses with weapon art."""
         renderer = _get_character_renderer(app, region)
         if renderer is None:
             abort(404, "Character.wz not loaded")
         poses = renderer.get_weapon_poses(equip_id)
         return jsonify({"id": equip_id, "poses": poses})
+
+    @app.route("/api/character/poses")
+    def api_character_poses() -> Response:
+        """List every pose the equipped body actually ships, with the
+        per-frame delays in ms. ``body`` query param overrides the
+        default ``00002000`` body. The UI uses this to populate the
+        pose dropdown and to time the cycling preview animation."""
+        from wzpy.character import SUPPORTED_POSES
+        renderer = _get_character_renderer(app, region)
+        if renderer is None:
+            abort(404, "Character.wz not loaded")
+        body_id = request.args.get("body", "").strip() or "00002000"
+        out = []
+        for p in SUPPORTED_POSES:
+            delays = renderer.pose_frame_delays(p, body_id)
+            if delays:
+                out.append({"pose": p, "delays": delays})
+        return jsonify({"body": body_id, "poses": out})
 
     @app.route("/api/character/equip_info/<equip_id>")
     def api_character_equip_info(equip_id: str) -> Response:
@@ -927,7 +947,9 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
 
     @app.route("/api/character/compose")
     def api_character_compose() -> Response:
-        from wzpy.character import CharacterRenderer, DEFAULT_EAR_TYPE, SUPPORTED_POSES
+        from wzpy.character import (
+            CharacterRenderer, DEFAULT_EAR_TYPE, SUPPORTED_POSES, category_for_id,
+        )
         renderer = _get_character_renderer(app, region)
         if renderer is None:
             abort(404, "Character.wz not loaded")
@@ -944,9 +966,19 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             frame = int(request.args.get("frame", "0"))
         except ValueError:
             frame = 0
-        # Clamp to the body's standby range. Frames beyond 2 don't
-        # exist in stock data; let other parts fall back to default.
-        frame = max(0, min(2, frame))
+        # Clamp to the actual frame count of the resolved pose's body
+        # subtree. Stand1 ships 3 frames, walk1 ships 4, shoot2 ships
+        # 5 — without per-pose discovery the old hard cap of 2 cut
+        # off any animation longer than the breathing cycle.
+        resolved_pose = renderer.detect_pose(ids, pose)
+        body_id = next(
+            (e for e in ids if category_for_id(e) == "Body"), "00002000",
+        )
+        n_frames = len(renderer.pose_frame_delays(resolved_pose, body_id))
+        if n_frames > 0:
+            frame = max(0, min(n_frames - 1, frame))
+        else:
+            frame = 0
         try:
             img = renderer.compose(
                 ids, pose=pose, ear_type=ear_type, flip=flip, frame=frame,
@@ -968,22 +1000,25 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
 
     @app.route("/api/character/compose_animation")
     def api_character_compose_animation() -> Response:
-        """Compose stand1 frames 0/1/2 at a SHARED bounding box and
-        return them base64-encoded inside a JSON envelope.
+        """Compose every frame of the requested pose at a SHARED
+        bounding box and return them base64-encoded inside a JSON
+        envelope, alongside the per-frame ``delay`` (ms) read from
+        the body image so the client can time the cycling preview.
 
         Each frame's per-part anchor math runs independently (so the
         body's per-frame position is faithful), but the union of all
         frames' content bboxes is taken before rendering — that way
         the navel sits at the same image-space pixel in every frame
-        and the cycling preview animation doesn't wobble. The client
-        decodes each base64 string into a Blob and cycles them with
-        a setInterval. (Why not a single sprite-sheet PNG? — would
-        require an HTML restructure to ``<div background-image>``;
-        base64 keeps the existing ``<img src=blob>`` swap path
-        working with no markup changes.)
+        and the cycling preview animation doesn't wobble. For action
+        poses (walk, swing, …) the natural per-frame motion is
+        preserved; only the rest poses (stand1/stand2) get the
+        breathing-anchor stabilization that keeps cap / face frozen
+        across the cycle.
         """
         import base64
-        from wzpy.character import CharacterRenderer, DEFAULT_EAR_TYPE, SUPPORTED_POSES
+        from wzpy.character import (
+            CharacterRenderer, DEFAULT_EAR_TYPE, SUPPORTED_POSES, category_for_id,
+        )
         renderer = _get_character_renderer(app, region)
         if renderer is None:
             abort(404, "Character.wz not loaded")
@@ -1000,10 +1035,19 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             scale = max(1, min(8, int(request.args.get("scale", "2"))))
         except ValueError:
             scale = 2
+        resolved_pose = renderer.detect_pose(ids, pose)
+        body_id = next(
+            (e for e in ids if category_for_id(e) == "Body"), "00002000",
+        )
+        delays = renderer.pose_frame_delays(resolved_pose, body_id)
         try:
+            # Pass ``None`` so the renderer auto-discovers the frame
+            # count from the body's pose subtree — same source of
+            # truth as ``delays`` above so the two arrays stay
+            # length-matched.
             frames_imgs = renderer.compose_animation(
                 ids, pose=pose, ear_type=ear_type, flip=flip,
-                frames=(0, 1, 2),
+                frames=None,
             )
         except Exception as exc:
             print(f"  [compose_animation error] {exc}", flush=True)
@@ -1021,9 +1065,10 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
         return jsonify({
             "frames": encoded,
             "count": len(encoded),
+            "delays": delays,
             "width": frames_imgs[0].width if frames_imgs else 0,
             "height": frames_imgs[0].height if frames_imgs else 0,
-            "resolved_pose": renderer.detect_pose(ids, pose),
+            "resolved_pose": resolved_pose,
         })
 
     @app.route("/api/search")

@@ -97,12 +97,17 @@ const state = {
   // Track the inflight compose request so out-of-order responses don't
   // overwrite a newer preview with stale pixels.
   composeSeq: 0,
-  // Pose state — "stand1" (one-handed) or "stand2" (two-handed). Driven
-  // by the equipped weapon: weapons that ship only one pose lock the
-  // toggle, weapons that ship both expose it. Stays "stand1" when no
-  // weapon is equipped.
+  // Pose state — any entry from ``bodyPoses`` (filtered down to
+  // weapon-supported poses when a weapon is equipped). Defaults to
+  // stand1, the one-handed rest pose.
   pose: "stand1",
-  weaponPoses: ["stand1"],  // poses the currently-equipped weapon supports
+  // Poses the equipped Body actually ships, with per-frame delays
+  // (ms). Populated on boot via /api/character/poses; the dropdown
+  // is built from this list.
+  bodyPoses: [],
+  // Subset of supported poses that the equipped weapon ships art
+  // for. Empty array means "no weapon equipped" → no filtering.
+  weaponPoses: [],
   // Cache of weapon → poses so re-equipping doesn't re-fetch.
   weaponPoseCache: new Map(),
   // Ear-type state — which canvas under ``Head/<id>.img/front/`` is
@@ -603,8 +608,7 @@ function unequipPart(category) {
   // user explore weird combinations.
   delete state.equipped[category];
   if (category === "Weapon") {
-    state.weaponPoses = ["stand1"];
-    state.pose = "stand1";
+    state.weaponPoses = [];
     renderPoseControls();
   }
   if (category === "Head") {
@@ -657,10 +661,10 @@ async function syncWeaponPose(weaponId) {
       const resp = await trackedFetch(`/api/character/weapon_poses/${weaponId}`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const json = await resp.json();
-      poses = json.poses && json.poses.length ? json.poses : ["stand1"];
+      poses = Array.isArray(json.poses) ? json.poses : [];
     } catch (err) {
       console.warn("weapon_poses fetch failed:", err);
-      poses = ["stand1"];
+      poses = [];
     }
     state.weaponPoseCache.set(weaponId, poses);
   }
@@ -668,10 +672,22 @@ async function syncWeaponPose(weaponId) {
   // Keep the user's current pose if the new weapon supports it; otherwise
   // snap to the weapon's first available pose so the composite doesn't
   // silently fall back to a pose the user can't see selected.
-  if (!poses.includes(state.pose)) {
+  if (poses.length && !poses.includes(state.pose)) {
     state.pose = poses[0];
   }
   renderPoseControls();
+}
+
+async function loadBodyPoses() {
+  try {
+    const resp = await trackedFetch("/api/character/poses");
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const json = await resp.json();
+    state.bodyPoses = Array.isArray(json.poses) ? json.poses : [];
+  } catch (err) {
+    console.warn("poses fetch failed:", err);
+    state.bodyPoses = [{ pose: "stand1", delays: [500, 500, 500] }];
+  }
 }
 
 function renderEquipped() {
@@ -730,17 +746,63 @@ function renderEquipped() {
   }
 }
 
-// ── pose toggle ────────────────────────────────────────────────────
-const POSE_LABELS = { stand1: "1H", stand2: "2H" };
+// ── pose dropdown ──────────────────────────────────────────────────
+// Friendly labels for each pose. Anything not listed falls through
+// to the raw WZ name so custom packs / future poses still surface
+// identifiably.
+const POSE_LABELS = {
+  stand1: "Stand (1H)",
+  stand2: "Stand (2H)",
+  walk1: "Walk (1H)",
+  walk2: "Walk (2H)",
+  alert: "Alert",
+  jump: "Jump",
+  prone: "Prone",
+  proneStab: "Prone Stab",
+  sit: "Sit",
+  fly: "Fly",
+  ladder: "Ladder",
+  rope: "Rope",
+  heal: "Heal",
+  swingO1: "Swing 1H A",
+  swingO2: "Swing 1H B",
+  swingO3: "Swing 1H C",
+  swingT1: "Swing 2H A",
+  swingT2: "Swing 2H B",
+  swingT3: "Swing 2H C",
+  stabO1: "Stab 1H A",
+  stabO2: "Stab 1H B",
+  stabT1: "Stab 2H A",
+  stabT2: "Stab 2H B",
+  shoot1: "Shoot Bow",
+  shoot2: "Shoot Crossbow",
+  shootF: "Shoot Gun",
+  dead: "Dead",
+};
+
+function visiblePoses() {
+  // Start from the body's authored poses (server-discovered). When a
+  // weapon is equipped, narrow to the intersection so the user only
+  // sees poses that have weapon art too — picking a pose with no
+  // weapon canvas would silently render the character with an
+  // invisible weapon.
+  const all = state.bodyPoses.map(p => p.pose);
+  if (!state.weaponPoses.length) return all;
+  const wp = new Set(state.weaponPoses);
+  return all.filter(p => wp.has(p));
+}
+
+function poseDelays(pose) {
+  const entry = state.bodyPoses.find(p => p.pose === pose);
+  return entry ? entry.delays.slice() : [500];
+}
 
 function renderPoseControls() {
-  // Reuses the dedicated container in character.html; if the equipped
-  // weapon supports both stand1 and stand2 we expose a radio toggle,
-  // otherwise we hide it (the pose is implied by the weapon).
-  let host = document.getElementById("char-pose");
+  const host = document.getElementById("char-pose");
   if (!host) return;
   host.innerHTML = "";
-  if (state.weaponPoses.length < 2) {
+  const options = visiblePoses();
+  if (options.length === 0) {
     host.hidden = true;
     return;
   }
@@ -749,26 +811,29 @@ function renderPoseControls() {
   label.className = "pose-label";
   label.textContent = "Pose";
   host.appendChild(label);
-  for (const p of state.weaponPoses) {
-    const id = `char-pose-${p}`;
-    const wrap = document.createElement("label");
-    wrap.htmlFor = id;
-    const radio = document.createElement("input");
-    radio.type = "radio";
-    radio.name = "char-pose";
-    radio.id = id;
-    radio.value = p;
-    radio.checked = p === state.pose;
-    radio.addEventListener("change", () => {
-      if (radio.checked && state.pose !== p) {
-        state.pose = p;
-        refreshCompose();
-      }
-    });
-    wrap.appendChild(radio);
-    wrap.appendChild(document.createTextNode(POSE_LABELS[p] || p));
-    host.appendChild(wrap);
+  const select = document.createElement("select");
+  select.id = "char-pose-select";
+  for (const p of options) {
+    const opt = document.createElement("option");
+    opt.value = p;
+    opt.textContent = POSE_LABELS[p] || p;
+    if (p === state.pose) opt.selected = true;
+    select.appendChild(opt);
   }
+  // If the current pose is no longer in the option list (just lost
+  // weapon support), snap to the first option and re-render so the
+  // server and UI agree.
+  if (!options.includes(state.pose)) {
+    state.pose = options[0];
+    select.value = state.pose;
+  }
+  select.addEventListener("change", () => {
+    if (select.value !== state.pose) {
+      state.pose = select.value;
+      refreshCompose();
+    }
+  });
+  host.appendChild(select);
 }
 
 // Friendly labels for the canvas names exposed by ``Head/<id>.img/front/``.
@@ -1077,30 +1142,39 @@ function positionTooltip(tile) {
   $tooltip.style.top = `${top}px`;
 }
 
-// MapleStory's standby breathing animation cycles ``stand1`` frames
-// 0 → 1 → 2 → 1 then repeats. Body's stand1 ships ``delay=500``
-// (ms) per frame in stock data; equipment imgs don't ship explicit
-// delays so we use the body delay as the canonical tempo.
-const PREVIEW_FRAME_CYCLE = [0, 1, 2, 1];
-const PREVIEW_FRAME_DELAY_MS = 500;
+// Build the cycle of frame indices to play for a given pose. For
+// the in-place rest poses we mirror MapleStory's classic breathing
+// loop ``0 → 1 → 2 → 1`` (the third frame is "exhale"; replaying
+// frame 1 on the way back avoids a hard cut from peak inhale back
+// to neutral). For everything else we just play frames in order
+// and loop — that matches how the in-game client cycles walk1,
+// swing*, etc.
+function previewCycle(pose, frameCount) {
+  if ((pose === "stand1" || pose === "stand2") && frameCount === 3) {
+    return [0, 1, 2, 1];
+  }
+  return Array.from({ length: frameCount }, (_, i) => i);
+}
 
-// Blob URLs for the three rendered frames (indices 0/1/2). We hold
-// onto them between refreshes so Save PNG can grab frame 0 directly,
-// and so changing scale / facing doesn't briefly drop the preview.
-let _previewFrameUrls = [null, null, null];
+// Blob URLs for each rendered frame, indexed 0..N-1. We hold onto
+// them between refreshes so Save PNG can grab frame 0 directly and
+// so changing scale / facing doesn't briefly drop the preview.
+let _previewFrameUrls = [];
 let _previewTimer = 0;
 let _previewCycleIdx = 0;
+let _previewCycle = [0];
+let _previewDelays = [500];
 
 function _stopPreviewAnimation() {
   if (_previewTimer) {
-    clearInterval(_previewTimer);
+    clearTimeout(_previewTimer);
     _previewTimer = 0;
   }
 }
 
 function _revokePreviewFrames() {
   for (const u of _previewFrameUrls) if (u) URL.revokeObjectURL(u);
-  _previewFrameUrls = [null, null, null];
+  _previewFrameUrls = [];
 }
 
 async function refreshCompose() {
@@ -1140,17 +1214,33 @@ async function refreshCompose() {
     _stopPreviewAnimation();
     _revokePreviewFrames();
     _previewFrameUrls = blobs.map(b => URL.createObjectURL(b));
+    // Per-frame delays: prefer the server's authored delays so each
+    // pose plays at its native tempo (walk1=180ms, swing has
+    // variable delays, prone=100ms one-shot). Fall back to a 500ms
+    // breathing tempo if the server didn't include them.
+    _previewDelays = Array.isArray(data.delays) && data.delays.length
+      ? data.delays
+      : Array.from({ length: _previewFrameUrls.length }, () => 500);
+    _previewCycle = previewCycle(
+      data.resolved_pose || state.pose, _previewFrameUrls.length,
+    );
     _previewCycleIdx = 0;
-    $img.src = _previewFrameUrls[PREVIEW_FRAME_CYCLE[0]];
-    _previewTimer = setInterval(() => {
-      _previewCycleIdx = (_previewCycleIdx + 1) % PREVIEW_FRAME_CYCLE.length;
-      const frame = PREVIEW_FRAME_CYCLE[_previewCycleIdx];
-      $img.src = _previewFrameUrls[frame];
-    }, PREVIEW_FRAME_DELAY_MS);
-    // Sync the pose toggle to whatever the server actually used
+    $img.src = _previewFrameUrls[_previewCycle[0]];
+    // Single-frame poses (prone / sit / jump / dead) don't animate;
+    // skip the timer entirely.
+    if (_previewCycle.length > 1) {
+      const tick = () => {
+        _previewCycleIdx = (_previewCycleIdx + 1) % _previewCycle.length;
+        const frame = _previewCycle[_previewCycleIdx];
+        $img.src = _previewFrameUrls[frame];
+        _previewTimer = setTimeout(tick, _previewDelays[frame] || 500);
+      };
+      _previewTimer = setTimeout(tick, _previewDelays[_previewCycle[0]] || 500);
+    }
+    // Sync the dropdown to whatever the server actually used
     // (auto-detect path).
     if (data.resolved_pose && data.resolved_pose !== state.pose
-        && state.weaponPoses.includes(data.resolved_pose)) {
+        && visiblePoses().includes(data.resolved_pose)) {
       state.pose = data.resolved_pose;
       renderPoseControls();
     }
@@ -1207,8 +1297,11 @@ $export.addEventListener("click", async () => {
 // ── boot ──────────────────────────────────────────────────────────
 (async function boot() {
   selectTab(state.activeTab);
+  // Pose dropdown is populated from the body's authored poses, so
+  // we need that list before the first paint.
+  await loadBodyPoses();
   // If a weapon was seeded (none in DEFAULTS today, but kept for
-  // future-proofing), sync the pose toggle before the first compose.
+  // future-proofing), sync the pose dropdown before the first compose.
   if (state.equipped.Weapon) {
     await syncWeaponPose(state.equipped.Weapon.id);
   }
