@@ -728,6 +728,7 @@ def create_app(
     wz_path: Optional[str] = None, region: str = "auto",
     version: Optional[int] = None,
     recent_paths: Optional[List[str]] = None,
+    char_mode: bool = False,
 ) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     # ``recent_paths`` shows up in the welcome page as quick-load
@@ -761,7 +762,11 @@ def create_app(
     hierarchical: bool = False
     _load_lock = threading.Lock()
 
-    def _do_load(path: str, req_region: str = "auto", req_version: Optional[int] = None) -> None:
+    def _do_load(
+        path: str, req_region: str = "auto",
+        req_version: Optional[int] = None,
+        char_mode: bool = False,
+    ) -> None:
         nonlocal wz, hierarchical, wz_path, region, version
         if not path:
             raise ValueError("path is required")
@@ -796,22 +801,23 @@ def create_app(
             app.config["WZ_DIRTY_PATHS"] = set()
             app.config["WZ_FORCE_FULL_REWRITE"] = False
             app.config["CHARACTER_RENDERER"] = None
-            # When the loaded WZ is Character, look for a sibling
-            # ``String.wz`` / ``String/`` so the UI can show real item
-            # names instead of bare IDs. Best-effort: any failure
-            # (missing file, unreadable, wrong region) leaves
-            # ``CHARACTER_STRINGS`` as None and the UI falls back to IDs.
-            app.config["CHARACTER_STRINGS"] = _try_load_character_strings(
-                path, r, req_version,
-            )
-            # Same for ``Effect.wz`` / ``Effect/`` — gives the renderer
-            # access to ``ItemEff.img/<id>`` overlays so equipped items
-            # with authored effects (e.g. cap 01004759 ember-flames)
-            # composite on top of the character. ``None`` here just
-            # means "no overlay layer".
-            app.config["CHARACTER_EFFECTS"] = _try_load_character_effects(
-                path, r, req_version,
-            )
+            # String / Effect sibling auto-discovery is gated on char
+            # mode (--char on the CLI, "Open as Character bundle" in
+            # the welcome dialog). Loading Character on its own keeps
+            # CHARACTER_STRINGS and CHARACTER_EFFECTS as None so the
+            # builder shows raw IDs and skips ItemEff overlays — same
+            # behavior the renderer falls back to for non-Character
+            # WZs. Char mode opts the user in to the full bundle.
+            if char_mode:
+                app.config["CHARACTER_STRINGS"] = _try_load_character_strings(
+                    path, r, req_version,
+                )
+                app.config["CHARACTER_EFFECTS"] = _try_load_character_effects(
+                    path, r, req_version,
+                )
+            else:
+                app.config["CHARACTER_STRINGS"] = None
+                app.config["CHARACTER_EFFECTS"] = None
             # When all three Character-bundle packs loaded cleanly,
             # build a synthetic browse root so the tree view shows
             # Character / Effect / String as top-level subdirs and the
@@ -839,7 +845,7 @@ def create_app(
                     pass
 
     if wz_path:
-        _do_load(wz_path, region, version)
+        _do_load(wz_path, region, version, char_mode=char_mode)
 
     # ── helpers ──────────────────────────────────────────────────────
     def _browse_root() -> "WzDirectory":
@@ -1157,7 +1163,7 @@ def create_app(
                 return jsonify({"error": err, "code": "CHAR_DISCOVERY"}), 400
             path = char_path
         try:
-            _do_load(path, region_arg, version_arg)
+            _do_load(path, region_arg, version_arg, char_mode=char_mode)
         except FileNotFoundError as e:
             return jsonify({"error": str(e)}), 404
         except ValueError as e:
@@ -3335,7 +3341,7 @@ def main() -> None:
 
     app = create_app(
         initial_path, region=args.region, version=args.version,
-        recent_paths=recent,
+        recent_paths=recent, char_mode=bool(args.char),
     )
     print(f"\n  -> open http://{args.host}:{args.port}\n")
     app.run(host=args.host, port=args.port, debug=args.debug)
