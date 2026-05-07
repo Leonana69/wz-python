@@ -1071,6 +1071,145 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             "resolved_pose": resolved_pose,
         })
 
+    def _render_animation_for_export(
+        ids: List[str], pose_arg: Optional[str], ear_type: str,
+        flip: bool, scale: int,
+    ) -> Tuple[List[Image.Image], List[int], str]:
+        """Shared body for the ZIP / GIF export endpoints. Returns the
+        per-frame images (already scaled), the per-frame delays in ms,
+        and the resolved pose name."""
+        from wzpy.character import CharacterRenderer, category_for_id
+        renderer = _get_character_renderer(app, region)
+        if renderer is None:
+            abort(404, "Character.wz not loaded")
+        resolved_pose = renderer.detect_pose(ids, pose_arg)
+        body_id = next(
+            (e for e in ids if category_for_id(e) == "Body"), "00002000",
+        )
+        delays = renderer.pose_frame_delays(resolved_pose, body_id)
+        try:
+            frames_imgs = renderer.compose_animation(
+                ids, pose=pose_arg, ear_type=ear_type, flip=flip,
+                frames=None,
+            )
+        except Exception as exc:
+            print(f"  [export render error] {exc}", flush=True)
+            abort(500, f"compose_animation failed: {exc}")
+        if scale != 1:
+            frames_imgs = [
+                f.resize((f.width * scale, f.height * scale), Image.NEAREST)
+                for f in frames_imgs
+            ]
+        # Pad delays if missing — same fallback as pose_frame_delays.
+        if len(delays) < len(frames_imgs):
+            delays = list(delays) + [100] * (len(frames_imgs) - len(delays))
+        return frames_imgs, delays, resolved_pose
+
+    @app.route("/api/character/export_frames")
+    def api_character_export_frames() -> Response:
+        """Bundle every frame of the resolved pose as numbered PNGs in
+        a ZIP. Frames are at the SAME canvas dimensions as the cycling
+        preview (union of per-frame bboxes), so a downstream sprite
+        sheet doesn't have to re-align them."""
+        from wzpy.character import DEFAULT_EAR_TYPE, SUPPORTED_POSES
+        ids_param = request.args.get("ids", "").strip()
+        ids = [s for s in ids_param.split(",") if s.strip()]
+        if not ids:
+            abort(400, "missing or empty ?ids=")
+        pose = request.args.get("pose", "").strip() or None
+        if pose is not None and pose not in SUPPORTED_POSES:
+            pose = None
+        ear_type = request.args.get("ear", "").strip() or DEFAULT_EAR_TYPE
+        flip = request.args.get("flip", "").lower() in ("1", "true", "yes")
+        try:
+            scale = max(1, min(8, int(request.args.get("scale", "2"))))
+        except ValueError:
+            scale = 2
+        frames_imgs, delays, resolved_pose = _render_animation_for_export(
+            ids, pose, ear_type, flip, scale,
+        )
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for i, f in enumerate(frames_imgs):
+                png_buf = io.BytesIO()
+                f.save(png_buf, format="PNG")
+                zf.writestr(f"frame_{i:03d}.png", png_buf.getvalue())
+            meta = {
+                "pose": resolved_pose,
+                "scale": scale,
+                "count": len(frames_imgs),
+                "delays_ms": delays,
+            }
+            zf.writestr("metadata.json", json.dumps(meta, indent=2))
+        return Response(buf.getvalue(), mimetype="application/zip", headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition":
+                f'attachment; filename="character_{resolved_pose}_frames.zip"',
+        })
+
+    @app.route("/api/character/export_gif")
+    def api_character_export_gif() -> Response:
+        """Encode the resolved pose as an animated GIF. Stand1 / stand2
+        get the same ``0 → 1 → 2 → 1`` cycle the live preview uses so
+        the loop point is the neutral pose instead of a hard cut from
+        peak inhale back to neutral; other poses just play 0..N-1."""
+        from wzpy.character import DEFAULT_EAR_TYPE, SUPPORTED_POSES
+        ids_param = request.args.get("ids", "").strip()
+        ids = [s for s in ids_param.split(",") if s.strip()]
+        if not ids:
+            abort(400, "missing or empty ?ids=")
+        pose = request.args.get("pose", "").strip() or None
+        if pose is not None and pose not in SUPPORTED_POSES:
+            pose = None
+        ear_type = request.args.get("ear", "").strip() or DEFAULT_EAR_TYPE
+        flip = request.args.get("flip", "").lower() in ("1", "true", "yes")
+        try:
+            scale = max(1, min(8, int(request.args.get("scale", "2"))))
+        except ValueError:
+            scale = 2
+        frames_imgs, delays, resolved_pose = _render_animation_for_export(
+            ids, pose, ear_type, flip, scale,
+        )
+        if not frames_imgs:
+            abort(500, "no frames to encode")
+        # Mirror the JS ``previewCycle`` so the exported GIF loops the
+        # way the on-screen preview does.
+        n = len(frames_imgs)
+        if resolved_pose in ("stand1", "stand2") and n == 3:
+            cycle = [0, 1, 2, 1]
+        else:
+            cycle = list(range(n))
+        cycle_frames = [frames_imgs[i] for i in cycle]
+        cycle_delays = [delays[i] for i in cycle]
+        # GIF only supports 1-bit transparency. Quantize to 255 colors
+        # and reserve palette index 255 for the cleared background, so
+        # alpha < 128 pixels become fully transparent and ``disposal=2``
+        # clears each frame between draws.
+        TRANSPARENT_INDEX = 255
+        palette_frames: List[Image.Image] = []
+        for f in cycle_frames:
+            if f.mode != "RGBA":
+                f = f.convert("RGBA")
+            alpha = f.split()[-1]
+            p = f.convert("RGB").convert(
+                "P", palette=Image.ADAPTIVE, colors=255,
+            )
+            mask = alpha.point(lambda a: 255 if a < 128 else 0).convert("1")
+            p.paste(TRANSPARENT_INDEX, mask)
+            palette_frames.append(p)
+        buf = io.BytesIO()
+        palette_frames[0].save(
+            buf, format="GIF", save_all=True,
+            append_images=palette_frames[1:],
+            duration=cycle_delays, loop=0,
+            disposal=2, transparency=TRANSPARENT_INDEX, optimize=False,
+        )
+        return Response(buf.getvalue(), mimetype="image/gif", headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition":
+                f'attachment; filename="character_{resolved_pose}.gif"',
+        })
+
     @app.route("/api/search")
     def api_search() -> Response:
         """Walk the WZ tree and return nodes whose name contains the

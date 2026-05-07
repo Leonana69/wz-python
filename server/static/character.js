@@ -197,6 +197,8 @@ const $grid = document.getElementById("char-grid");
 const $equipped = document.getElementById("char-equipped");
 const $scale = document.getElementById("char-scale");
 const $export = document.getElementById("char-export");
+const $exportFrames = document.getElementById("char-export-frames");
+const $exportGif = document.getElementById("char-export-gif");
 const $progress = document.getElementById("char-progress");
 
 // Inflight-fetch counter that drives the bottom progress bar. Fetches
@@ -1292,6 +1294,41 @@ $export.addEventListener("click", async () => {
   } catch (err) {
     console.warn("export failed:", err);
   }
+});
+
+// Shared launcher for the two animation exports — same query params
+// as ``compose_animation`` so the bundle matches what the preview is
+// already showing.
+async function _downloadAnimation(endpoint, suffix) {
+  const ids = Object.values(state.equipped).map(s => s.id);
+  if (ids.length === 0) return;
+  const scale = $scale.value || "2";
+  const url =
+    `/api/character/${endpoint}?ids=${ids.join(",")}` +
+    `&pose=${encodeURIComponent(state.pose)}` +
+    `&ear=${encodeURIComponent(state.earType)}` +
+    (state.facing === "right" ? "&flip=1" : "") +
+    `&scale=${scale}`;
+  try {
+    const resp = await trackedFetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = `character_${ids.join("-") || "empty"}_${state.pose}.${suffix}`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+  } catch (err) {
+    console.warn(`${endpoint} failed:`, err);
+  }
+}
+
+$exportFrames.addEventListener("click", () => {
+  _downloadAnimation("export_frames", "zip");
+});
+$exportGif.addEventListener("click", () => {
+  _downloadAnimation("export_gif", "gif");
 });
 
 // ── boot ──────────────────────────────────────────────────────────
