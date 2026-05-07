@@ -1223,9 +1223,16 @@ async function refreshCompose() {
     _previewDelays = Array.isArray(data.delays) && data.delays.length
       ? data.delays
       : Array.from({ length: _previewFrameUrls.length }, () => 500);
-    _previewCycle = previewCycle(
-      data.resolved_pose || state.pose, _previewFrameUrls.length,
-    );
+    // ``play_in_order`` (set by the timeline-aware server endpoint)
+    // means the frames already encode the playback sequence — just
+    // iterate 0..N-1 with the matching delay. The legacy fallback
+    // applies the breathing-loop ``[0,1,2,1]`` cycle for stand poses
+    // here on the client.
+    _previewCycle = data.play_in_order
+      ? Array.from({ length: _previewFrameUrls.length }, (_, i) => i)
+      : previewCycle(
+          data.resolved_pose || state.pose, _previewFrameUrls.length,
+        );
     _previewCycleIdx = 0;
     $img.src = _previewFrameUrls[_previewCycle[0]];
     // Single-frame poses (prone / sit / jump / dead) don't animate;

@@ -1180,6 +1180,51 @@ class CharacterRenderer:
             out.append(ms if ms > 0 else 100)
         return out
 
+    def effect_frame_delays(
+        self, equip_id: str, pose: str,
+    ) -> List[int]:
+        """Per-frame delays (ms) for an equip's ItemEff overlay in the
+        given pose. Returns ``[]`` when no effect is authored or the
+        pose subtree falls back to ``default``-only with no delays.
+        Frames missing an explicit ``delay`` default to 100 ms — same
+        convention as :meth:`pose_frame_delays`. The renderer's
+        timeline builder uses this to play the effect at its native
+        rate alongside a body that may cycle slower."""
+        if self.effects is None:
+            return []
+        try:
+            eff_node = self.effects.find(equip_id)
+        except Exception:
+            return []
+        if not isinstance(eff_node, WzSubProperty):
+            return []
+        pose_tree = eff_node.get(pose)
+        pose_tree = _resolve_uol(pose_tree) if isinstance(pose_tree, WzUolProperty) else pose_tree
+        if not isinstance(pose_tree, WzSubProperty):
+            pose_tree = eff_node.get("default")
+            pose_tree = _resolve_uol(pose_tree) if isinstance(pose_tree, WzUolProperty) else pose_tree
+        if not isinstance(pose_tree, WzSubProperty):
+            return []
+        frames = sorted(
+            (c for c in pose_tree.children() if c.name.isdigit()),
+            key=lambda c: int(c.name),
+        )
+        out: List[int] = []
+        for fr in frames:
+            # Frame entries are usually canvases (which support .child)
+            # but pose-tree entries can be UOLs into ``default``; either
+            # way, try to read the linked frame's ``delay``.
+            target = _resolve_uol(fr) if isinstance(fr, WzUolProperty) else fr
+            d = target.child("delay") if hasattr(target, "child") else None
+            d = _resolve_uol(d) if isinstance(d, WzUolProperty) else d
+            v = getattr(d, "value", None) if d is not None else None
+            try:
+                ms = int(v) if v is not None else 0
+            except (TypeError, ValueError):
+                ms = 0
+            out.append(ms if ms > 0 else 100)
+        return out
+
     def _cap_hair_filter(
         self, equip_ids: List[str],
     ) -> Tuple[bool, frozenset, frozenset]:
@@ -1297,6 +1342,227 @@ class CharacterRenderer:
         if not placements:
             return Image.new("RGBA", (1, 1), (0, 0, 0, 0))
         return self._render_placements(placements, flip=flip, bbox=bbox)
+
+    def compose_animation_timeline(
+        self, equip_ids: List[str], pose: Optional[str] = None,
+        ear_type: str = DEFAULT_EAR_TYPE,
+        flip: bool = False,
+        max_total_ms: int = 6000,
+    ) -> Tuple[List[Image.Image], List[int], List[Tuple[int, Dict[str, int]]]]:
+        """Render a full animation cycle that respects each ItemEff
+        overlay's authored frame rate independently of the body's.
+
+        Returns ``(images, delays_ms, steps)`` where ``images[i]`` is
+        the composite at the i-th playback step, ``delays_ms[i]`` is
+        how long that step is on screen, and ``steps[i]`` is the
+        ``(body_frame, {equip_id: effect_frame})`` snapshot used to
+        render it (mostly useful for diagnostics / debugging the
+        timeline).
+
+        Algorithm:
+
+          1. Compute the body's ordered playback sequence — for stand
+             poses we emit ``[0, 1, 2, 1]`` so the breathing loop's
+             return path passes through the neutral frame instead of
+             hard-cutting from peak inhale back to neutral.
+          2. Compute every effect's authored cycle (per-frame
+             durations from ``ItemEff/.../delay``, default 100 ms).
+          3. Build a timeline that places each transition (body
+             change, effect change) on a shared time axis from 0 up
+             to LCM(body_cycle, *effect_cycles) — capped at
+             ``max_total_ms`` so a body cycle of 720 ms paired with a
+             nearly-coprime effect cycle doesn't generate hundreds of
+             frames.
+          4. For each interval between consecutive transitions, pick
+             the body frame and per-equip effect frame active at that
+             moment, render the composite, and record the duration.
+        """
+        from math import gcd
+        pose = self.detect_pose(equip_ids, pose)
+
+        # Body cycle ordering. ``stand1`` / ``stand2`` use the
+        # 0→1→2→1 breathing return so the loop doesn't snap; other
+        # poses just play in order.
+        body_id = next(
+            (e for e in equip_ids if category_for_id(e) == "Body"),
+            "00002000",
+        )
+        body_delays = self.pose_frame_delays(pose, body_id) or [100]
+        n_body = len(body_delays)
+        if pose in ("stand1", "stand2") and n_body == 3:
+            body_seq = [0, 1, 2, 1]
+        else:
+            body_seq = list(range(n_body))
+        body_cycle_ms = sum(body_delays[s] for s in body_seq)
+
+        # Per-equip effect cycle.
+        effect_cycles: Dict[str, List[int]] = {}
+        for eid in equip_ids:
+            delays = self.effect_frame_delays(eid, pose)
+            if delays:
+                effect_cycles[eid] = delays
+
+        # If nothing has an effect cycle, fall back to the simpler
+        # body-only path so we don't generate spurious extra frames.
+        if not effect_cycles:
+            imgs = self.compose_animation(
+                equip_ids, pose=pose, ear_type=ear_type, flip=flip,
+            )
+            steps = [(s, {}) for s in body_seq]
+            # Stretch / fold images to match body_seq (compose_animation
+            # already returns one image per body frame; we map by index).
+            timeline_imgs = [imgs[s] if s < len(imgs) else imgs[-1] for s in body_seq]
+            timeline_delays = [body_delays[s] for s in body_seq]
+            return timeline_imgs, timeline_delays, steps
+
+        def _lcm(a: int, b: int) -> int:
+            return a * b // gcd(a, b) if a and b else max(a, b)
+
+        total_ms = body_cycle_ms
+        for delays in effect_cycles.values():
+            total_ms = _lcm(total_ms, sum(delays))
+        if max_total_ms and total_ms > max_total_ms:
+            total_ms = max_total_ms
+
+        # Body active-interval table: (start, end, body_frame) over
+        # one body_cycle, repeated to fill total_ms.
+        body_table: List[Tuple[int, int, int]] = []
+        t = 0
+        for s in body_seq:
+            body_table.append((t, t + body_delays[s], s))
+            t += body_delays[s]
+        # Same for each effect — over its own cycle.
+        effect_tables: Dict[str, List[Tuple[int, int, int]]] = {}
+        for eid, delays in effect_cycles.items():
+            tbl: List[Tuple[int, int, int]] = []
+            t = 0
+            for i, d in enumerate(delays):
+                tbl.append((t, t + d, i))
+                t += d
+            effect_tables[eid] = tbl
+
+        # Collect transition timestamps in [0, total_ms).
+        ts: set = {0, total_ms}
+        for entry in body_table:
+            t = entry[0]
+            while t < total_ms:
+                ts.add(t)
+                t += body_cycle_ms
+        for eid, tbl in effect_tables.items():
+            ec = sum(effect_cycles[eid])
+            for entry in tbl:
+                t = entry[0]
+                while t < total_ms:
+                    ts.add(t)
+                    t += ec
+        sorted_ts = sorted(ts)
+
+        def _frame_at(table: List[Tuple[int, int, int]], cycle: int, when: int) -> int:
+            wrapped = when % cycle if cycle else 0
+            for s, e, f in table:
+                if s <= wrapped < e:
+                    return f
+            return table[-1][2] if table else 0
+
+        steps: List[Tuple[int, Dict[str, int]]] = []
+        delays_out: List[int] = []
+        per_frame_placements: List[List[_Placement]] = []
+        hide_hair_full, hide_hair_set, cap_vslot_tokens = \
+            self._cap_hair_filter(equip_ids)
+        stabilize = pose in ("stand1", "stand2")
+        frozen_anchors: Optional[Dict[str, Tuple[int, int]]] = None
+        head_derived = frozenset({"brow", "neck", "handMove"})
+        frame0_canvases: Dict[Tuple[str, str], Any] = {}
+        body_anchor_0: Optional[Tuple[int, int]] = None
+
+        def _body_anchor_of(pls: List[_Placement]) -> Optional[Tuple[int, int]]:
+            for pl in pls:
+                if pl.category == "Body" and pl.name == "body" \
+                        and pl.top_left is not None:
+                    return (pl.top_left[0] + pl.pixel_canvas.width,
+                            pl.top_left[1])
+            return None
+
+        for i in range(len(sorted_ts) - 1):
+            t = sorted_ts[i]
+            duration = sorted_ts[i + 1] - t
+            if duration <= 0:
+                continue
+            body_frame = _frame_at(body_table, body_cycle_ms, t)
+            eff_overrides: Dict[str, int] = {}
+            for eid, tbl in effect_tables.items():
+                eff_overrides[eid] = _frame_at(
+                    tbl, sum(effect_cycles[eid]), t,
+                )
+            placements, anchors = self._build_placements(
+                equip_ids, pose, ear_type,
+                hide_hair_full, hide_hair_set, cap_vslot_tokens, body_frame,
+                frozen_anchors=frozen_anchors,
+                return_anchors=True,
+                stabilize_effects=stabilize,
+                effect_frame_overrides=eff_overrides,
+            )
+            # Stand-pose stabilization (the breathing-anchor +
+            # body-delta translation pass) applies the same way per
+            # timeline step as it does per body-frame in the
+            # non-timeline path.
+            if stabilize:
+                if frozen_anchors is None:
+                    frozen_anchors = anchors
+                    for pl in placements:
+                        frame0_canvases[(pl.equip_id, pl.name)] = pl.pixel_canvas
+                    body_anchor_0 = _body_anchor_of(placements)
+                else:
+                    body_anchor_now = _body_anchor_of(placements)
+                    dx = dy = 0
+                    if body_anchor_0 is not None and body_anchor_now is not None:
+                        dx = body_anchor_0[0] - body_anchor_now[0]
+                        dy = body_anchor_0[1] - body_anchor_now[1]
+                    for pl in placements:
+                        if pl.top_left is None:
+                            continue
+                        key = (pl.equip_id, pl.name)
+                        f0_canvas = frame0_canvases.get(key)
+                        anchor_name = pl.anchor_override or _determine_anchor(
+                            pl.canvas, pl.category,
+                        )
+                        if f0_canvas is pl.pixel_canvas \
+                                and anchor_name in head_derived:
+                            continue
+                        if anchor_name in head_derived:
+                            continue
+                        if dx or dy:
+                            pl.top_left = (
+                                pl.top_left[0] + dx,
+                                pl.top_left[1] + dy,
+                            )
+            per_frame_placements.append(placements)
+            steps.append((body_frame, eff_overrides))
+            delays_out.append(duration)
+
+        all_pls = [p for fr in per_frame_placements for p in fr if p.top_left is not None]
+        if not all_pls:
+            empty = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+            return [empty for _ in delays_out], delays_out, steps
+
+        def _w(p): return p.width_override if p.width_override is not None else p.pixel_canvas.width
+        def _h(p): return p.height_override if p.height_override is not None else p.pixel_canvas.height
+        bbox = (
+            min(p.top_left[0] for p in all_pls),
+            min(p.top_left[1] for p in all_pls),
+            max(p.top_left[0] + _w(p) for p in all_pls),
+            max(p.top_left[1] + _h(p) for p in all_pls),
+        )
+        images = [
+            self._render_placements(pls, flip=flip, bbox=bbox)
+            if pls else Image.new(
+                "RGBA",
+                (max(1, bbox[2] - bbox[0]), max(1, bbox[3] - bbox[1])),
+                (0, 0, 0, 0),
+            )
+            for pls in per_frame_placements
+        ]
+        return images, delays_out, steps
 
     def compose_animation(
         self, equip_ids: List[str], pose: Optional[str] = None,
@@ -1517,6 +1783,7 @@ class CharacterRenderer:
         frame: int,
         world_anchors: Dict[str, Tuple[int, int]],
         pin_origin_to_frame_0: bool = False,
+        effect_frame_overrides: Optional[Dict[str, int]] = None,
     ) -> List[_Placement]:
         """Build :class:`_Placement` entries for every equipped item
         whose ID has an authored overlay under ``ItemEff.img``.
@@ -1562,7 +1829,14 @@ class CharacterRenderer:
             )
             if not frame_children:
                 continue
-            idx = frame % len(frame_children)
+            # ``effect_frame_overrides`` lets the timeline builder pick
+            # the per-equip effect frame independent of the body's
+            # frame index — so an effect with a 100 ms cycle plays at
+            # its own rate against a body cycling at 500 ms.
+            if effect_frame_overrides is not None and eid in effect_frame_overrides:
+                idx = effect_frame_overrides[eid] % len(frame_children)
+            else:
+                idx = frame % len(frame_children)
             target = frame_children[idx]
             # Pose-tree entries are usually UOLs into ``default``.
             if isinstance(target, WzUolProperty):
@@ -1743,6 +2017,7 @@ class CharacterRenderer:
         return_anchors: bool = False,
         body_frame: Optional[int] = None,
         stabilize_effects: bool = False,
+        effect_frame_overrides: Optional[Dict[str, int]] = None,
     ):
         """Collect, anchor, and z-sort placements for a single frame.
 
@@ -1868,6 +2143,7 @@ class CharacterRenderer:
             placements.extend(self._build_effect_placements(
                 equip_ids, pose, frame, world_anchors,
                 pin_origin_to_frame_0=stabilize_effects,
+                effect_frame_overrides=effect_frame_overrides,
             ))
 
         zmap_size = len(self._zmap)

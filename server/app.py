@@ -1459,18 +1459,17 @@ def create_app(
         except ValueError:
             scale = 2
         resolved_pose = renderer.detect_pose(ids, pose)
-        body_id = next(
-            (e for e in ids if category_for_id(e) == "Body"), "00002000",
-        )
-        delays = renderer.pose_frame_delays(resolved_pose, body_id)
         try:
-            # Pass ``None`` so the renderer auto-discovers the frame
-            # count from the body's pose subtree — same source of
-            # truth as ``delays`` above so the two arrays stay
-            # length-matched.
-            frames_imgs = renderer.compose_animation(
+            # Always go through the timeline path: it builds a single
+            # cycle that respects each ItemEff overlay's own frame
+            # rate (effects often cycle at 100 ms while the body's
+            # stand1 ticks at 500 ms). When no equipped item ships an
+            # effect the timeline degrades cleanly to the body's own
+            # ``[0, 1, 2, 1]`` breathing sequence (or the natural
+            # ``[0..N-1]`` for action poses), so the no-effect case
+            # is unchanged.
+            frames_imgs, frame_delays, _steps = renderer.compose_animation_timeline(
                 ids, pose=pose, ear_type=ear_type, flip=flip,
-                frames=None,
             )
         except Exception as exc:
             print(f"  [compose_animation error] {exc}", flush=True)
@@ -1488,7 +1487,14 @@ def create_app(
         return jsonify({
             "frames": encoded,
             "count": len(encoded),
-            "delays": delays,
+            "delays": frame_delays,
+            # ``play_in_order`` tells the client the frames already
+            # encode the playback sequence (including any
+            # breathing-loop expansion) — just iterate 0..N-1 with
+            # the matching delay. Without this the client would apply
+            # its own ``[0,1,2,1]`` cycle on top and double-count the
+            # breathing return.
+            "play_in_order": True,
             "width": frames_imgs[0].width if frames_imgs else 0,
             "height": frames_imgs[0].height if frames_imgs else 0,
             "resolved_pose": resolved_pose,
@@ -1500,20 +1506,18 @@ def create_app(
     ) -> Tuple[List[Image.Image], List[int], str]:
         """Shared body for the ZIP / GIF export endpoints. Returns the
         per-frame images (already scaled), the per-frame delays in ms,
-        and the resolved pose name."""
-        from wzpy.character import CharacterRenderer, category_for_id
+        and the resolved pose name. Uses the timeline path so an
+        equipped item with a fast effect cycle (e.g. 100 ms ember
+        flicker) plays at its native rate inside the exported GIF /
+        sprite-sheet ZIP, matching what the live preview shows."""
+        from wzpy.character import CharacterRenderer
         renderer = _get_character_renderer(app, region)
         if renderer is None:
             abort(404, "Character.wz not loaded")
         resolved_pose = renderer.detect_pose(ids, pose_arg)
-        body_id = next(
-            (e for e in ids if category_for_id(e) == "Body"), "00002000",
-        )
-        delays = renderer.pose_frame_delays(resolved_pose, body_id)
         try:
-            frames_imgs = renderer.compose_animation(
+            frames_imgs, delays, _steps = renderer.compose_animation_timeline(
                 ids, pose=pose_arg, ear_type=ear_type, flip=flip,
-                frames=None,
             )
         except Exception as exc:
             print(f"  [export render error] {exc}", flush=True)
@@ -1595,15 +1599,11 @@ def create_app(
         )
         if not frames_imgs:
             abort(500, "no frames to encode")
-        # Mirror the JS ``previewCycle`` so the exported GIF loops the
-        # way the on-screen preview does.
-        n = len(frames_imgs)
-        if resolved_pose in ("stand1", "stand2") and n == 3:
-            cycle = [0, 1, 2, 1]
-        else:
-            cycle = list(range(n))
-        cycle_frames = [frames_imgs[i] for i in cycle]
-        cycle_delays = [delays[i] for i in cycle]
+        # The timeline path already returns frames in playback order
+        # (stand-pose breathing loop expanded, effect frames cycled at
+        # native rate), so we just pass them through.
+        cycle_frames = frames_imgs
+        cycle_delays = delays
         # GIF only supports 1-bit transparency. Quantize to 255 colors
         # and reserve palette index 255 for the cleared background, so
         # alpha < 128 pixels become fully transparent and ``disposal=2``
