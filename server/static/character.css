@@ -89,17 +89,50 @@
 }
 .char-controls button:hover { background: #4d6592; }
 
-/* Save PNG sits on its own row beneath Scale / Pose / Ear and
- * spans the full width of the controls panel. ``flex: 1`` overrides
- * the default ``margin-left: auto`` from ``.char-controls button``
- * so the button fills instead of just hugging the right edge. */
+/* Export action row (Save PNG / Save Frames / Save GIF). Sits on
+ * its own row beneath Scale / Pose / Ear and spans the full width
+ * of the controls panel. ``flex: 1`` overrides the default
+ * ``margin-left: auto`` from ``.char-controls button`` so the
+ * buttons fill the row evenly. */
 .char-controls-actions {
   align-items: stretch;
+  gap: 8px;
 }
 .char-controls-actions button {
   flex: 1;
   margin-left: 0;
-  padding: 6px 12px;
+  padding: 9px 10px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #4a5f8c 0%, #364866 100%);
+  border: 1px solid #1a1b1d;
+  color: #f0f3f7;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  transition: background 0.15s ease, box-shadow 0.15s ease,
+              transform 0.05s ease;
+}
+.char-controls-actions button:hover {
+  background: linear-gradient(180deg, #5a73a4 0%, #44587a 100%);
+  box-shadow:
+    0 2px 6px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+.char-controls-actions button:active {
+  transform: translateY(1px);
+  background: linear-gradient(180deg, #364866 0%, #2c3a52 100%);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.3),
+    inset 0 2px 3px rgba(0, 0, 0, 0.25);
+}
+.char-controls-actions button:focus-visible {
+  outline: 2px solid #7aa3d8;
+  outline-offset: 1px;
 }
 
 /* Pose dropdown — lists every pose the equipped Body authors,
