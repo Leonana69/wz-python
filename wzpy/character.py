@@ -617,6 +617,11 @@ class _Placement:
     map_anchors: Dict[str, Tuple[int, int]]
     z_slot: Optional[str]
     top_left: Optional[Tuple[int, int]] = None
+    # ItemEff overlays carry an integer z that doesn't map to a zmap
+    # slot name. ``z_for`` reads this when ``z_slot`` is None and the
+    # category is "Effect" — positive z lands AFTER all character
+    # parts, negative z BEFORE the body.
+    extra_z: Optional[int] = None
 
 
 def _is_cash_weapon(equip_id: str) -> bool:
@@ -922,10 +927,17 @@ def _determine_anchor(canvas: WzCanvasProperty, category: str) -> str:
 class CharacterRenderer:
     """Compose static MapleStory character frames from a Character.wz."""
 
-    def __init__(self, wz: WzFile, region: str = "GMS"):
+    def __init__(
+        self, wz: WzFile, region: str = "GMS",
+        effects: Optional[Any] = None,
+    ):
         self.wz = wz
         self.region = region
         self._zmap: Tuple[str, ...] = self._load_zmap()
+        # Optional ``EffectLookup`` (wzpy.effect_lookup) for ItemEff
+        # overlays. ``None`` disables overlay rendering, which is the
+        # default when no Effect sibling is found next to Character.wz.
+        self.effects = effects
 
     # ── tree traversal helpers ──────────────────────────────────────────
     def _load_zmap(self) -> Tuple[str, ...]:
@@ -1451,6 +1463,118 @@ class CharacterRenderer:
             for pls in per_frame
         ]
 
+    # Map ``ItemEff/effect/<pose>/pos`` (integer or string-int) to
+    # the world_anchors key the effect canvas anchors against. pos=1
+    # is far and away the most common (head-anchored cap effects);
+    # pos=0 is body-center; pos=-1 falls through to body-center too.
+    # pos=2 / pos=3 are rare and don't have a documented meaning here
+    # — fall back to navel until we find counter-examples.
+    _EFFECT_POS_ANCHOR: Dict[int, str] = {
+        -1: "navel",
+        0: "navel",
+        1: "brow",
+        2: "navel",
+        3: "navel",
+    }
+
+    def _build_effect_placements(
+        self,
+        equip_ids: List[str],
+        pose: str,
+        frame: int,
+        world_anchors: Dict[str, Tuple[int, int]],
+    ) -> List[_Placement]:
+        """Build :class:`_Placement` entries for every equipped item
+        whose ID has an authored overlay under ``ItemEff.img``.
+
+        Each ``effect`` subtree ships per-pose frame trees plus a
+        ``default`` (used when the requested pose isn't authored).
+        Most pose subtrees UOL into ``default`` so we just resolve
+        the chain. The frame index is taken modulo the effect's own
+        frame count — the effect's tempo isn't synced to the body's,
+        so this is a best-effort cycling; effects authored to match
+        the body's frame count will line up exactly.
+        """
+        out: List[_Placement] = []
+        if self.effects is None:
+            return out
+        for eid in equip_ids:
+            try:
+                eff_node = self.effects.find(eid)
+            except Exception:
+                continue
+            if not isinstance(eff_node, WzSubProperty):
+                continue
+            # Pick the pose subtree, falling back to ``default``.
+            pose_tree = eff_node.get(pose)
+            pose_tree = _resolve_uol(pose_tree) if isinstance(pose_tree, WzUolProperty) else pose_tree
+            if not isinstance(pose_tree, WzSubProperty):
+                pose_tree = eff_node.get("default")
+                pose_tree = _resolve_uol(pose_tree) if isinstance(pose_tree, WzUolProperty) else pose_tree
+            if not isinstance(pose_tree, WzSubProperty):
+                continue
+            # Collect numeric frame children, ordered by index.
+            frame_children = sorted(
+                (c for c in pose_tree.children() if c.name.isdigit()),
+                key=lambda c: int(c.name),
+            )
+            if not frame_children:
+                continue
+            idx = frame % len(frame_children)
+            target = frame_children[idx]
+            # Pose-tree entries are usually UOLs into ``default``.
+            if isinstance(target, WzUolProperty):
+                target = _resolve_uol(target)
+            if not isinstance(target, WzCanvasProperty):
+                continue
+            # Resolve the placeholder's _outlink to the real pixel canvas.
+            try:
+                pixel_canvas = resolve_canvas_link(target, self.effects.root)
+            except Exception:
+                pixel_canvas = target
+            if pixel_canvas is None or not pixel_canvas.has_pixels():
+                continue
+            # Pose-tree pos picks the world anchor; integer or string-int.
+            pos_node = pose_tree.get("pos")
+            pos_node = _resolve_uol(pos_node) if isinstance(pos_node, WzUolProperty) else pos_node
+            pos_val: Optional[int] = None
+            if pos_node is not None:
+                try:
+                    pos_val = int(getattr(pos_node, "value", None))
+                except (TypeError, ValueError):
+                    pos_val = None
+            anchor_name = self._EFFECT_POS_ANCHOR.get(pos_val, "navel")
+            anchor_world = world_anchors.get(anchor_name) or world_anchors.get("navel") or (0, 0)
+            origin = _origin(target)
+            top_left = (anchor_world[0] - origin[0], anchor_world[1] - origin[1])
+            # Z handling: prefer the pose-tree's z (e.g. default/z = 2),
+            # fall back to the per-frame z. Skip the top-level effect/z
+            # (its meaning is meta, not a render layer).
+            z_node = pose_tree.get("z")
+            z_node = _resolve_uol(z_node) if isinstance(z_node, WzUolProperty) else z_node
+            z_int: Optional[int] = None
+            if z_node is not None:
+                try:
+                    z_int = int(getattr(z_node, "value", None))
+                except (TypeError, ValueError):
+                    z_int = None
+            if z_int is None:
+                fz_node = target.child("z")
+                fz_node = _resolve_uol(fz_node) if isinstance(fz_node, WzUolProperty) else fz_node
+                if fz_node is not None:
+                    try:
+                        z_int = int(getattr(fz_node, "value", None))
+                    except (TypeError, ValueError):
+                        z_int = None
+            out.append(_Placement(
+                equip_id=eid, category="Effect",
+                name=f"effect/{pose_tree.name}/{target.name}",
+                canvas=target, pixel_canvas=pixel_canvas,
+                origin=origin, map_anchors={},
+                z_slot=None, top_left=top_left, extra_z=z_int,
+            ))
+        return out
+
     def _build_placements(
         self,
         equip_ids: List[str], pose: str, ear_type: str,
@@ -1562,7 +1686,28 @@ class CharacterRenderer:
             if frozen_anchors is None:
                 self._register_anchors(pl, world_anchors, overwrite=False)
 
+        # ItemEff overlays: composite per-equip effects (e.g. cap
+        # 01004759 ember-flames) on top of the character. Anchored
+        # off the world_anchors map populated above; world_anchors
+        # is final at this point because all character placements
+        # have already registered their map points.
+        if self.effects is not None:
+            placements.extend(self._build_effect_placements(
+                equip_ids, pose, frame, world_anchors,
+            ))
+
+        zmap_size = len(self._zmap)
+
         def z_for(pl: _Placement) -> int:
+            # Effect overlays carry an integer z (no zmap slot name).
+            # Positive z lands AFTER all character parts (front),
+            # negative z BEFORE the body (back). Within each band we
+            # add the z value directly so authored ordering is kept.
+            if pl.category == "Effect":
+                ez = pl.extra_z if pl.extra_z is not None else 0
+                if ez >= 0:
+                    return zmap_size + ez
+                return ez  # negative — sorts before any zmap index
             slot = pl.z_slot
             if slot is None:
                 return self._z_index(slot)

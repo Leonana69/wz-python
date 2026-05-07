@@ -508,7 +508,9 @@ def _get_character_renderer(app: "Flask", region: str):
     wz = app.config["WZ"]
     if not _character_supported(wz):
         return None
-    renderer = CharacterRenderer(wz, region=region)
+    renderer = CharacterRenderer(
+        wz, region=region, effects=app.config.get("CHARACTER_EFFECTS"),
+    )
     app.config["CHARACTER_RENDERER"] = renderer
     return renderer
 
@@ -569,6 +571,43 @@ def _auto_detect_region(wz_path: str, version: Optional[int]) -> str:
             f"Pass region=GMS/EMS/BMS explicitly."
         )
     return best[0]
+
+
+def _try_load_character_effects(
+    wz_path: str, region: str, version: Optional[int],
+):
+    """Auto-discover and load ``Effect.wz`` (or a hierarchical
+    ``Effect/`` folder) sibling of the loaded Character pack.
+
+    The Effect pack ships ``ItemEff.img/<id>`` per equip with an
+    authored overlay (e.g. cap 01004759's ember flames). Returns an
+    :class:`EffectLookup` on success, or ``None`` when no sibling
+    is found or it doesn't load cleanly — callers fall back to no
+    overlay.
+    """
+    from wzpy.effect_lookup import EffectLookup
+    base = os.path.basename(os.path.abspath(wz_path).rstrip(os.sep)).lower()
+    if not (base.startswith("character") or base == "character.wz"):
+        return None
+    parent = os.path.dirname(os.path.abspath(wz_path).rstrip(os.sep))
+    if os.path.isfile(wz_path):
+        # If wz_path was a .wz file (e.g. ``data/Character.wz``), the
+        # sibling ``data/`` is its parent.
+        parent = os.path.dirname(os.path.abspath(wz_path))
+    candidates = [
+        os.path.join(parent, "Effect"),
+        os.path.join(parent, "Effect.wz"),
+    ]
+    for cand in candidates:
+        if not os.path.exists(cand):
+            continue
+        el = EffectLookup.open(cand, region=region, version=version)
+        if el is not None:
+            print(f"  loaded Effect lookup from {cand}", flush=True)
+            return el
+        else:
+            print(f"  Effect at {cand} didn't validate; skipping", flush=True)
+    return None
 
 
 def _try_load_character_strings(
@@ -678,6 +717,14 @@ def create_app(wz_path: Optional[str] = None, region: str = "auto", version: Opt
             # (missing file, unreadable, wrong region) leaves
             # ``CHARACTER_STRINGS`` as None and the UI falls back to IDs.
             app.config["CHARACTER_STRINGS"] = _try_load_character_strings(
+                path, r, req_version,
+            )
+            # Same for ``Effect.wz`` / ``Effect/`` — gives the renderer
+            # access to ``ItemEff.img/<id>`` overlays so equipped items
+            # with authored effects (e.g. cap 01004759 ember-flames)
+            # composite on top of the character. ``None`` here just
+            # means "no overlay layer".
+            app.config["CHARACTER_EFFECTS"] = _try_load_character_effects(
                 path, r, req_version,
             )
             if old is not None and hasattr(old, "close"):
