@@ -55,7 +55,19 @@ $form.addEventListener("submit", async (ev) => {
       "info",
       `Loaded ${data.path} (${data.region}, v${data.version}). Redirecting…`,
     );
-    const dest = window._WZPY_REDIRECT_AFTER_LOAD || "/";
+    // Destination preference:
+    //   1. Explicit ``_WZPY_REDIRECT_AFTER_LOAD`` (set when the user
+    //      hit /character with no WZ loaded — honor it if the new WZ
+    //      can serve that page, else fall back to /).
+    //   2. Character packs land on /character by default — that's the
+    //      page users open them for, and it saves a click.
+    //   3. Everything else lands on the tree browser.
+    let dest = window._WZPY_REDIRECT_AFTER_LOAD;
+    if (dest === "/character" && !data.has_character) {
+      dest = "/";
+    } else if (!dest) {
+      dest = data.has_character ? "/character" : "/";
+    }
     window.location.href = dest;
   } catch (err) {
     setStatus("error", `Network error: ${err.message || err}`);

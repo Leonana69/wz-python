@@ -465,7 +465,7 @@ def _build_image_zip(node, layout: str, region: str) -> bytes:
             count += 1
     return buf.getvalue() if count else b""
 
-from flask import Flask, Response, abort, jsonify, render_template, request
+from flask import Flask, Response, abort, jsonify, redirect, render_template, request, url_for
 from PIL import Image, ImageDraw
 
 from wzpy import (
@@ -857,7 +857,7 @@ def create_app(wz_path: Optional[str] = None, region: str = "auto", version: Opt
     # Every other request short-circuits with 503 below until the user
     # picks a file via the welcome dialog.
     _NO_WZ_OK_ENDPOINTS = frozenset({
-        "index", "open_file_page", "character_builder",
+        "index", "tree_browser", "open_file_page", "character_builder",
         "api_load", "api_load_status", "api_load_browse",
     })
 
@@ -878,11 +878,30 @@ def create_app(wz_path: Optional[str] = None, region: str = "auto", version: Opt
 
     # ── routes ───────────────────────────────────────────────────────
     @app.route("/")
-    def index() -> str:
+    def index():
         if wz is None:
             return render_template("welcome.html")
-        # ``has_character`` toggles a "Character Builder" link in the header
-        # — the builder only makes sense when a Character.wz is loaded.
+        # Character packs land on the builder by default — that's the
+        # workflow users open them for. The tree browser is always one
+        # click away via the ``← Tree browser`` link in the builder
+        # header, and direct navigation to ``/tree`` is also accepted.
+        if _character_supported(wz):
+            return redirect(url_for("character_builder"))
+        return render_template(
+            "index.html",
+            wz_name=wz_path,
+            wz_version=wz.version,
+            wz_region=region,
+            has_character=False,
+        )
+
+    @app.route("/tree")
+    def tree_browser() -> str:
+        """Force the tree-browser view even for Character packs (which
+        ``/`` redirects to the builder by default). Used by the
+        ``← Tree browser`` link from /character."""
+        if wz is None:
+            return render_template("welcome.html", redirect_after_load="/tree")
         return render_template(
             "index.html",
             wz_name=wz_path,
