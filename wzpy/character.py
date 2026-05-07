@@ -1511,6 +1511,15 @@ class CharacterRenderer:
         if not placements:
             return (placements, {}) if return_anchors else placements
 
+        # Pre-compute cape presence for the ``hairBelowBody`` remap in
+        # ``z_for``: long-hair canvases that drape past the body land
+        # at zmap 40 (right above ``capeBelowBody`` at 21) by default,
+        # which puts the back hair IN FRONT of a draping cape and
+        # hides most of the cape under the hair. When a cape is also
+        # in the equip list, demote those long-hair canvases below
+        # the cape so the cape covers them.
+        has_cape = any(p.category == "Cape" for p in placements)
+
         def order_key(pl: _Placement) -> Tuple[int, int]:
             if pl.category == "Body":
                 return (0, 0 if pl.name == "body" else 1)
@@ -1643,6 +1652,20 @@ class CharacterRenderer:
             elif pose == "stand2" and pl.category == "Weapon" \
                     and slot == "weaponBelowArm":
                 slot = "weaponOverArm"
+            # Long hair (e.g. 00041940) authors the back-hanging
+            # canvas with z='hairBelowBody' (zmap 40 — right before
+            # ``body`` at 41 so the hair is BEHIND the body but ON
+            # TOP OF every other back-cluster layer). When a cape is
+            # also equipped (``capeBelowBody`` at 21), that back hair
+            # ends up IN FRONT of the cape and hides most of it.
+            # Demote to ``backHair`` (15) — deepest back-cluster slot
+            # — so the cape drapes naturally over the hair from the
+            # waist down. Front hair (``hair`` / ``hairOverHead``)
+            # stays where authored; only the body-trailing back hair
+            # moves.
+            if has_cape and pl.category == "Hair" \
+                    and slot == "hairBelowBody":
+                slot = "backHair"
             rule = _OVER_CAP_REMAP.get(slot)
             if rule is None:
                 return self._z_index(slot)
