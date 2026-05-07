@@ -631,6 +631,18 @@ class _Placement:
     # let ``_determine_anchor`` derive the anchor from the canvas's
     # ``map`` instead.
     anchor_override: Optional[str] = None
+    # Pre-decoded RGBA Image. When set, ``_render_placements`` uses
+    # it directly instead of calling ``decode_canvas(pixel_canvas)``
+    # — needed for stabilized stand-pose ItemEff overlays where we
+    # composite each frame's content into a uniform-size canvas to
+    # eliminate per-frame bbox extent variation.
+    decoded_override: Optional[Any] = None
+    # Width/height the bbox calculation should use when the placement
+    # carries a decoded_override whose dimensions differ from the
+    # source pixel_canvas. Falls back to pixel_canvas.width/height
+    # when None.
+    width_override: Optional[int] = None
+    height_override: Optional[int] = None
 
 
 def _is_cash_weapon(equip_id: str) -> bool:
@@ -1394,6 +1406,7 @@ class CharacterRenderer:
                 hide_hair_full, hide_hair_set, cap_vslot_tokens, f,
                 frozen_anchors=frozen_anchors,
                 return_anchors=True,
+                stabilize_effects=stabilize,
             )
             if not stabilize:
                 # Action poses: leave every frame's anchors alone so
@@ -1465,11 +1478,13 @@ class CharacterRenderer:
         all_pls = [p for fr in per_frame for p in fr if p.top_left is not None]
         if not all_pls:
             return [Image.new("RGBA", (1, 1), (0, 0, 0, 0)) for _ in frames]
+        def _w(p): return p.width_override if p.width_override is not None else p.pixel_canvas.width
+        def _h(p): return p.height_override if p.height_override is not None else p.pixel_canvas.height
         bbox = (
             min(p.top_left[0] for p in all_pls),
             min(p.top_left[1] for p in all_pls),
-            max(p.top_left[0] + p.pixel_canvas.width for p in all_pls),
-            max(p.top_left[1] + p.pixel_canvas.height for p in all_pls),
+            max(p.top_left[0] + _w(p) for p in all_pls),
+            max(p.top_left[1] + _h(p) for p in all_pls),
         )
         return [
             self._render_placements(pls, flip=flip, bbox=bbox)
@@ -1582,8 +1597,34 @@ class CharacterRenderer:
                     pos_val = None
             anchor_name = self._EFFECT_POS_ANCHOR.get(pos_val, "navel")
             anchor_world = world_anchors.get(anchor_name) or world_anchors.get("navel") or (0, 0)
-            origin = _origin(origin_source)
-            top_left = (anchor_world[0] - origin[0], anchor_world[1] - origin[1])
+            # Stabilized mode: build a union-bbox composite that
+            # places frame N's pixels at the same WORLD coordinates
+            # the artist authored (origin_n inside the canvas). Every
+            # cycled frame ends up with the SAME placement bbox so
+            # the user sees animation play in place — no per-frame
+            # canvas-size variation visible as drift.
+            decoded_override = None
+            width_override = height_override = None
+            if pin_origin_to_frame_0 and len(frame_children) > 1:
+                composite = self._build_stabilized_effect_composite(
+                    frame_children, idx,
+                )
+                if composite is not None:
+                    layer_image, comp_origin, comp_w, comp_h = composite
+                    decoded_override = layer_image
+                    width_override = comp_w
+                    height_override = comp_h
+                    top_left = (
+                        anchor_world[0] - comp_origin[0],
+                        anchor_world[1] - comp_origin[1],
+                    )
+                    origin = comp_origin
+                else:
+                    origin = _origin(origin_source)
+                    top_left = (anchor_world[0] - origin[0], anchor_world[1] - origin[1])
+            else:
+                origin = _origin(origin_source)
+                top_left = (anchor_world[0] - origin[0], anchor_world[1] - origin[1])
             # Z handling: prefer the pose-tree's z (e.g. default/z = 2),
             # fall back to the per-frame z. Skip the top-level effect/z
             # (its meaning is meta, not a render layer).
@@ -1610,8 +1651,88 @@ class CharacterRenderer:
                 origin=origin, map_anchors={},
                 z_slot=None, top_left=top_left, extra_z=z_int,
                 anchor_override=anchor_name,
+                decoded_override=decoded_override,
+                width_override=width_override,
+                height_override=height_override,
             ))
         return out
+
+    def _build_stabilized_effect_composite(
+        self, frame_children: List[Any], idx: int,
+    ) -> Optional[Tuple[Any, Tuple[int, int], int, int]]:
+        """Composite frame ``idx``'s pixels into a uniform-size RGBA
+        Image whose bbox covers EVERY frame in the cycle. Returns
+        ``(image, composite_origin, width, height)`` or ``None`` if
+        anything fails — the caller falls back to natural rendering.
+
+        Each frame in the cycle ships its own canvas size + origin;
+        the artist's intent is that the world position of the brow
+        anchor (or whatever anchor the pose uses) lands at the same
+        world point for all frames, with each frame's canvas
+        cropped to its content bbox. To eliminate the per-frame bbox
+        variation visible as drift in stabilized stand poses, we:
+
+          1. Compute every frame's brow-relative bbox.
+          2. Take the union — that's the composite size.
+          3. Place frame ``idx``'s pixels at the offset in the
+             composite that puts its anchor at the same composite
+             pixel as every other frame.
+
+        The returned ``composite_origin`` is the canvas-relative
+        anchor pixel; ``top_left = anchor_world - composite_origin``
+        positions the composite identically across every frame in
+        the cycle.
+        """
+        from PIL import Image as _PILImage
+        # Gather (origin, width, height) for every frame, resolving
+        # UOLs the same way the main loop does.
+        frame_meta: List[Tuple[Any, Tuple[int, int], int, int]] = []
+        for fc in frame_children:
+            tgt = _resolve_uol(fc) if isinstance(fc, WzUolProperty) else fc
+            if not isinstance(tgt, WzCanvasProperty):
+                return None
+            try:
+                pix = resolve_canvas_link(tgt, self.effects.root)
+            except Exception:
+                return None
+            if pix is None or not pix.has_pixels():
+                return None
+            frame_meta.append((tgt, _origin(tgt), pix.width, pix.height))
+        # Union bbox in anchor-relative coords. For each frame the
+        # canvas occupies [-origin.x, -origin.x + width) horizontally
+        # and [-origin.y, -origin.y + height) vertically (relative
+        # to the anchor at world (0, 0)).
+        min_x = min(-o[0] for _, o, _, _ in frame_meta)
+        min_y = min(-o[1] for _, o, _, _ in frame_meta)
+        max_x = max(-o[0] + w for _, o, w, _ in frame_meta)
+        max_y = max(-o[1] + h for _, o, _, h in frame_meta)
+        comp_w = max_x - min_x
+        comp_h = max_y - min_y
+        if comp_w <= 0 or comp_h <= 0:
+            return None
+        # Composite "origin" so that anchor_world - comp_origin
+        # = world coords of composite's (0, 0). The composite's
+        # anchor lands at composite pixel (-min_x, -min_y).
+        comp_origin = (-min_x, -min_y)
+        # Decode just the requested frame and paste at its
+        # anchor-aligned offset within the composite.
+        target_canvas, target_origin, _, _ = frame_meta[idx]
+        try:
+            target_pix = resolve_canvas_link(target_canvas, self.effects.root)
+            layer = decode_canvas(target_pix, region=self.region)
+        except Exception:
+            return None
+        if layer.mode != "RGBA":
+            layer = layer.convert("RGBA")
+        composite = _PILImage.new("RGBA", (comp_w, comp_h), (0, 0, 0, 0))
+        # Frame N's top-left in composite coords:
+        # world(top_left) = anchor + (-target_origin)
+        # composite(top_left) = world(top_left) - composite(world top-left)
+        #                     = (-target_origin) - (min_x, min_y)
+        ox = -target_origin[0] - min_x
+        oy = -target_origin[1] - min_y
+        composite.alpha_composite(layer, dest=(ox, oy))
+        return composite, comp_origin, comp_w, comp_h
 
     def _build_placements(
         self,
@@ -1621,6 +1742,7 @@ class CharacterRenderer:
         frozen_anchors: Optional[Dict[str, Tuple[int, int]]] = None,
         return_anchors: bool = False,
         body_frame: Optional[int] = None,
+        stabilize_effects: bool = False,
     ):
         """Collect, anchor, and z-sort placements for a single frame.
 
@@ -1743,10 +1865,9 @@ class CharacterRenderer:
         # the placement origin to frame 0 so the canvas's world
         # position stays glued to the cap.
         if self.effects is not None:
-            stabilized = frozen_anchors is not None
             placements.extend(self._build_effect_placements(
                 equip_ids, pose, frame, world_anchors,
-                pin_origin_to_frame_0=stabilized,
+                pin_origin_to_frame_0=stabilize_effects,
             ))
 
         zmap_size = len(self._zmap)
@@ -1885,12 +2006,18 @@ class CharacterRenderer:
         ``placements``; otherwise it's the supplied
         ``(min_x, min_y, max_x, max_y)`` so multiple frames can
         share dimensions and a stable navel position."""
+        def _w(pl: _Placement) -> int:
+            return pl.width_override if pl.width_override is not None \
+                else pl.pixel_canvas.width
+        def _h(pl: _Placement) -> int:
+            return pl.height_override if pl.height_override is not None \
+                else pl.pixel_canvas.height
         if bbox is None:
             min_x = min(p.top_left[0] for p in placements if p.top_left is not None)
             min_y = min(p.top_left[1] for p in placements if p.top_left is not None)
-            max_x = max(p.top_left[0] + p.pixel_canvas.width
+            max_x = max(p.top_left[0] + _w(p)
                         for p in placements if p.top_left is not None)
-            max_y = max(p.top_left[1] + p.pixel_canvas.height
+            max_y = max(p.top_left[1] + _h(p)
                         for p in placements if p.top_left is not None)
         else:
             min_x, min_y, max_x, max_y = bbox
@@ -1900,10 +2027,17 @@ class CharacterRenderer:
         for pl in placements:
             if pl.top_left is None:
                 continue
-            try:
-                layer = decode_canvas(pl.pixel_canvas, region=self.region)
-            except Exception:
-                continue
+            # Stabilized ItemEff placements ship a pre-decoded RGBA
+            # composite (uniform-bbox across the cycle); use it
+            # directly so per-frame canvas-size variation doesn't
+            # leak into the bbox.
+            if pl.decoded_override is not None:
+                layer = pl.decoded_override
+            else:
+                try:
+                    layer = decode_canvas(pl.pixel_canvas, region=self.region)
+                except Exception:
+                    continue
             if layer.mode != "RGBA":
                 layer = layer.convert("RGBA")
             composite.alpha_composite(
