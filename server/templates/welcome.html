@@ -42,8 +42,27 @@
         </label>
         <button type="submit" id="open-submit">Open</button>
       </div>
+      <label class="open-char-mode" title="Resolve the path as a Character bundle root and load Character + Effect + String together. Errors out if any of the three are missing.">
+        <input type="checkbox" id="open-char">
+        <span>Open as Character bundle <em>(loads Character + Effect + String together)</em></span>
+      </label>
       <div id="open-status" class="open-status" hidden></div>
     </form>
+
+    {% if recent_paths %}
+    <div class="open-recent">
+      <div class="open-recent-label">Quick load</div>
+      <ul class="open-recent-list">
+        {% for p in recent_paths %}
+        <li>
+          <button type="button" class="open-recent-btn" data-path="{{ p }}">
+            <code>{{ p }}</code>
+          </button>
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
 
     {% if current_path %}
     <p class="open-current">

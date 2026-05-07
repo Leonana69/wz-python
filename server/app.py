@@ -573,6 +573,82 @@ def _auto_detect_region(wz_path: str, version: Optional[int]) -> str:
     return best[0]
 
 
+def _find_pack(parent: str, base: str) -> Optional[str]:
+    """Look for a hierarchical ``parent/<base>/`` folder or a legacy
+    ``parent/<base>.wz`` file. Returns the resolved path or ``None``."""
+    folder = os.path.join(parent, base)
+    if os.path.isdir(folder):
+        return folder
+    wz_file = os.path.join(parent, f"{base}.wz")
+    if os.path.isfile(wz_file):
+        return wz_file
+    return None
+
+
+def _discover_char_root(path: str) -> Tuple[Optional[str], Optional[Dict[str, str]], Optional[str]]:
+    """Resolve a ``--char`` argument to ``(character_path, paths, error)``.
+
+    ``path`` may be either:
+      * a parent directory containing ``Character`` / ``Effect`` /
+        ``String`` (folders or .wz files alongside each other), or
+      * a Character pack itself (folder or .wz), in which case the
+        siblings are searched for in the parent directory.
+
+    Returns ``(character_path, {character, effect, string}, None)`` on
+    success or ``(None, None, error_message)`` if Character can't be
+    located or one of its required siblings (Effect, String) is
+    missing — the welcome dialog and CLI both surface this string
+    verbatim.
+    """
+    if not path:
+        return None, None, "path is required"
+    abs_path = os.path.abspath(path)
+    if not os.path.exists(abs_path):
+        return None, None, f"path does not exist: {abs_path}"
+
+    base = os.path.basename(abs_path.rstrip(os.sep)).lower()
+    if base.startswith("character"):
+        # Path IS a Character pack — siblings live in its parent.
+        char_path = abs_path
+        if os.path.isfile(abs_path):
+            parent = os.path.dirname(abs_path)
+        else:
+            parent = os.path.dirname(abs_path.rstrip(os.sep))
+    else:
+        # Path is a parent dir; Character should be inside it.
+        if not os.path.isdir(abs_path):
+            return None, None, (
+                f"--char path must be a Character pack or a directory "
+                f"containing one: {abs_path}"
+            )
+        parent = abs_path
+        char_path = _find_pack(parent, "Character")
+        if char_path is None:
+            return None, None, (
+                f"no Character.wz or Character/ folder found in {abs_path}"
+            )
+
+    effect_path = _find_pack(parent, "Effect")
+    string_path = _find_pack(parent, "String")
+    missing: List[str] = []
+    if effect_path is None:
+        missing.append("Effect.wz / Effect/")
+    if string_path is None:
+        missing.append("String.wz / String/")
+    if missing:
+        return None, None, (
+            f"found Character at {char_path} but the following sibling "
+            f"pack(s) are missing in {parent}: {', '.join(missing)}. "
+            f"--char requires Character, Effect, and String to all be "
+            f"present alongside each other."
+        )
+    return char_path, {
+        "character": char_path,
+        "effect": effect_path,
+        "string": string_path,
+    }, None
+
+
 def _try_load_character_effects(
     wz_path: str, region: str, version: Optional[int],
 ):
@@ -648,8 +724,16 @@ def _try_load_character_strings(
     return None
 
 
-def create_app(wz_path: Optional[str] = None, region: str = "auto", version: Optional[int] = None) -> Flask:
+def create_app(
+    wz_path: Optional[str] = None, region: str = "auto",
+    version: Optional[int] = None,
+    recent_paths: Optional[List[str]] = None,
+) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
+    # ``recent_paths`` shows up in the welcome page as quick-load
+    # buttons. Seeded by the CLI when multiple paths are passed (e.g.
+    # ``python run.py Mob.wz Map.wz`` keeps both for one-click switch).
+    app.config["RECENT_PATHS"] = list(recent_paths or [])
     # Initial config: a freshly-created app has no WZ loaded. ``_do_load``
     # populates these on demand so the server can boot to a "pick a file"
     # welcome screen and load the WZ from a /api/load POST instead of
@@ -927,7 +1011,10 @@ def create_app(wz_path: Optional[str] = None, region: str = "auto", version: Opt
     @app.route("/")
     def index():
         if wz is None:
-            return render_template("welcome.html")
+            return render_template(
+                "welcome.html",
+                recent_paths=app.config.get("RECENT_PATHS", []),
+            )
         # Character packs land on the builder by default — that's the
         # workflow users open them for. The tree browser is always one
         # click away via the ``← Tree browser`` link in the builder
@@ -948,7 +1035,11 @@ def create_app(wz_path: Optional[str] = None, region: str = "auto", version: Opt
         ``/`` redirects to the builder by default). Used by the
         ``← Tree browser`` link from /character."""
         if wz is None:
-            return render_template("welcome.html", redirect_after_load="/tree")
+            return render_template(
+                "welcome.html",
+                redirect_after_load="/tree",
+                recent_paths=app.config.get("RECENT_PATHS", []),
+            )
         return render_template(
             "index.html",
             wz_name=wz_path,
@@ -967,12 +1058,17 @@ def create_app(wz_path: Optional[str] = None, region: str = "auto", version: Opt
             "welcome.html",
             current_path=wz_path,
             current_region=region if wz is not None else None,
+            recent_paths=app.config.get("RECENT_PATHS", []),
         )
 
     @app.route("/character")
     def character_builder() -> str:
         if wz is None:
-            return render_template("welcome.html", redirect_after_load="/character")
+            return render_template(
+                "welcome.html",
+                redirect_after_load="/character",
+                recent_paths=app.config.get("RECENT_PATHS", []),
+            )
         if not _character_supported(wz):
             abort(404, "Character builder requires a Character.wz")
         return render_template(
@@ -985,8 +1081,15 @@ def create_app(wz_path: Optional[str] = None, region: str = "auto", version: Opt
     @app.route("/api/load", methods=["POST"])
     def api_load() -> Response:
         """Hot-load a WZ file or hierarchical pack folder. Body:
-        ``{"path": "...", "region": "auto|GMS|EMS|BMS", "version": int|null}``.
-        Region defaults to ``auto`` and version to ``null`` (auto)."""
+        ``{"path": "...", "region": "auto|GMS|EMS|BMS",
+           "version": int|null, "char": bool}``.
+
+        When ``char`` is true the path is resolved as a Character
+        bundle root: it can point at the Character pack itself, or
+        at a parent directory containing Character / Effect /
+        String alongside each other. Failure modes (missing pack,
+        missing siblings) come back as 400 with a human-readable
+        message the welcome dialog renders verbatim."""
         data = request.get_json(silent=True) or {}
         path = (data.get("path") or "").strip()
         region_arg = (data.get("region") or "auto").strip() or "auto"
@@ -1000,8 +1103,14 @@ def create_app(wz_path: Optional[str] = None, region: str = "auto", version: Opt
                 version_arg = int(version_arg)
             except (TypeError, ValueError):
                 return jsonify({"error": "version must be an integer"}), 400
+        char_mode = bool(data.get("char"))
         if not path:
             return jsonify({"error": "path is required"}), 400
+        if char_mode:
+            char_path, _paths, err = _discover_char_root(path)
+            if err:
+                return jsonify({"error": err, "code": "CHAR_DISCOVERY"}), 400
+            path = char_path
         try:
             _do_load(path, region_arg, version_arg)
         except FileNotFoundError as e:
@@ -1010,6 +1119,24 @@ def create_app(wz_path: Optional[str] = None, region: str = "auto", version: Opt
             return jsonify({"error": str(e)}), 400
         except Exception as e:
             return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+        # In char mode insist that Effect and String actually loaded —
+        # the discovery step above ensured the paths exist on disk,
+        # but a corrupt pack or a wrong-region key could still leave
+        # the lookups as None. Surface that as an error so the user
+        # knows the overlay won't render.
+        if char_mode:
+            missing = []
+            if app.config.get("CHARACTER_EFFECTS") is None:
+                missing.append("Effect (overlay rendering disabled)")
+            if app.config.get("CHARACTER_STRINGS") is None:
+                missing.append("String (item names will fall back to IDs)")
+            if missing:
+                return jsonify({
+                    "ok": True, "path": wz_path, "region": region,
+                    "version": wz.version, "hierarchical": hierarchical,
+                    "has_character": _character_supported(wz),
+                    "warning": "char-mode partial load: " + "; ".join(missing),
+                })
         return jsonify({
             "ok": True,
             "path": wz_path,
@@ -3120,9 +3247,17 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Browse a MapleStory .wz file in your browser")
-    parser.add_argument("wz", nargs="?", default=None,
-                        help="path to the .wz file or hierarchical pack folder. "
-                             "Omit to start at the welcome screen and pick a file in the browser.")
+    parser.add_argument("wz", nargs="*", default=[],
+                        help="paths to .wz files or hierarchical pack folders. "
+                             "The first is loaded immediately; the rest are remembered "
+                             "as quick-load buttons on the welcome page. "
+                             "Omit all to start at the welcome screen.")
+    parser.add_argument("--char", default=None, metavar="PATH",
+                        help="open in Character Builder mode. PATH may be either a "
+                             "Character pack (Character.wz / Character/) or a parent "
+                             "directory containing Character + Effect + String "
+                             "alongside each other. Errors out if any of the three "
+                             "are missing. Implies --region auto unless overridden.")
     parser.add_argument("--region", default="auto",
                         choices=["auto", "GMS", "EMS", "BMS"],
                         help="MapleStory region (default: auto — pick the "
@@ -3134,7 +3269,29 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
-    app = create_app(args.wz, region=args.region, version=args.version)
+    initial_path: Optional[str] = None
+    if args.char:
+        char_path, _paths, err = _discover_char_root(args.char)
+        if err:
+            print(f"--char error: {err}", file=sys.stderr)
+            sys.exit(2)
+        initial_path = char_path
+    elif args.wz:
+        initial_path = args.wz[0]
+
+    # Recent paths shown on the welcome page. In char mode the
+    # ``--char`` arg itself is the obvious quick-pick; in the
+    # multi-positional case, the first path is already loaded so
+    # only the trailing ones become quick-picks.
+    if args.char:
+        recent = [args.char] + list(args.wz)
+    else:
+        recent = list(args.wz[1:])
+
+    app = create_app(
+        initial_path, region=args.region, version=args.version,
+        recent_paths=recent,
+    )
     print(f"\n  -> open http://{args.host}:{args.port}\n")
     app.run(host=args.host, port=args.port, debug=args.debug)
 
