@@ -5,13 +5,42 @@
   font-weight: normal;
   margin-left: 4px;
 }
+/* The Character Builder header packs more controls (import/export +
+ * switch-file + back-link) than the tree browser. Wrap them in a
+ * flex group pushed to the right edge with a single ``margin-left:
+ * auto`` so the individual links don't fight over auto margins. */
+.character-page .header-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.character-page .header-actions .open-link,
+.character-page .header-actions .back-link {
+  margin-left: 0;
+}
+
 .character-page .back-link {
   color: #8ab4ff;
   text-decoration: none;
-  margin-left: 12px;
   font-size: 12px;
 }
 .character-page .back-link:hover { text-decoration: underline; }
+
+/* Import / Export character JSON. Same shape as the existing
+ * .open-link header button so the row reads as one group. */
+.character-page .header-btn {
+  background: #2b2d31;
+  color: #d6d6d6;
+  border: 1px solid #1a1b1d;
+  border-radius: 3px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.character-page .header-btn:hover { background: #3a3d44; }
+.character-page .header-btn:disabled { opacity: 0.5; cursor: progress; }
 
 /* Inherit display:flex from the base ``main`` rule in style.css instead
  * of overriding it to grid — grid's implicit row track was sizing to

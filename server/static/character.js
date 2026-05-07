@@ -1331,6 +1331,155 @@ $exportGif.addEventListener("click", () => {
   _downloadAnimation("export_gif", "gif");
 });
 
+// ── import / export character JSON ────────────────────────────────
+// JSON shape (v1):
+//   {
+//     "wzpy_character": 1,           // schema version, integer
+//     "equipped":  { Body: "00002000", Head: "00012000", ... },
+//     "pose":      "stand1",         // optional
+//     "earType":   "humanEar",       // optional
+//     "facing":    "left",           // optional, "left" | "right"
+//     "colorByCategory": { Hair: 0, Face: 0 }   // optional
+//   }
+//
+// IDs are 8-digit strings, same as everywhere else in this app. We
+// don't validate them against the loaded WZ on import — the compose
+// request will fail visibly if an ID is missing, and surfacing a
+// "missing in current pack" warning per slot would clutter the UI
+// with churn for files exported against a slightly different pack.
+const $importBtn = document.getElementById("char-import-btn");
+const $exportCharBtn = document.getElementById("char-export-btn");
+const $importFile = document.getElementById("char-import-file");
+
+function buildCharacterExport() {
+  const equipped = {};
+  for (const [cat, slot] of Object.entries(state.equipped)) {
+    if (slot && slot.id) equipped[cat] = slot.id;
+  }
+  return {
+    wzpy_character: 1,
+    equipped,
+    pose: state.pose,
+    earType: state.earType,
+    facing: state.facing,
+    colorByCategory: { ...state.colorByCategory },
+  };
+}
+
+function downloadCharacterJson() {
+  const payload = buildCharacterExport();
+  const json = JSON.stringify(payload, null, 2) + "\n";
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  // Filename hint: list a few equipped IDs so reopening is obvious.
+  const ids = Object.values(payload.equipped).slice(0, 4).join("-");
+  const name = `character${ids ? "_" + ids : ""}.json`;
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function applyImportedCharacter(payload) {
+  if (!payload || typeof payload !== "object") {
+    throw new Error("file is not a JSON object");
+  }
+  if (payload.wzpy_character !== 1) {
+    throw new Error(
+      `unrecognised schema (wzpy_character=${payload.wzpy_character}); ` +
+      `expected 1`,
+    );
+  }
+  const equipped = payload.equipped;
+  if (!equipped || typeof equipped !== "object") {
+    throw new Error("missing or invalid 'equipped' object");
+  }
+  // Wipe the current selection so categories not present in the
+  // import (e.g. an exported character with no Cap) end up empty,
+  // not stuck on the prior Cap.
+  for (const cat of Object.keys(state.equipped)) delete state.equipped[cat];
+  for (const [cat, id] of Object.entries(equipped)) {
+    if (typeof id !== "string" || !id) continue;
+    state.equipped[cat] = { id, iconPaths: iconPathsFor(cat, id) };
+  }
+  // Restore optional view state. Each is best-effort — a stale value
+  // (e.g. a pose the new body doesn't ship) gets corrected by the
+  // pose/ear sync below.
+  if (typeof payload.pose === "string") state.pose = payload.pose;
+  if (typeof payload.earType === "string") state.earType = payload.earType;
+  if (payload.facing === "left" || payload.facing === "right") {
+    state.facing = payload.facing;
+    const radio = document.querySelector(
+      `input[name="char-facing"][value="${state.facing}"]`,
+    );
+    if (radio) radio.checked = true;
+  }
+  if (payload.colorByCategory && typeof payload.colorByCategory === "object") {
+    for (const [k, v] of Object.entries(payload.colorByCategory)) {
+      if (Number.isInteger(v)) state.colorByCategory[k] = v;
+    }
+  }
+  // Refresh weapon/head dependent state (pose dropdown filter, ear
+  // selector). These hit the API so we await; refreshCompose comes
+  // afterwards so the preview lands once everything's settled.
+  if (state.equipped.Weapon) {
+    await syncWeaponPose(state.equipped.Weapon.id);
+  } else {
+    state.weaponPoses = [];
+  }
+  if (state.equipped.Head) {
+    await syncHeadEars(state.equipped.Head.id);
+  }
+  renderPoseControls();
+  renderEarControls();
+  renderEquipped();
+  // Re-highlight equipped tile in the currently visible category, if any.
+  if (state.activeTab && state.equipped[state.activeTab]) {
+    const eqId = state.equipped[state.activeTab].id;
+    for (const tile of $grid.querySelectorAll(".part-tile")) {
+      tile.classList.toggle("equipped", tile.dataset.id === eqId);
+    }
+  }
+  refreshCompose();
+}
+
+$exportCharBtn.addEventListener("click", () => {
+  try {
+    downloadCharacterJson();
+  } catch (err) {
+    console.warn("character export failed:", err);
+    alert(`Export failed: ${err.message || err}`);
+  }
+});
+
+$importBtn.addEventListener("click", () => {
+  // Reset value so picking the same file twice still triggers ``change``.
+  $importFile.value = "";
+  $importFile.click();
+});
+
+$importFile.addEventListener("change", async () => {
+  const file = $importFile.files && $importFile.files[0];
+  if (!file) return;
+  $importBtn.disabled = true;
+  try {
+    const text = await file.text();
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch (e) {
+      throw new Error(`not valid JSON: ${e.message}`);
+    }
+    await applyImportedCharacter(payload);
+  } catch (err) {
+    console.warn("character import failed:", err);
+    alert(`Import failed: ${err.message || err}`);
+  } finally {
+    $importBtn.disabled = false;
+  }
+});
+
 // ── boot ──────────────────────────────────────────────────────────
 (async function boot() {
   selectTab(state.activeTab);

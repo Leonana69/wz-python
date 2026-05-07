@@ -14,8 +14,15 @@
       <span class="badge">v{{ wz_version }}</span>
       <span class="path">{{ wz_name }}</span>
     </div>
-    <a class="open-link" href="{{ url_for('open_file_page') }}" title="Open a different .wz file or pack folder">Switch file…</a>
-    <a class="back-link" href="{{ url_for('tree_browser') }}">← Tree browser</a>
+    <div class="header-actions">
+      <button id="char-import-btn" type="button" class="header-btn"
+              title="Load a previously exported character JSON">Import</button>
+      <button id="char-export-btn" type="button" class="header-btn"
+              title="Save the currently equipped items, pose, and facing as JSON">Export</button>
+      <a class="open-link" href="{{ url_for('open_file_page') }}" title="Open a different .wz file or pack folder">Switch file…</a>
+      <a class="back-link" href="{{ url_for('tree_browser') }}">← Tree browser</a>
+    </div>
+    <input type="file" id="char-import-file" accept=".json,application/json" hidden>
   </header>
 
   <main class="char-main">
