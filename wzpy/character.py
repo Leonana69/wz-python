@@ -1629,6 +1629,20 @@ class CharacterRenderer:
                 "arm", "armBelowHeadOverMailChest",
             ):
                 slot = "handOverHair"
+            # Stand2 = the 2H rest stance, weapon held vertically in
+            # front of the chest with the shaft extending above the
+            # gripping hand. Properly-authored 2H weapons use
+            # ``weaponOverArm`` (zmap 129, above ``head`` at 104) so
+            # the blade crosses in front of the head. Some weapons
+            # (~312, mostly cash 0170* whose action 30 doubles as the
+            # 1H sword mode) author ``weaponBelowArm`` (76) instead —
+            # a holdover from the 1H idle where the weapon hangs at
+            # the hip and never crosses the head. In stand2 that
+            # leaves the blade tip stuck behind the head/hair.
+            # Promote those to the correct slot.
+            elif pose == "stand2" and pl.category == "Weapon" \
+                    and slot == "weaponBelowArm":
+                slot = "weaponOverArm"
             rule = _OVER_CAP_REMAP.get(slot)
             if rule is None:
                 return self._z_index(slot)
