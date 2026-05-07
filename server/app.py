@@ -858,7 +858,7 @@ def create_app(wz_path: Optional[str] = None, region: str = "auto", version: Opt
     # picks a file via the welcome dialog.
     _NO_WZ_OK_ENDPOINTS = frozenset({
         "index", "open_file_page", "character_builder",
-        "api_load", "api_load_status",
+        "api_load", "api_load_status", "api_load_browse",
     })
 
     @app.before_request
@@ -952,6 +952,45 @@ def create_app(wz_path: Optional[str] = None, region: str = "auto", version: Opt
             "hierarchical": hierarchical,
             "has_character": _character_supported(wz),
         })
+
+    @app.route("/api/load/browse")
+    def api_load_browse() -> Response:
+        """Pop a native OS file/folder picker via a tkinter subprocess
+        and return the chosen absolute path. ``?kind=file`` shows the
+        ``.wz`` file picker; ``?kind=folder`` shows the directory
+        picker (for hierarchical packs). ``?initial=`` pre-seeds the
+        starting directory (defaults to the currently-loaded path's
+        parent so a "Switch file…" lands in the right place).
+
+        We spawn the picker in a child process: tkinter is not thread-
+        safe, and its event loop must own the process main thread on
+        macOS — neither plays nicely with Flask's request thread."""
+        import subprocess
+        kind = request.args.get("kind", "file")
+        if kind not in ("file", "folder"):
+            return jsonify({"error": "kind must be 'file' or 'folder'"}), 400
+        initial = (request.args.get("initial") or "").strip()
+        if not initial and wz_path:
+            initial = wz_path
+        if initial and not os.path.isdir(initial):
+            initial = os.path.dirname(os.path.abspath(initial))
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "server._file_picker", kind, initial],
+                capture_output=True, text=True, timeout=600,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            )
+        except subprocess.TimeoutExpired:
+            return jsonify({"error": "picker timed out"}), 504
+        except FileNotFoundError as e:
+            return jsonify({"error": f"could not launch picker: {e}"}), 500
+        if proc.returncode != 0:
+            err = (proc.stderr or "").strip() or f"picker exited with {proc.returncode}"
+            return jsonify({"error": err}), 500
+        path = (proc.stdout or "").strip()
+        if not path:
+            return jsonify({"path": None, "cancelled": True})
+        return jsonify({"path": path, "cancelled": False})
 
     @app.route("/api/load/status")
     def api_load_status() -> Response:

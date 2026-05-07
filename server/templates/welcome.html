@@ -14,10 +14,16 @@
     <form id="open-form" class="open-form" autocomplete="off">
       <label class="open-row">
         <span class="open-label">Path</span>
-        <input type="text" id="open-path" name="path"
-               value="{{ current_path or '' }}"
-               placeholder="C:\path\to\Mob.wz   or   D:\Git\wz-python\data\Character"
-               autocomplete="off" spellcheck="false" autofocus>
+        <div class="open-path-row">
+          <input type="text" id="open-path" name="path"
+                 value="{{ current_path or '' }}"
+                 placeholder="C:\path\to\Mob.wz   or   D:\Git\wz-python\data\Character"
+                 autocomplete="off" spellcheck="false" autofocus>
+          <button type="button" id="open-browse-file" class="open-browse"
+                  title="Pick a single .wz file">Browse File…</button>
+          <button type="button" id="open-browse-folder" class="open-browse"
+                  title="Pick a hierarchical pack folder">Browse Folder…</button>
+        </div>
       </label>
       <div class="open-row open-row-inline">
         <label class="open-field">

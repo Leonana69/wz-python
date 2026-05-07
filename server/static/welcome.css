@@ -82,6 +82,27 @@ body.welcome-page main.welcome-card {
   outline: none;
 }
 .open-form input[type="text"] { width: 100%; box-sizing: border-box; }
+
+.open-path-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.open-path-row input[type="text"] { flex: 1; min-width: 0; }
+.open-form button.open-browse {
+  background: #2b2d31;
+  color: #d6d6d6;
+  border: 1px solid #1a1b1d;
+  border-radius: 3px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  margin-left: 0;  /* cancel .open-form button's margin-left:auto */
+}
+.open-form button.open-browse:hover:not(:disabled) { background: #3a3d44; }
+.open-form button.open-browse:disabled { opacity: 0.5; cursor: progress; }
 .open-form input[type="number"] { width: 90px; }
 .open-form select { font-family: inherit; padding-right: 28px; }
 
