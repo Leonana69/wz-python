@@ -622,6 +622,15 @@ class _Placement:
     # category is "Effect" — positive z lands AFTER all character
     # parts, negative z BEFORE the body.
     extra_z: Optional[int] = None
+    # Anchor name actually used to compute ``top_left`` (e.g. ``brow``
+    # for pos=1 ItemEff overlays). compose_animation's body-delta
+    # translation step uses this to decide whether the placement is
+    # head-anchored (skip translation, stays glued to the frozen
+    # head) or body-anchored (track the body's per-frame motion).
+    # Only Effect placements set this today — character placements
+    # let ``_determine_anchor`` derive the anchor from the canvas's
+    # ``map`` instead.
+    anchor_override: Optional[str] = None
 
 
 def _is_cash_weapon(equip_id: str) -> bool:
@@ -1411,7 +1420,16 @@ class CharacterRenderer:
                         continue
                     key = (pl.equip_id, pl.name)
                     f0_canvas = frame0_canvases.get(key)
-                    anchor_name = _determine_anchor(pl.canvas, pl.category)
+                    # Effect placements carry their own resolved anchor
+                    # name (``brow`` for pos=1, ``navel`` for pos=0/…)
+                    # because their canvases ship no ``map``; without
+                    # the override they'd all default to ``navel`` and
+                    # head-anchored ember/ribbon effects would get
+                    # translated by the body delta each frame, which
+                    # the user sees as a 1-2 px slide around the cap.
+                    anchor_name = pl.anchor_override or _determine_anchor(
+                        pl.canvas, pl.category,
+                    )
                     # Same pixel canvas as frame 0 AND head-derived
                     # anchor — UOL'd static piece glued to the frozen
                     # head; leave it. Body-anchored placements with
@@ -1572,6 +1590,7 @@ class CharacterRenderer:
                 canvas=target, pixel_canvas=pixel_canvas,
                 origin=origin, map_anchors={},
                 z_slot=None, top_left=top_left, extra_z=z_int,
+                anchor_override=anchor_name,
             ))
         return out
 
