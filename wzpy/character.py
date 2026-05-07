@@ -1501,6 +1501,7 @@ class CharacterRenderer:
         pose: str,
         frame: int,
         world_anchors: Dict[str, Tuple[int, int]],
+        pin_origin_to_frame_0: bool = False,
     ) -> List[_Placement]:
         """Build :class:`_Placement` entries for every equipped item
         whose ID has an authored overlay under ``ItemEff.img``.
@@ -1512,6 +1513,14 @@ class CharacterRenderer:
         frame count — the effect's tempo isn't synced to the body's,
         so this is a best-effort cycling; effects authored to match
         the body's frame count will line up exactly.
+
+        ``pin_origin_to_frame_0`` is set in stabilized stand poses so
+        the placement uses frame 0's origin for ALL frames while
+        still cycling the per-frame pixel canvas. The animation
+        plays in place instead of sliding 1-2 px around the cap each
+        frame (the natural per-frame origin variation was authored
+        to compose with per-frame body motion that stand-pose
+        stabilization deliberately suppresses).
         """
         out: List[_Placement] = []
         if self.effects is None:
@@ -1552,6 +1561,16 @@ class CharacterRenderer:
                 pixel_canvas = target
             if pixel_canvas is None or not pixel_canvas.has_pixels():
                 continue
+            # Origin source: by default, the per-frame canvas's own
+            # origin. In stabilized mode, frame 0's origin so the
+            # canvas world position stays put across the cycle.
+            origin_source = target
+            if pin_origin_to_frame_0 and idx != 0:
+                f0 = frame_children[0]
+                if isinstance(f0, WzUolProperty):
+                    f0 = _resolve_uol(f0)
+                if isinstance(f0, WzCanvasProperty):
+                    origin_source = f0
             # Pose-tree pos picks the world anchor; integer or string-int.
             pos_node = pose_tree.get("pos")
             pos_node = _resolve_uol(pos_node) if isinstance(pos_node, WzUolProperty) else pos_node
@@ -1563,7 +1582,7 @@ class CharacterRenderer:
                     pos_val = None
             anchor_name = self._EFFECT_POS_ANCHOR.get(pos_val, "navel")
             anchor_world = world_anchors.get(anchor_name) or world_anchors.get("navel") or (0, 0)
-            origin = _origin(target)
+            origin = _origin(origin_source)
             top_left = (anchor_world[0] - origin[0], anchor_world[1] - origin[1])
             # Z handling: prefer the pose-tree's z (e.g. default/z = 2),
             # fall back to the per-frame z. Skip the top-level effect/z
@@ -1714,18 +1733,20 @@ class CharacterRenderer:
         # ``frozen_anchors`` is only set in stand1 / stand2's
         # post-frame-0 calls, where head/hair/cap/face are pinned
         # to frame 0 to keep them from wobbling against the body's
-        # breathing. Effect canvases ship per-frame origin shifts
-        # of 1-2 px (the ember-flicker / ribbon-sway) that compose
-        # NATURALLY with per-frame anchors but DRIFT visibly when
-        # the anchor is frozen — the user sees the effect slide
-        # around the static cap each frame. Pin the effect to its
-        # own frame 0 in that case so it stays glued to the head,
-        # matching how the cap itself is held still.
+        # breathing. Effect canvases cycle through per-frame
+        # bitmaps (ember-flicker, ribbon-sway) AND ship per-frame
+        # origin shifts of 1-2 px that compose NATURALLY with
+        # per-frame anchors but DRIFT visibly when the anchor is
+        # frozen — the user sees the canvas slide around the
+        # static cap each frame. In stabilized mode we still cycle
+        # the per-frame bitmaps (so the animation plays) but pin
+        # the placement origin to frame 0 so the canvas's world
+        # position stays glued to the cap.
         if self.effects is not None:
             stabilized = frozen_anchors is not None
-            effect_frame = 0 if stabilized else frame
             placements.extend(self._build_effect_placements(
-                equip_ids, pose, effect_frame, world_anchors,
+                equip_ids, pose, frame, world_anchors,
+                pin_origin_to_frame_0=stabilized,
             ))
 
         zmap_size = len(self._zmap)
