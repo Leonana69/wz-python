@@ -8,7 +8,7 @@
 .character-page .back-link {
   color: #8ab4ff;
   text-decoration: none;
-  margin-left: auto;
+  margin-left: 12px;
   font-size: 12px;
 }
 .character-page .back-link:hover { text-decoration: underline; }

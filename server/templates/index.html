@@ -13,6 +13,7 @@
       <span class="badge">v{{ wz_version }}</span>
       <span class="path">{{ wz_name }}</span>
     </div>
+    <a class="open-link" href="{{ url_for('open_file_page') }}" title="Open a different .wz file or pack folder">Switch file…</a>
     {% if has_character %}
     <a class="char-link" href="{{ url_for('character_builder') }}">Character Builder →</a>
     {% endif %}

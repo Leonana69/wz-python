@@ -564,9 +564,9 @@ def _auto_detect_region(wz_path: str, version: Optional[int]) -> str:
     # Below this threshold every candidate looks like noise, so the WZ is
     # using a key we don't have built in.
     if best is None or best[1] < 0.5:
-        raise SystemExit(
+        raise ValueError(
             f"could not auto-detect region for {wz_path}. "
-            f"Pass --region GMS/EMS/BMS explicitly."
+            f"Pass region=GMS/EMS/BMS explicitly."
         )
     return best[0]
 
@@ -609,38 +609,85 @@ def _try_load_character_strings(
     return None
 
 
-def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None) -> Flask:
-    if region == "auto":
-        print(f"auto-detecting region for {wz_path}:")
-        region = _auto_detect_region(wz_path, version)
-        print(f"  -> using region: {region}")
+def create_app(wz_path: Optional[str] = None, region: str = "auto", version: Optional[int] = None) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
-    # writable=True mmaps the WZ with ACCESS_WRITE so /api/save can patch
-    # scalar values in-place without copying the entire archive. For
-    # hierarchical packs this falls back to read-only — split-file
-    # save_as is not supported.
-    hierarchical = is_hierarchical_pack(wz_path)
-    if hierarchical:
-        wz = WzPackage.open(wz_path, region=region, version=version)
-        print(f"  loaded hierarchical pack with {len(wz._files)} .wz file(s)")
-    else:
-        wz = WzFile.open(wz_path, region=region, version=version, writable=True)
-    app.config["WZ"] = wz
-    app.config["WZ_HIERARCHICAL"] = hierarchical
-    app.config["WZ_REGION"] = region
+    # Initial config: a freshly-created app has no WZ loaded. ``_do_load``
+    # populates these on demand so the server can boot to a "pick a file"
+    # welcome screen and load the WZ from a /api/load POST instead of
+    # requiring a CLI argument.
+    app.config["WZ"] = None
+    app.config["WZ_HIERARCHICAL"] = False
+    app.config["WZ_REGION"] = "auto"
     # Background bundle exports parse images on a worker thread; the WZ reader
     # carries shared file-position + cipher state, so we mediate access with
     # this lock. Currently only the bundle worker acquires it.
     app.config["WZ_READER_LOCK"] = threading.Lock()
+    app.config["WZ_DIRTY_PATHS"] = set()
+    app.config["WZ_FORCE_FULL_REWRITE"] = False
+    app.config["CHARACTER_STRINGS"] = None
+    app.config["CHARACTER_RENDERER"] = None
 
-    # When the loaded WZ is Character, look for a sibling ``String.wz``
-    # / ``String/`` so the UI can show real item names instead of bare
-    # IDs. Best-effort: any failure (missing file, unreadable, wrong
-    # region) leaves ``CHARACTER_STRINGS`` as None and the UI falls
-    # back to IDs.
-    app.config["CHARACTER_STRINGS"] = _try_load_character_strings(
-        wz_path, region, version,
-    )
+    # Mutable closure state for the loaded WZ. Routes capture ``wz``,
+    # ``wz_path``, ``region``, ``version``, ``hierarchical`` by name;
+    # ``_do_load`` rebinds those bindings via ``nonlocal`` so /api/load
+    # can hot-swap the loaded file in-place. Python closures capture
+    # variable cells (not values), so existing route bodies always see
+    # the currently-loaded values without per-route plumbing.
+    wz: Optional[Any] = None
+    hierarchical: bool = False
+    _load_lock = threading.Lock()
+
+    def _do_load(path: str, req_region: str = "auto", req_version: Optional[int] = None) -> None:
+        nonlocal wz, hierarchical, wz_path, region, version
+        if not path:
+            raise ValueError("path is required")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"path does not exist: {path}")
+        with _load_lock:
+            if req_region == "auto":
+                print(f"auto-detecting region for {path}:")
+                r = _auto_detect_region(path, req_version)
+                print(f"  -> using region: {r}")
+            else:
+                r = req_region
+            is_pack = is_hierarchical_pack(path)
+            old = wz
+            if is_pack:
+                new_wz = WzPackage.open(path, region=r, version=req_version)
+                print(f"  loaded hierarchical pack with {len(new_wz._files)} .wz file(s)")
+            else:
+                # writable=True mmaps with ACCESS_WRITE so /api/save can
+                # patch scalar values in-place without copying the
+                # archive. Hierarchical packs fall back to read-only;
+                # split-file save_as is not supported.
+                new_wz = WzFile.open(path, region=r, version=req_version, writable=True)
+            wz = new_wz
+            wz_path = path
+            region = r
+            version = req_version
+            hierarchical = is_pack
+            app.config["WZ"] = wz
+            app.config["WZ_HIERARCHICAL"] = hierarchical
+            app.config["WZ_REGION"] = region
+            app.config["WZ_DIRTY_PATHS"] = set()
+            app.config["WZ_FORCE_FULL_REWRITE"] = False
+            app.config["CHARACTER_RENDERER"] = None
+            # When the loaded WZ is Character, look for a sibling
+            # ``String.wz`` / ``String/`` so the UI can show real item
+            # names instead of bare IDs. Best-effort: any failure
+            # (missing file, unreadable, wrong region) leaves
+            # ``CHARACTER_STRINGS`` as None and the UI falls back to IDs.
+            app.config["CHARACTER_STRINGS"] = _try_load_character_strings(
+                path, r, req_version,
+            )
+            if old is not None and hasattr(old, "close"):
+                try:
+                    old.close()
+                except Exception:
+                    pass
+
+    if wz_path:
+        _do_load(wz_path, region, version)
 
     # ── helpers ──────────────────────────────────────────────────────
     def _resolve(path: str) -> Tuple[Any, str]:
@@ -805,9 +852,35 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
                         pass
         return d
 
+    # Routes that are reachable BEFORE a WZ has been loaded: the
+    # welcome screen, its load endpoints, and Flask's static files.
+    # Every other request short-circuits with 503 below until the user
+    # picks a file via the welcome dialog.
+    _NO_WZ_OK_ENDPOINTS = frozenset({
+        "index", "open_file_page", "character_builder",
+        "api_load", "api_load_status",
+    })
+
+    @app.before_request
+    def _block_when_no_wz():
+        if wz is not None:
+            return
+        ep = request.endpoint
+        if ep is None or ep in _NO_WZ_OK_ENDPOINTS:
+            return
+        if ep == "static" or ep.startswith("static."):
+            return
+        # JSON for API consumers, HTML 503 for everything else (the
+        # browser shouldn't reach a non-API URL pre-load).
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "no WZ file loaded", "code": "NO_WZ"}), 503
+        return ("No WZ file loaded — open one from the welcome screen.", 503)
+
     # ── routes ───────────────────────────────────────────────────────
     @app.route("/")
     def index() -> str:
+        if wz is None:
+            return render_template("welcome.html")
         # ``has_character`` toggles a "Character Builder" link in the header
         # — the builder only makes sense when a Character.wz is loaded.
         return render_template(
@@ -818,8 +891,22 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             has_character=_character_supported(wz),
         )
 
+    @app.route("/open")
+    def open_file_page() -> str:
+        """Always-on welcome screen so users can switch the loaded WZ
+        without restarting. ``/`` only renders this when no WZ is
+        loaded; this route is what the "Switch file…" link in the
+        header points at."""
+        return render_template(
+            "welcome.html",
+            current_path=wz_path,
+            current_region=region if wz is not None else None,
+        )
+
     @app.route("/character")
     def character_builder() -> str:
+        if wz is None:
+            return render_template("welcome.html", redirect_after_load="/character")
         if not _character_supported(wz):
             abort(404, "Character builder requires a Character.wz")
         return render_template(
@@ -828,6 +915,59 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
             wz_version=wz.version,
             wz_region=region,
         )
+
+    @app.route("/api/load", methods=["POST"])
+    def api_load() -> Response:
+        """Hot-load a WZ file or hierarchical pack folder. Body:
+        ``{"path": "...", "region": "auto|GMS|EMS|BMS", "version": int|null}``.
+        Region defaults to ``auto`` and version to ``null`` (auto)."""
+        data = request.get_json(silent=True) or {}
+        path = (data.get("path") or "").strip()
+        region_arg = (data.get("region") or "auto").strip() or "auto"
+        if region_arg not in ("auto", "GMS", "EMS", "BMS"):
+            return jsonify({"error": f"invalid region {region_arg!r}"}), 400
+        version_arg = data.get("version")
+        if version_arg in ("", None):
+            version_arg = None
+        else:
+            try:
+                version_arg = int(version_arg)
+            except (TypeError, ValueError):
+                return jsonify({"error": "version must be an integer"}), 400
+        if not path:
+            return jsonify({"error": "path is required"}), 400
+        try:
+            _do_load(path, region_arg, version_arg)
+        except FileNotFoundError as e:
+            return jsonify({"error": str(e)}), 404
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        except Exception as e:
+            return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+        return jsonify({
+            "ok": True,
+            "path": wz_path,
+            "region": region,
+            "version": wz.version,
+            "hierarchical": hierarchical,
+            "has_character": _character_supported(wz),
+        })
+
+    @app.route("/api/load/status")
+    def api_load_status() -> Response:
+        """Report whether a WZ is loaded and, if so, its identity. The
+        welcome page polls this after submitting /api/load to know
+        when to redirect."""
+        if wz is None:
+            return jsonify({"loaded": False})
+        return jsonify({
+            "loaded": True,
+            "path": wz_path,
+            "region": region,
+            "version": wz.version,
+            "hierarchical": hierarchical,
+            "has_character": _character_supported(wz),
+        })
 
     @app.route("/api/character/parts/<category>")
     def api_character_parts(category: str) -> Response:
@@ -2167,9 +2307,9 @@ def create_app(wz_path: str, region: str = "auto", version: Optional[int] = None
     # navigation. ``WZ_FORCE_FULL_REWRITE`` is set when an edit changes
     # the tree's structure (rename, etc.) — every image needs to be
     # re-emitted because directory entries / property names shift, so
-    # the per-image verbatim-copy fast path can't be trusted.
-    app.config["WZ_DIRTY_PATHS"] = set()
-    app.config["WZ_FORCE_FULL_REWRITE"] = False
+    # the per-image verbatim-copy fast path can't be trusted. The
+    # initial values are seeded in ``_do_load`` (and reset there on
+    # every reload), so we don't re-initialise here.
 
     @app.route("/api/edit", methods=["POST"])
     def api_edit() -> Response:
@@ -2875,7 +3015,9 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Browse a MapleStory .wz file in your browser")
-    parser.add_argument("wz", help="path to the .wz file")
+    parser.add_argument("wz", nargs="?", default=None,
+                        help="path to the .wz file or hierarchical pack folder. "
+                             "Omit to start at the welcome screen and pick a file in the browser.")
     parser.add_argument("--region", default="auto",
                         choices=["auto", "GMS", "EMS", "BMS"],
                         help="MapleStory region (default: auto — pick the "

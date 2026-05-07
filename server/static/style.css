@@ -26,8 +26,19 @@ header .badge {
 }
 header .path { font-family: ui-monospace, "Cascadia Mono", Menlo, monospace; color: #aaa; }
 #save-slot { margin-left: auto; }
-header .char-link {
+header .open-link {
   margin-left: auto;
+  color: #d6d6d6;
+  text-decoration: none;
+  font-size: 12px;
+  border: 1px solid #1a1b1d;
+  padding: 4px 10px;
+  border-radius: 3px;
+  background: #2b2d31;
+}
+header .open-link:hover { background: #3a3d44; }
+header .open-link + .char-link { margin-left: 8px; }
+header .char-link {
   color: #e8b96b;
   text-decoration: none;
   font-size: 12px;
@@ -37,7 +48,8 @@ header .char-link {
   background: #2b2620;
 }
 header .char-link:hover { background: #3a3026; }
-header .char-link + #save-slot { margin-left: 8px; }
+header .char-link + #save-slot,
+header .open-link + #save-slot { margin-left: 8px; }
 .save-btn {
   background: #3a4d6f;
   color: #d6d6d6;

@@ -1,0 +1,142 @@
+/* Welcome / open-file page. Shown when no WZ is loaded, and via
+ * /open as a "Switch file…" dialog. Overrides the base style.css
+ * tree-browser layout (body/main are flex column with flex:1 for
+ * the tree shell — wrong shape for a centered card). */
+
+body.welcome-page {
+  background: #1f2024;
+  color: #d6d6d6;
+  font: 14px system-ui, -apple-system, "Segoe UI", sans-serif;
+  margin: 0;
+  height: auto;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+  box-sizing: border-box;
+}
+
+body.welcome-page main.welcome-card {
+  display: block;
+  flex: 0 0 auto;
+  overflow: visible;
+  background: #26282d;
+  border: 1px solid #1a1b1d;
+  border-radius: 6px;
+  padding: 28px 32px;
+  width: 100%;
+  max-width: 640px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.welcome-card h1 {
+  margin: 0 0 4px;
+  font-size: 28px;
+  letter-spacing: -0.01em;
+}
+
+.welcome-card .lead {
+  margin: 0 0 20px;
+  color: #aaa;
+}
+
+.welcome-card code {
+  background: #1a1b1d;
+  border: 1px solid #111;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 12px;
+  color: #d6d6d6;
+}
+
+.open-form { display: flex; flex-direction: column; gap: 12px; }
+
+.open-row { display: flex; flex-direction: column; gap: 4px; }
+.open-row-inline {
+  flex-direction: row;
+  align-items: flex-end;
+  gap: 12px;
+}
+.open-field { display: flex; flex-direction: column; gap: 4px; }
+
+.open-label {
+  font-size: 12px;
+  color: #aaa;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.open-form input[type="text"],
+.open-form input[type="number"],
+.open-form select {
+  background: #1a1b1d;
+  color: #e8e8e8;
+  border: 1px solid #111;
+  border-radius: 3px;
+  padding: 7px 10px;
+  font: inherit;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  outline: none;
+}
+.open-form input[type="text"] { width: 100%; box-sizing: border-box; }
+.open-form input[type="number"] { width: 90px; }
+.open-form select { font-family: inherit; padding-right: 28px; }
+
+.open-form input:focus, .open-form select:focus {
+  border-color: #4d6592;
+}
+
+.open-form button {
+  background: #3a4d6f;
+  color: #d6d6d6;
+  border: 1px solid #1a1b1d;
+  border-radius: 3px;
+  padding: 7px 22px;
+  font: inherit;
+  cursor: pointer;
+  margin-left: auto;
+}
+.open-form button:hover:not(:disabled) { background: #4d6592; }
+.open-form button:disabled { opacity: 0.5; cursor: progress; }
+
+.open-status {
+  padding: 8px 12px;
+  border-radius: 3px;
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+.open-status.is-error {
+  background: #3b1f1f;
+  border: 1px solid #5a2828;
+  color: #ffb8b8;
+}
+.open-status.is-info {
+  background: #1f2c3b;
+  border: 1px solid #28465a;
+  color: #b8d8ff;
+}
+
+.open-current {
+  margin: 18px 0 0;
+  padding-top: 14px;
+  border-top: 1px solid #1a1b1d;
+  font-size: 13px;
+  color: #aaa;
+}
+.open-current code { word-break: break-all; }
+.open-back {
+  margin-left: 10px;
+  color: #7aa3d8;
+  text-decoration: none;
+}
+.open-back:hover { text-decoration: underline; }
+
+.open-tip {
+  margin: 16px 0 0;
+  font-size: 12px;
+  color: #888;
+  line-height: 1.5;
+}

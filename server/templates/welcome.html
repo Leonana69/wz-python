@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>wzpy — Open file</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='welcome.css') }}">
+</head>
+<body class="welcome-page">
+  <main class="welcome-card">
+    <h1>wzpy</h1>
+    <p class="lead">Open a MapleStory <code>.wz</code> file or hierarchical pack folder to begin.</p>
+
+    <form id="open-form" class="open-form" autocomplete="off">
+      <label class="open-row">
+        <span class="open-label">Path</span>
+        <input type="text" id="open-path" name="path"
+               value="{{ current_path or '' }}"
+               placeholder="C:\path\to\Mob.wz   or   D:\Git\wz-python\data\Character"
+               autocomplete="off" spellcheck="false" autofocus>
+      </label>
+      <div class="open-row open-row-inline">
+        <label class="open-field">
+          <span class="open-label">Region</span>
+          <select id="open-region" name="region">
+            <option value="auto" {% if not current_region %}selected{% endif %}>Auto-detect</option>
+            <option value="GMS" {% if current_region == 'GMS' %}selected{% endif %}>GMS</option>
+            <option value="EMS" {% if current_region == 'EMS' %}selected{% endif %}>EMS</option>
+            <option value="BMS" {% if current_region == 'BMS' %}selected{% endif %}>BMS</option>
+          </select>
+        </label>
+        <label class="open-field">
+          <span class="open-label">Version</span>
+          <input type="number" id="open-version" name="version"
+                 placeholder="auto" min="0" max="999">
+        </label>
+        <button type="submit" id="open-submit">Open</button>
+      </div>
+      <div id="open-status" class="open-status" hidden></div>
+    </form>
+
+    {% if current_path %}
+    <p class="open-current">
+      Currently loaded: <code>{{ current_path }}</code>
+      <a class="open-back" href="/">← back to tree browser</a>
+    </p>
+    {% endif %}
+
+    <p class="open-tip">
+      Tip: paste any local path. Hierarchical packs (e.g. <code>data/Character</code>)
+      should point at the <em>folder</em>, single-file archives at the <code>.wz</code>.
+    </p>
+  </main>
+
+  <script>
+    {% if redirect_after_load %}
+    window._WZPY_REDIRECT_AFTER_LOAD = {{ redirect_after_load|tojson }};
+    {% endif %}
+  </script>
+  <script src="{{ url_for('static', filename='open_file.js') }}"></script>
+</body>
+</html>
