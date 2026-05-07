@@ -1691,9 +1691,22 @@ class CharacterRenderer:
         # off the world_anchors map populated above; world_anchors
         # is final at this point because all character placements
         # have already registered their map points.
+        #
+        # ``frozen_anchors`` is only set in stand1 / stand2's
+        # post-frame-0 calls, where head/hair/cap/face are pinned
+        # to frame 0 to keep them from wobbling against the body's
+        # breathing. Effect canvases ship per-frame origin shifts
+        # of 1-2 px (the ember-flicker / ribbon-sway) that compose
+        # NATURALLY with per-frame anchors but DRIFT visibly when
+        # the anchor is frozen — the user sees the effect slide
+        # around the static cap each frame. Pin the effect to its
+        # own frame 0 in that case so it stays glued to the head,
+        # matching how the cap itself is held still.
         if self.effects is not None:
+            stabilized = frozen_anchors is not None
+            effect_frame = 0 if stabilized else frame
             placements.extend(self._build_effect_placements(
-                equip_ids, pose, frame, world_anchors,
+                equip_ids, pose, effect_frame, world_anchors,
             ))
 
         zmap_size = len(self._zmap)
