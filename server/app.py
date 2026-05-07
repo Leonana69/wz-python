@@ -749,6 +749,7 @@ def create_app(
     app.config["WZ_FORCE_FULL_REWRITE"] = False
     app.config["CHARACTER_STRINGS"] = None
     app.config["CHARACTER_RENDERER"] = None
+    app.config["BUNDLE_ROOT"] = None
 
     # Mutable closure state for the loaded WZ. Routes capture ``wz``,
     # ``wz_path``, ``region``, ``version``, ``hierarchical`` by name;
@@ -811,6 +812,26 @@ def create_app(
             app.config["CHARACTER_EFFECTS"] = _try_load_character_effects(
                 path, r, req_version,
             )
+            # When all three Character-bundle packs loaded cleanly,
+            # build a synthetic browse root so the tree view shows
+            # Character / Effect / String as top-level subdirs and the
+            # user can navigate into any of them. The underlying pack
+            # roots are mounted directly (no copy) so child lookups
+            # and outlink resolution work the same as browsing each
+            # pack on its own.
+            strings_obj = app.config.get("CHARACTER_STRINGS")
+            effects_obj = app.config.get("CHARACTER_EFFECTS")
+            if (strings_obj is not None and effects_obj is not None
+                    and _character_supported(wz)):
+                bundle = WzDirectory(name="", parent=None)
+                bundle.subdirs = {
+                    "Character": wz.root,
+                    "Effect": effects_obj.root,
+                    "String": strings_obj.root,
+                }
+                app.config["BUNDLE_ROOT"] = bundle
+            else:
+                app.config["BUNDLE_ROOT"] = None
             if old is not None and hasattr(old, "close"):
                 try:
                     old.close()
@@ -821,6 +842,14 @@ def create_app(
         _do_load(wz_path, region, version)
 
     # ── helpers ──────────────────────────────────────────────────────
+    def _browse_root() -> "WzDirectory":
+        """Pick the root used for tree-browser navigation. Defaults
+        to the loaded ``wz.root``; switches to the synthetic bundle
+        root when Character + Effect + String all loaded together so
+        the user can navigate into any of the three from one view."""
+        bundle = app.config.get("BUNDLE_ROOT")
+        return bundle if bundle is not None else wz.root
+
     def _resolve(path: str) -> Tuple[Any, str]:
         """Walk ``path`` (slash-separated) from the WZ root.
 
@@ -829,9 +858,10 @@ def create_app(
         path inside the .img property tree (may be empty).
         """
         path = path.strip("/")
+        root = _browse_root()
         if not path:
-            return wz.root, ""
-        node: Any = wz.root
+            return root, ""
+        node: Any = root
         parts = path.split("/")
         i = 0
         while i < len(parts):
@@ -922,7 +952,7 @@ def create_app(
             # viewer fetches the linked PNG.
             if p.child("_outlink") is not None or p.child("_inlink") is not None:
                 try:
-                    linked = resolve_canvas_link(p, wz.root)
+                    linked = resolve_canvas_link(p, _browse_root())
                 except Exception:
                     linked = None
                 if linked is not None and linked is not p:
@@ -1027,7 +1057,21 @@ def create_app(
             wz_version=wz.version,
             wz_region=region,
             has_character=False,
+            tree_root_label=_bundle_root_label(),
         )
+
+    def _bundle_root_label() -> Optional[str]:
+        """When the synthetic bundle root is active (Character + Effect
+        + String mounted as peers), return a friendlier label than the
+        loaded path's basename so the tree doesn't show "Character"
+        wrapping a "Character" subdir. Falls back to the directory
+        that contains all three packs."""
+        if app.config.get("BUNDLE_ROOT") is None or not wz_path:
+            return None
+        # The Character pack lives at wz_path; its parent is the
+        # bundle dir. ``data/Character`` → ``data``.
+        parent = os.path.dirname(os.path.abspath(wz_path).rstrip(os.sep))
+        return os.path.basename(parent) or "Bundle"
 
     @app.route("/tree")
     def tree_browser() -> str:
@@ -1046,6 +1090,7 @@ def create_app(
             wz_version=wz.version,
             wz_region=region,
             has_character=_character_supported(wz),
+            tree_root_label=_bundle_root_label(),
         )
 
     @app.route("/open")
@@ -1785,7 +1830,7 @@ def create_app(
         link_target: Optional[WzCanvasProperty] = None
         if prop.child("_outlink") is not None or prop.child("_inlink") is not None:
             try:
-                link_target = resolve_canvas_link(prop, wz.root)
+                link_target = resolve_canvas_link(prop, _browse_root())
             except Exception:
                 link_target = None
         render_prop = link_target if link_target is not None else prop
@@ -1999,7 +2044,7 @@ def create_app(
             if canvas.child("_outlink") is None and canvas.child("_inlink") is None:
                 return canvas.width, canvas.height
             try:
-                linked = resolve_canvas_link(canvas, wz.root)
+                linked = resolve_canvas_link(canvas, _browse_root())
             except Exception:
                 linked = None
             if isinstance(linked, WzCanvasProperty):

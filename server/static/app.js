@@ -2183,7 +2183,14 @@ async function init() {
   // directly and bypasses VirtualList — so a 64-bit WZ where the root
   // itself has hundreds of entries would never get virtualized.
   const wzPath = document.body.dataset.wzName || "WZ file";
-  const baseName = wzPath.split(/[/\\]/).pop() || wzPath;
+  // ``data-tree-root-label`` overrides the basename for the synthetic
+  // tree root — e.g. char-bundle mode mounts Character + Effect +
+  // String as peers and labels the wrapper with the parent dir name
+  // ("data") instead of "Character" so we don't end up with two
+  // sibling "Character" entries on screen.
+  const overrideLabel = document.body.dataset.treeRootLabel || "";
+  const baseName = overrideLabel
+    || (wzPath.split(/[/\\]/).pop() || wzPath);
   const fileMeta = { name: baseName, kind: "Directory", leaf: false };
   const fileLi = makeNode(fileMeta, "");
   // Children of the WZ root live at path "" on the server, not "<filename>/".

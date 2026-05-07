@@ -92,6 +92,12 @@ class StringLookup:
         except Exception:
             pass
 
+    @property
+    def root(self):
+        """Pack root — exposed so the multi-pack bundle view can mount
+        the loaded String tree alongside Character and Effect."""
+        return self._wz.root
+
     # ── lookup ──────────────────────────────────────────────────────
     def name(self, category: str, equip_id: str) -> Optional[str]:
         sub = _CHAR_TO_STRING_CATEGORY.get(category)
