@@ -829,12 +829,18 @@ def create_app(
             effects_obj = app.config.get("CHARACTER_EFFECTS")
             if (strings_obj is not None and effects_obj is not None
                     and _character_supported(wz)):
+                # Flatten the Character pack's contents directly under
+                # the bundle root and mount Effect / String as named
+                # peers. This keeps the character-builder URL contract
+                # — paths like ``Hair/00030020.img/default/hair`` still
+                # resolve from the root the way they would when only
+                # Character is loaded — while the auxiliary packs are
+                # reachable as ``Effect/...`` and ``String/...``.
                 bundle = WzDirectory(name="", parent=None)
-                bundle.subdirs = {
-                    "Character": wz.root,
-                    "Effect": effects_obj.root,
-                    "String": strings_obj.root,
-                }
+                bundle.subdirs = {**wz.root.subdirs,
+                                  "Effect": effects_obj.root,
+                                  "String": strings_obj.root}
+                bundle.images = dict(wz.root.images)
                 app.config["BUNDLE_ROOT"] = bundle
             else:
                 app.config["BUNDLE_ROOT"] = None
@@ -1063,21 +1069,18 @@ def create_app(
             wz_version=wz.version,
             wz_region=region,
             has_character=False,
-            tree_root_label=_bundle_root_label(),
+            tree_flat_root=_is_bundle_mode(),
         )
 
-    def _bundle_root_label() -> Optional[str]:
-        """When the synthetic bundle root is active (Character + Effect
-        + String mounted as peers), return a friendlier label than the
-        loaded path's basename so the tree doesn't show "Character"
-        wrapping a "Character" subdir. Falls back to the directory
-        that contains all three packs."""
-        if app.config.get("BUNDLE_ROOT") is None or not wz_path:
-            return None
-        # The Character pack lives at wz_path; its parent is the
-        # bundle dir. ``data/Character`` → ``data``.
-        parent = os.path.dirname(os.path.abspath(wz_path).rstrip(os.sep))
-        return os.path.basename(parent) or "Bundle"
+    def _is_bundle_mode() -> bool:
+        """True when the synthetic bundle root is active (Character +
+        Effect + String mounted as peers). The tree browser uses this
+        to skip its synthetic wrapper LI so the bundle's children
+        (Character's subdirs + Effect + String) sit directly at the
+        root — otherwise the user sees an extra wrapper level
+        (e.g. ``data/`` or ``Character/``) that doesn't correspond to
+        any real on-disk path."""
+        return app.config.get("BUNDLE_ROOT") is not None
 
     @app.route("/tree")
     def tree_browser() -> str:
@@ -1096,7 +1099,7 @@ def create_app(
             wz_version=wz.version,
             wz_region=region,
             has_character=_character_supported(wz),
-            tree_root_label=_bundle_root_label(),
+            tree_flat_root=_is_bundle_mode(),
         )
 
     @app.route("/open")

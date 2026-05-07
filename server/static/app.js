@@ -595,12 +595,17 @@ async function selectSearchResult(r) {
 // failed to render, expand fetch failed, …) so the caller can fall
 // back gracefully.
 async function navigateToPath(targetPath) {
-  const fileLi = treeRoot.firstElementChild;
-  if (!fileLi || !fileLi._childUl) return null;
+  // Flat-root mode (char bundle): treeRoot itself contains the
+  // top-level entries — there's no synthetic wrapper LI. Walk
+  // straight from the root <ul>. With wrapper, descend into its
+  // ``_childUl`` first.
+  const flatRoot = document.body.dataset.treeFlatRoot === "1";
+  const fileLi = flatRoot ? null : treeRoot.firstElementChild;
+  if (!flatRoot && (!fileLi || !fileLi._childUl)) return null;
   const segments = String(targetPath).split("/").filter(Boolean);
   if (!segments.length) return fileLi;
 
-  let parentUl = fileLi._childUl;
+  let parentUl = flatRoot ? treeRoot : fileLi._childUl;
   let lastLi = null;
   for (const seg of segments) {
     const li = await ensureChildRendered(parentUl, seg);
@@ -2182,22 +2187,30 @@ async function init() {
   // name. Without this wrapper the root <ul id="tree"> is populated
   // directly and bypasses VirtualList — so a 64-bit WZ where the root
   // itself has hundreds of entries would never get virtualized.
+  //
+  // ``data-tree-flat-root`` (set in char-bundle mode) skips the wrapper
+  // entirely and renders the bundle's children straight into the root
+  // <ul>. The bundle is a synthetic mount of Character's subdirs plus
+  // Effect/String — there is no real on-disk directory whose name would
+  // make sense as a wrapper label, and the entry count is small (~30)
+  // so losing virtualization is fine.
   const wzPath = document.body.dataset.wzName || "WZ file";
-  // ``data-tree-root-label`` overrides the basename for the synthetic
-  // tree root — e.g. char-bundle mode mounts Character + Effect +
-  // String as peers and labels the wrapper with the parent dir name
-  // ("data") instead of "Character" so we don't end up with two
-  // sibling "Character" entries on screen.
-  const overrideLabel = document.body.dataset.treeRootLabel || "";
-  const baseName = overrideLabel
-    || (wzPath.split(/[/\\]/).pop() || wzPath);
-  const fileMeta = { name: baseName, kind: "Directory", leaf: false };
-  const fileLi = makeNode(fileMeta, "");
-  // Children of the WZ root live at path "" on the server, not "<filename>/".
-  fileLi._fullPath = "";
-  treeRoot.appendChild(fileLi);
+  const flatRoot = document.body.dataset.treeFlatRoot === "1";
   try {
-    await expandLi(fileLi, "");
+    if (flatRoot) {
+      const data = await fetchJson(`/api/tree/`);
+      const frag = document.createDocumentFragment();
+      for (const c of data.children) frag.appendChild(makeNode(c, ""));
+      treeRoot.appendChild(frag);
+    } else {
+      const baseName = wzPath.split(/[/\\]/).pop() || wzPath;
+      const fileMeta = { name: baseName, kind: "Directory", leaf: false };
+      const fileLi = makeNode(fileMeta, "");
+      // Children of the WZ root live at path "" on the server, not "<filename>/".
+      fileLi._fullPath = "";
+      treeRoot.appendChild(fileLi);
+      await expandLi(fileLi, "");
+    }
   } catch (err) {
     treeRoot.innerHTML = `<li style="color:#c47878">load error: ${err.message}</li>`;
   }

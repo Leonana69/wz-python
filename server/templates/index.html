@@ -5,7 +5,7 @@
   <title>{{ wz_name }} — wzpy</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body data-wz-name="{{ wz_name }}"{% if tree_root_label %} data-tree-root-label="{{ tree_root_label }}"{% endif %}>
+<body data-wz-name="{{ wz_name }}"{% if tree_flat_root %} data-tree-flat-root="1"{% endif %}>
   <header>
     <h1>wzpy</h1>
     <div class="meta">
