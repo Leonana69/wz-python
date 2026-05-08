@@ -188,6 +188,13 @@ _BACK_FACING_Z_OVERRIDE: Dict[str, int] = {
     "capeOverWepon":          246,
     "backHairOverCape":       248,  # hair-over-cape strands; above cape, below main hair
     "capeOverHead":           265,
+    # ``weaponOverGlove`` shows up on ~500 cape ladder/rope canvases
+    # (cape 01102292's main cloth uses it). The slot name reads as
+    # weapon-related but the artist's intent for capes is "above
+    # everything" — wing/cloak shapes that drape from the back and
+    # need to be visible past hair / cap. Place above the hair
+    # cluster but below the shield/weapon-on-back cluster.
+    "weaponOverGlove":        268,
 }
 
 
