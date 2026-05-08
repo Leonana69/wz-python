@@ -223,21 +223,6 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     # Body / torso reference.
     "shieldBelowBody",
     "weaponBelowBody",
-    # Back-of-cap canvases sit BEFORE ``hairBelowBody`` so long hair
-    # hangs in front of brims / hood-wraps / back-pieces (e.g.
-    # 01002437's ``defaultAc`` z=``capBelowBody``) instead of the
-    # cap covering the hair. Body still draws on top so the brim
-    # disappears behind the torso.
-    #
-    # Caps like 01001036 / 01000000 (``defaultAc`` z=``capBelowBody``
-    # / ``capAccessoryBelowBody``) and the back-hanging full-helmet
-    # parts on 01003934 (``capBelowHead``) / 01003817 (``capBelowHair``)
-    # all share this "behind everything except for whatever body /
-    # back hair covers them" placement.
-    "capBelowHead",
-    "capBelowHair",
-    "capBelowBody",
-    "capAccessoryBelowBody",
     "hairBelowBody",
     "body",
     # Pants / shoes stack (behind body parts that overlap).
@@ -371,12 +356,21 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     "capBelowHairOverHead",
     "hairOverHead",
     # Cap layers (above hair, below face accessories that overlap caps).
-    # ``capBelowBody`` and ``capAccessoryBelowBody`` are NOT in this
-    # block — they live with the back-of-body cluster up above so the
-    # body covers them as their slot names promise.
+    # ``capBelowHead`` / ``capBelowHair`` / ``capBelowBody`` /
+    # ``capAccessoryBelowBody`` despite their ``Below*`` names are
+    # the BACK layers of a multi-piece cap and need to render above
+    # hair / head so the user sees the hat — caps like 01000111 put
+    # their entire main hat shape on ``capAccessoryBelowBody`` while
+    # the front-side ``default`` is just a thin headband. Place them
+    # below the front cap layer so the front piece (cap /
+    # capOverHair / capAccessory) still draws on top.
     "capeOverHead",
     "capBelowAccessory",
     "capAccessoryBelowAccFace",
+    "capBelowHead",
+    "capBelowHair",
+    "capBelowBody",
+    "capAccessoryBelowBody",
     "cap",
     "capOverHair",
     "capAccessory",
@@ -2393,10 +2387,7 @@ class CharacterRenderer:
         back_floor = -1  # below backHair; any non-back slot lands here
 
         def effective_slot_z(pl: _Placement) -> int:
-            """slot_z with the back-facing override / floor applied,
-            so ``parent_z`` (used by effects to land relative to the
-            equip they decorate) sees the SAME z that the equip's
-            canvas will sort to."""
+            """slot_z with the back-facing override / floor applied."""
             z = slot_z(pl)
             if not back_facing:
                 return z
@@ -2406,31 +2397,20 @@ class CharacterRenderer:
             override = _BACK_FACING_Z_OVERRIDE.get(slot)
             return override if override is not None else z
 
-        # Effect overlays carry an integer z that's authored RELATIVE
-        # to the equip they decorate (e.g. a cap with effect ``z=2``
-        # should render two layers above the cap canvas, not at
-        # absolute slot ``zmap_size+2`` where it floats above
-        # everything regardless of where the cap sits). Pre-compute
-        # each non-effect equip's effective z (max across all its
-        # placements, in case a single equip spans multiple slots
-        # like a 2H weapon's grip vs. blade) so the effect lookup
-        # can lean on it.
-        parent_z: Dict[str, int] = {}
-        for pl in placements:
-            if pl.category == "Effect":
-                continue
-            z = effective_slot_z(pl)
-            if pl.equip_id in parent_z:
-                if z > parent_z[pl.equip_id]:
-                    parent_z[pl.equip_id] = z
-            else:
-                parent_z[pl.equip_id] = z
-
+        # Effect overlays carry an integer z that's interpreted as
+        # an ABSOLUTE layer offset relative to the whole character:
+        # positive values render in front of every body / equip
+        # canvas; negative values render behind everything. Within
+        # each band the integer value drives ordering (z=2 sits
+        # above z=1, z=-1 sits above z=-2). This matches how the
+        # MapleStory client treats ``ItemEff`` z's — they're not
+        # tied to the parent equip's zmap slot.
         def z_for(pl: _Placement) -> int:
             if pl.category == "Effect":
                 ez = pl.extra_z if pl.extra_z is not None else 0
-                base = parent_z.get(pl.equip_id, zmap_size)
-                return base + ez
+                if ez >= 0:
+                    return zmap_size + ez
+                return ez
             return effective_slot_z(pl)
 
         placements.sort(key=z_for)
