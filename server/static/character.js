@@ -782,16 +782,25 @@ const POSE_LABELS = {
   dead: "Dead",
 };
 
+// Back-facing climbing poses: kept in the dropdown even when the
+// equipped weapon doesn't ship them, since the weapon isn't visible
+// from behind anyway. The server's ``detect_pose`` honors these too
+// and the renderer simply omits the weapon canvas. Keep in sync with
+// ``_WEAPON_OPTIONAL_POSES`` in wzpy/character.py.
+const WEAPON_OPTIONAL_POSES = new Set(["ladder", "rope"]);
+
 function visiblePoses() {
   // Start from the body's authored poses (server-discovered). When a
   // weapon is equipped, narrow to the intersection so the user only
   // sees poses that have weapon art too — picking a pose with no
   // weapon canvas would silently render the character with an
-  // invisible weapon.
+  // invisible weapon. Climbing poses (ladder / rope) are exempt:
+  // the weapon isn't visible from behind, so they stay selectable
+  // regardless of the weapon's authored action set.
   const all = state.bodyPoses.map(p => p.pose);
   if (!state.weaponPoses.length) return all;
   const wp = new Set(state.weaponPoses);
-  return all.filter(p => wp.has(p));
+  return all.filter(p => wp.has(p) || WEAPON_OPTIONAL_POSES.has(p));
 }
 
 function poseDelays(pose) {

@@ -154,6 +154,17 @@ _BACK_FACING_Z_OVERRIDE: Dict[str, int] = {
     "backCapOverHair":        261,
     "backCapAccessory":       262,
     "backAccessoryEar":       263,
+    # Shield + weapon strapped to the back: outermost from back view,
+    # so above the head/cap cluster. The intra-cluster ordering keeps
+    # ``backWeaponOverShield`` above ``backShield`` (the slot name
+    # spells out the intent) and the ``OverHead`` / ``OverGlove``
+    # variants above their plain weapon counterpart.
+    "backShieldBelowBody":    270,
+    "backShield":             271,
+    "backWeapon":             272,
+    "backWeaponOverHead":     273,
+    "backWeaponOverShield":   274,
+    "backWeaponOverGlove":    275,
 }
 
 
@@ -483,6 +494,14 @@ DEFAULT_POSE = "stand1"
 # requested pose isn't authored in any numeric weapon-num child).
 # Cash weapons always ship a rest pose so this tiny set is enough.
 _WEAPON_FALLBACK_POSES: Tuple[str, ...] = ("stand1", "stand2")
+
+# Poses that always remain selectable, even when the equipped weapon
+# doesn't ship art for them. These are back-facing climbing poses
+# (ladder / rope) — body / hair / cap art is what the user wants to
+# inspect, and the weapon (held in front during normal poses) just
+# isn't visible from behind. The renderer omits the weapon canvas
+# rather than refusing the pose.
+_WEAPON_OPTIONAL_POSES: frozenset = frozenset({"ladder", "rope"})
 
 # Each Head image ships its ``head`` canvas alongside one or more ear
 # variants under ``front/`` (e.g. ``humanEar``, ``lefEar``,
@@ -1315,13 +1334,22 @@ class CharacterRenderer:
     def detect_pose(self, equip_ids: List[str], requested: Optional[str] = None) -> str:
         """Pick a pose for a composite. Honors ``requested`` if the
         equipped weapon supports it; otherwise falls back to the
-        weapon's first available pose, then to ``stand1``."""
+        weapon's first available pose, then to ``stand1``.
+
+        Back-facing poses (ladder / rope) are an exception: even when
+        the weapon doesn't ship those animations, the request is
+        honored — the renderer simply omits the weapon canvas for
+        that pose. Climbing animations are body / hair / cap art and
+        the user expects them to remain selectable regardless of what
+        weapon happens to be equipped."""
         weapon_id = next(
             (e for e in equip_ids if category_for_id(e) == "Weapon"),
             None,
         )
         if weapon_id is None:
             return requested if requested in SUPPORTED_POSES else DEFAULT_POSE
+        if requested in _WEAPON_OPTIONAL_POSES:
+            return requested
         poses = self.get_weapon_poses(weapon_id) or [DEFAULT_POSE]
         if requested in poses:
             return requested
