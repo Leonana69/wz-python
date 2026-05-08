@@ -1627,6 +1627,16 @@ class CharacterRenderer:
                     for pl in placements:
                         if pl.top_left is None:
                             continue
+                        # ItemEff overlays are anchored off the
+                        # frozen character anchors (navel / brow /
+                        # neck / hand) — their top_left is already
+                        # constant across frames, so the body-canvas
+                        # delta would shift them away from the
+                        # frozen anchor (e.g. effect 1103249 anchored
+                        # to navel=(0,0) every frame would otherwise
+                        # drift with the body's breathing).
+                        if pl.category == "Effect":
+                            continue
                         key = (pl.equip_id, pl.name)
                         f0_canvas = frame0_canvases.get(key)
                         anchor_name = pl.anchor_override or _determine_anchor(
@@ -1803,15 +1813,17 @@ class CharacterRenderer:
                 for pl in placements:
                     if pl.top_left is None:
                         continue
+                    # ItemEff overlays are anchored off frozen
+                    # character anchors (navel / brow / etc.) and
+                    # their top_left is already constant across
+                    # frames; the body-canvas delta would shift them
+                    # off the frozen anchor (e.g. effect 1103249
+                    # anchored to navel=(0,0) drifts with the body's
+                    # breathing if we apply dx/dy here).
+                    if pl.category == "Effect":
+                        continue
                     key = (pl.equip_id, pl.name)
                     f0_canvas = frame0_canvases.get(key)
-                    # Effect placements carry their own resolved anchor
-                    # name (``brow`` for pos=1, ``navel`` for pos=0/…)
-                    # because their canvases ship no ``map``; without
-                    # the override they'd all default to ``navel`` and
-                    # head-anchored ember/ribbon effects would get
-                    # translated by the body delta each frame, which
-                    # the user sees as a 1-2 px slide around the cap.
                     anchor_name = pl.anchor_override or _determine_anchor(
                         pl.canvas, pl.category,
                     )
@@ -1938,11 +1950,6 @@ class CharacterRenderer:
                 pose_tree = _resolve_uol(pose_tree) if isinstance(pose_tree, WzUolProperty) else pose_tree
             if not isinstance(pose_tree, WzSubProperty):
                 continue
-            # If the pose tree resolves to a back-facing variant
-            # (``backDefault`` or any ``back*`` subtree), the artist
-            # already authored it for the back view — skip the
-            # forward-facing flip the back-pose branch applies below.
-            pose_tree_is_back = pose_tree.name.startswith("back")
             # Collect numeric frame children, ordered by index.
             frame_children = sorted(
                 (c for c in pose_tree.children() if c.name.isdigit()),
@@ -2048,49 +2055,6 @@ class CharacterRenderer:
                 z_int = _try_int(eff_node.get("z"))
             if z_int is None:
                 z_int = _try_int(target.child("z"))
-
-            # Back-facing poses (ladder, rope) show the character from
-            # behind, so an effect canvas authored facing forward needs
-            # to render mirrored. Skip the flip when the pose tree
-            # itself is a back-facing variant (``backDefault`` etc.) —
-            # the artist already drew it for the back view, so flipping
-            # would un-mirror it. Decode now, flip the image, and
-            # re-anchor so the world position of the origin point
-            # stays put. Replaces decoded_override / width / height
-            # consistently for both the stabilized-composite path and
-            # the natural per-frame path.
-            if back_pose and not pose_tree_is_back:
-                if decoded_override is not None:
-                    layer_img = decoded_override
-                    layer_w = width_override
-                    layer_h = height_override
-                    layer_origin = origin
-                else:
-                    try:
-                        layer_img = decode_canvas(pixel_canvas, region=self.region)
-                    except Exception:
-                        layer_img = None
-                    if layer_img is not None:
-                        if layer_img.mode != "RGBA":
-                            layer_img = layer_img.convert("RGBA")
-                        layer_w = layer_img.width
-                        layer_h = layer_img.height
-                        layer_origin = origin
-                    else:
-                        layer_w = layer_h = None
-                        layer_origin = origin
-                if layer_img is not None:
-                    flipped = layer_img.transpose(Image.FLIP_LEFT_RIGHT)
-                    new_origin_x = layer_w - layer_origin[0]
-                    new_origin_y = layer_origin[1]
-                    decoded_override = flipped
-                    width_override = layer_w
-                    height_override = layer_h
-                    origin = (new_origin_x, new_origin_y)
-                    top_left = (
-                        anchor_world[0] - new_origin_x,
-                        anchor_world[1] - new_origin_y,
-                    )
 
             out.append(_Placement(
                 equip_id=eid, category="Effect",
