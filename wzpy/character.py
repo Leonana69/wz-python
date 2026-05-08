@@ -1993,17 +1993,29 @@ class CharacterRenderer:
             #   * pos=0 or no pos  → ``navel`` plus a fixed (+8, +21)
             #     offset (right 8, down 21 px) so effects land at the
             #     same lower-body point the MapleStory client uses as
-            #     a default attachment. Without it capes like 1103249
-            #     (effect/default ships no ``pos``) and 1103339
-            #     (pos=0) sit too high.
-            pos_node = pose_tree.get("pos")
-            pos_node = _resolve_uol(pos_node) if isinstance(pos_node, WzUolProperty) else pos_node
-            pos_val: Optional[int] = None
-            if pos_node is not None:
+            #     a default attachment.
+            # When the pose subtree (e.g. ``ladder``) doesn't author
+            # its own ``pos``, cascade to ``effect/default`` so the
+            # artist's default attachment carries through to the
+            # back-pose subtrees that share the same canvas (e.g.
+            # 1103187 sets pos=1 only on default but reuses the
+            # canvas across default / ladder / rope).
+            def _pos_of(tree: Any) -> Optional[int]:
+                node = tree.get("pos") if isinstance(tree, WzSubProperty) else None
+                node = _resolve_uol(node) if isinstance(node, WzUolProperty) else node
+                if node is None:
+                    return None
                 try:
-                    pos_val = int(getattr(pos_node, "value", None))
+                    return int(getattr(node, "value", None))
                 except (TypeError, ValueError):
-                    pos_val = None
+                    return None
+            pos_val = _pos_of(pose_tree)
+            if pos_val is None and pose_tree.name != "default":
+                default_tree = eff_node.get("default")
+                default_tree = _resolve_uol(default_tree) \
+                    if isinstance(default_tree, WzUolProperty) else default_tree
+                if isinstance(default_tree, WzSubProperty):
+                    pos_val = _pos_of(default_tree)
             anchor_name = self._EFFECT_POS_ANCHOR.get(pos_val, "navel")
             anchor_world = world_anchors.get(anchor_name) or world_anchors.get("navel") or (0, 0)
             if pos_val != 1:
