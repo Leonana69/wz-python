@@ -165,6 +165,15 @@ _BACK_FACING_Z_OVERRIDE: Dict[str, int] = {
     "backWeaponOverHead":     273,
     "backWeaponOverShield":   274,
     "backWeaponOverGlove":    275,
+    # Cape slots used by back-view animations (e.g. cape 01101000's
+    # ladder/rope canvases use ``capeBelowHair`` for the main cloth
+    # and ``capeOverHead`` for the over-head straps). These don't
+    # start with ``back`` so the default back-floor would hide them;
+    # bump them above the body cluster but below the hair cluster
+    # (``capeBelowHair`` literally means "below hair") and above the
+    # hair cluster for ``capeOverHead``.
+    "capeBelowHair":          240,
+    "capeOverHead":           265,
 }
 
 
@@ -207,7 +216,12 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     # 01102164's ``capeArm`` — a backpack-strap accessory that
     # passes over the chest) render on top of the coat and pants.
     # The actual cape cloth uses ``capeBelowBody`` and stays here.
+    # ``capeBelowHair`` (e.g. cape 01101000) is similarly a
+    # back-cluster slot — the cape drapes from the shoulders behind
+    # the body and back hair flows over it. It sits next to
+    # ``capeBelowBody`` so the body covers it from front view.
     "capeBelowBody",
+    "capeBelowHair",
     "backShieldBelowBody",
     "backShield",
     "backWeapon",
@@ -2435,10 +2449,12 @@ class CharacterRenderer:
             absolute = _BACK_FACING_ABSOLUTE_Z.get(slot)
             if absolute is not None:
                 return absolute
+            override = _BACK_FACING_Z_OVERRIDE.get(slot)
+            if override is not None:
+                return override
             if not slot or not slot.startswith("back"):
                 return back_floor
-            override = _BACK_FACING_Z_OVERRIDE.get(slot)
-            return override if override is not None else z
+            return z
 
         # Effect overlays carry an integer z that's interpreted as
         # an ABSOLUTE layer offset relative to the whole character:
