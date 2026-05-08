@@ -165,14 +165,28 @@ _BACK_FACING_Z_OVERRIDE: Dict[str, int] = {
     "backWeaponOverHead":     273,
     "backWeaponOverShield":   274,
     "backWeaponOverGlove":    275,
-    # Cape slots used by back-view animations (e.g. cape 01101000's
-    # ladder/rope canvases use ``capeBelowHair`` for the main cloth
-    # and ``capeOverHead`` for the over-head straps). These don't
-    # start with ``back`` so the default back-floor would hide them;
-    # bump them above the body cluster but below the hair cluster
-    # (``capeBelowHair`` literally means "below hair") and above the
-    # hair cluster for ``capeOverHead``.
+    # Cape slots used by back-view animations. From a back-facing
+    # view the cape is on the side of the character we're looking at,
+    # so cape canvases should render IN FRONT of the body cluster.
+    # The MapleStory data uses many cape slot names — most ladder/
+    # rope canvases use ``backCape`` (the canonical back-of-cape
+    # slot), with ``capeBelowHair`` / ``capeBelowBody`` / ``cape`` /
+    # ``capeOverBody`` / ``capeOverWepon`` showing up too. Slot
+    # names roughly indicate z within the cape stack:
+    #   * ``capeBelowBody`` — deepest cape layer
+    #   * ``backCape`` / ``cape`` / ``capeBelowHair`` — main cloth
+    #   * ``capeOverBody`` / ``capeOverWepon`` — over outfit
+    #   * ``capeOverHead`` — straps / hood layer above hair cluster
+    # Bump them above the body cluster (max ~99) and below the hair
+    # cluster (250+) so back hair still drapes over the cape.
+    # ``capeOverHead`` lands above the hair cluster.
+    "capeBelowBody":          235,
+    "backCape":               238,
+    "cape":                   239,
     "capeBelowHair":          240,
+    "capeOverBody":           244,
+    "capeOverWepon":          246,
+    "backHairOverCape":       248,  # hair-over-cape strands; above cape, below main hair
     "capeOverHead":           265,
 }
 
