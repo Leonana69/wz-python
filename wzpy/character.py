@@ -1953,25 +1953,75 @@ class CharacterRenderer:
             else:
                 origin = _origin(origin_source)
                 top_left = (anchor_world[0] - origin[0], anchor_world[1] - origin[1])
-            # Z handling: prefer the pose-tree's z (e.g. default/z = 2),
-            # fall back to the per-frame z. Skip the top-level effect/z
-            # (its meaning is meta, not a render layer).
-            z_node = pose_tree.get("z")
-            z_node = _resolve_uol(z_node) if isinstance(z_node, WzUolProperty) else z_node
-            z_int: Optional[int] = None
-            if z_node is not None:
+            # Z handling. The canonical authored layer offset lives at
+            # ``effect/default/z`` (often mirrored at the top-level
+            # ``effect/z`` and on each per-pose subtree). Per-frame
+            # canvas ``z`` values are usually ``0`` and not meaningful
+            # as a layer offset. Resolution priority:
+            #   1. pose_tree.z         — per-pose override when authored
+            #   2. effect/default/z    — canonical base
+            #   3. effect/z            — top-level fallback
+            #   4. per-frame canvas z  — last-resort
+            def _try_int(node: Optional[WzProperty]) -> Optional[int]:
+                node = _resolve_uol(node) if isinstance(node, WzUolProperty) else node
+                if node is None:
+                    return None
                 try:
-                    z_int = int(getattr(z_node, "value", None))
+                    return int(getattr(node, "value", None))
                 except (TypeError, ValueError):
-                    z_int = None
+                    return None
+            z_int: Optional[int] = _try_int(pose_tree.get("z"))
             if z_int is None:
-                fz_node = target.child("z")
-                fz_node = _resolve_uol(fz_node) if isinstance(fz_node, WzUolProperty) else fz_node
-                if fz_node is not None:
+                default_tree = eff_node.get("default")
+                default_tree = _resolve_uol(default_tree) \
+                    if isinstance(default_tree, WzUolProperty) else default_tree
+                if isinstance(default_tree, WzSubProperty):
+                    z_int = _try_int(default_tree.get("z"))
+            if z_int is None:
+                z_int = _try_int(eff_node.get("z"))
+            if z_int is None:
+                z_int = _try_int(target.child("z"))
+
+            # Back-facing poses (ladder, rope) show the character from
+            # behind, so the effect canvas — authored facing forward —
+            # also needs to render mirrored. Decode now, flip the image,
+            # and re-anchor so the world position of the origin point
+            # stays put. Replaces decoded_override / width / height
+            # consistently for both the stabilized-composite path and
+            # the natural per-frame path.
+            if pose in _WEAPON_OPTIONAL_POSES:  # ladder / rope
+                if decoded_override is not None:
+                    layer_img = decoded_override
+                    layer_w = width_override
+                    layer_h = height_override
+                    layer_origin = origin
+                else:
                     try:
-                        z_int = int(getattr(fz_node, "value", None))
-                    except (TypeError, ValueError):
-                        z_int = None
+                        layer_img = decode_canvas(pixel_canvas, region=self.region)
+                    except Exception:
+                        layer_img = None
+                    if layer_img is not None:
+                        if layer_img.mode != "RGBA":
+                            layer_img = layer_img.convert("RGBA")
+                        layer_w = layer_img.width
+                        layer_h = layer_img.height
+                        layer_origin = origin
+                    else:
+                        layer_w = layer_h = None
+                        layer_origin = origin
+                if layer_img is not None:
+                    flipped = layer_img.transpose(Image.FLIP_LEFT_RIGHT)
+                    new_origin_x = layer_w - layer_origin[0]
+                    new_origin_y = layer_origin[1]
+                    decoded_override = flipped
+                    width_override = layer_w
+                    height_override = layer_h
+                    origin = (new_origin_x, new_origin_y)
+                    top_left = (
+                        anchor_world[0] - new_origin_x,
+                        anchor_world[1] - new_origin_y,
+                    )
+
             out.append(_Placement(
                 equip_id=eid, category="Effect",
                 name=f"effect/{pose_tree.name}/{target.name}",
