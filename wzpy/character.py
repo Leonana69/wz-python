@@ -1988,17 +1988,29 @@ class CharacterRenderer:
                     f0 = _resolve_uol(f0)
                 if isinstance(f0, WzCanvasProperty):
                     origin_source = f0
-            # Pose-tree pos picks the world anchor; integer or string-int.
+            # Pose-tree pos picks the world anchor:
+            #   * pos=1     → ``brow`` (head-attached effect)
+            #   * pos=0     → ``navel`` (body-attached, no offset)
+            #   * no pos    → ``navel`` plus a fixed (-8, +21) offset
+            #     (left 8, down 21 px) so effects whose authoring
+            #     omits ``pos`` land at the same lower-body point the
+            #     MapleStory client uses as a default attachment.
+            #     Without this, capes like 1103249 (effect/default
+            #     ships no ``pos``) sit too high.
             pos_node = pose_tree.get("pos")
             pos_node = _resolve_uol(pos_node) if isinstance(pos_node, WzUolProperty) else pos_node
             pos_val: Optional[int] = None
+            pos_authored = False
             if pos_node is not None:
                 try:
                     pos_val = int(getattr(pos_node, "value", None))
+                    pos_authored = True
                 except (TypeError, ValueError):
                     pos_val = None
             anchor_name = self._EFFECT_POS_ANCHOR.get(pos_val, "navel")
             anchor_world = world_anchors.get(anchor_name) or world_anchors.get("navel") or (0, 0)
+            if not pos_authored:
+                anchor_world = (anchor_world[0] - 8, anchor_world[1] + 21)
             # Stabilized mode: build a union-bbox composite that
             # places frame N's pixels at the same WORLD coordinates
             # the artist authored (origin_n inside the canvas). Every
