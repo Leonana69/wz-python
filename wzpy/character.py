@@ -2148,16 +2148,12 @@ class CharacterRenderer:
 
         zmap_size = len(self._zmap)
 
-        def z_for(pl: _Placement) -> int:
-            # Effect overlays carry an integer z (no zmap slot name).
-            # Positive z lands AFTER all character parts (front),
-            # negative z BEFORE the body (back). Within each band we
-            # add the z value directly so authored ordering is kept.
-            if pl.category == "Effect":
-                ez = pl.extra_z if pl.extra_z is not None else 0
-                if ez >= 0:
-                    return zmap_size + ez
-                return ez  # negative — sorts before any zmap index
+        def slot_z(pl: _Placement) -> int:
+            """zmap index for a non-effect placement, after the
+            pose/category-aware slot remaps below. Extracted so
+            ``z_for`` can use it both directly and to seed
+            ``parent_z`` for effect placements (whose z is
+            authored RELATIVE to the equip they overlay)."""
             slot = pl.z_slot
             if slot is None:
                 return self._z_index(slot)
@@ -2270,6 +2266,47 @@ class CharacterRenderer:
             ):
                 slot = target
             return self._z_index(slot)
+
+        # Effect overlays carry an integer z that's authored RELATIVE
+        # to the equip they decorate (e.g. a cap's effect with
+        # ``z=2`` should render two layers above the cap canvas, not
+        # at absolute slot ``zmap_size+2`` where it floats above
+        # everything regardless of where the cap sits). Pre-compute
+        # each non-effect equip's effective z (max across all its
+        # placements, in case a single equip spans multiple slots
+        # like a 2H weapon's grip vs. blade) so the effect lookup
+        # can lean on it.
+        parent_z: Dict[str, int] = {}
+        for pl in placements:
+            if pl.category == "Effect":
+                continue
+            z = slot_z(pl)
+            if pl.equip_id in parent_z:
+                if z > parent_z[pl.equip_id]:
+                    parent_z[pl.equip_id] = z
+            else:
+                parent_z[pl.equip_id] = z
+
+        # ``ladder`` and ``rope`` are MapleStory's only back-facing
+        # poses — the character is shown from behind so the body
+        # canvases come from the ``back*`` zmap cluster (backHair,
+        # backHead, backBody, …). The front-facing zmap was authored
+        # back-to-front; viewed from behind that order is REVERSED, so
+        # what was deepest (backHair, idx ~162) needs to render on top
+        # and any front-only canvas that slipped through (face) sinks
+        # behind everything else. Negate the per-slot z to flip the
+        # whole stack rather than maintaining a separate back zmap.
+        back_facing = pose in ("ladder", "rope")
+
+        def z_for(pl: _Placement) -> int:
+            if pl.category == "Effect":
+                ez = pl.extra_z if pl.extra_z is not None else 0
+                base = parent_z.get(pl.equip_id, zmap_size)
+                out = base + ez
+            else:
+                out = slot_z(pl)
+            return -out if back_facing else out
+
         placements.sort(key=z_for)
         return (placements, world_anchors) if return_anchors else placements
 
