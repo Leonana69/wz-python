@@ -37,6 +37,7 @@ Run the WebUI and load wz data:
 python run.py
 # then open http://127.0.0.1:5000, select `path/to/your/maplestory/appdata/Data/Character` folder (for GMS) or `path/to/your/maplestory/appdata/Data/Character.wz` file (for legacy MS)
 ```
+![WebUI Load File](docs/web_load.png)
 
 
 Run directly with wz data:
