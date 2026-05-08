@@ -1884,14 +1884,29 @@ class CharacterRenderer:
                 continue
             if not isinstance(eff_node, WzSubProperty):
                 continue
-            # Pick the pose subtree, falling back to ``default``.
+            # Pick the pose subtree, falling back to ``default``. For
+            # back-facing poses (ladder / rope) prefer ``backDefault``
+            # when the effect ships one — it's the canonical
+            # back-view variant (e.g. effect 1103248 UOLs both
+            # ``ladder`` and ``rope`` straight to ``backDefault``).
+            # Many effects don't author a back variant, so the
+            # default fallback still applies.
+            back_pose = pose in _WEAPON_OPTIONAL_POSES
             pose_tree = eff_node.get(pose)
             pose_tree = _resolve_uol(pose_tree) if isinstance(pose_tree, WzUolProperty) else pose_tree
+            if not isinstance(pose_tree, WzSubProperty) and back_pose:
+                pose_tree = eff_node.get("backDefault")
+                pose_tree = _resolve_uol(pose_tree) if isinstance(pose_tree, WzUolProperty) else pose_tree
             if not isinstance(pose_tree, WzSubProperty):
                 pose_tree = eff_node.get("default")
                 pose_tree = _resolve_uol(pose_tree) if isinstance(pose_tree, WzUolProperty) else pose_tree
             if not isinstance(pose_tree, WzSubProperty):
                 continue
+            # If the pose tree resolves to a back-facing variant
+            # (``backDefault`` or any ``back*`` subtree), the artist
+            # already authored it for the back view — skip the
+            # forward-facing flip the back-pose branch applies below.
+            pose_tree_is_back = pose_tree.name.startswith("back")
             # Collect numeric frame children, ordered by index.
             frame_children = sorted(
                 (c for c in pose_tree.children() if c.name.isdigit()),
@@ -1999,13 +2014,16 @@ class CharacterRenderer:
                 z_int = _try_int(target.child("z"))
 
             # Back-facing poses (ladder, rope) show the character from
-            # behind, so the effect canvas — authored facing forward —
-            # also needs to render mirrored. Decode now, flip the image,
-            # and re-anchor so the world position of the origin point
+            # behind, so an effect canvas authored facing forward needs
+            # to render mirrored. Skip the flip when the pose tree
+            # itself is a back-facing variant (``backDefault`` etc.) —
+            # the artist already drew it for the back view, so flipping
+            # would un-mirror it. Decode now, flip the image, and
+            # re-anchor so the world position of the origin point
             # stays put. Replaces decoded_override / width / height
             # consistently for both the stabilized-composite path and
             # the natural per-frame path.
-            if pose in _WEAPON_OPTIONAL_POSES:  # ladder / rope
+            if back_pose and not pose_tree_is_back:
                 if decoded_override is not None:
                     layer_img = decoded_override
                     layer_w = width_override
