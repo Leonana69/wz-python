@@ -2445,15 +2445,30 @@ class CharacterRenderer:
         # positive values render in front of every body / equip
         # canvas; negative values render behind everything. Within
         # each band the integer value drives ordering (z=2 sits
-        # above z=1, z=-1 sits above z=-2). This matches how the
-        # MapleStory client treats ``ItemEff`` z's — they're not
-        # tied to the parent equip's zmap slot.
+        # above z=1, z=-1 sits above z=-2). The base is chosen so
+        # the effect clears every other body / equip slot:
+        #   * front-facing: just above ``zmap_size`` (the natural
+        #     "front-default" idx) so positives beat every front
+        #     zmap slot.
+        #   * back-facing: above the ``_BACK_FACING_Z_OVERRIDE``
+        #     ceiling (head / cap / shield / weapon overrides go up
+        #     to ~275) so positives beat the back-facing cluster
+        #     too — otherwise an effect like ItemEff.img/1103248's
+        #     ``backDefault`` z=2 ended up behind backHair (override
+        #     254) on the ladder pose.
+        if back_facing and _BACK_FACING_Z_OVERRIDE:
+            effect_front_base = max(_BACK_FACING_Z_OVERRIDE.values()) + 1
+            effect_back_base = back_floor - 1
+        else:
+            effect_front_base = zmap_size
+            effect_back_base = 0
+
         def z_for(pl: _Placement) -> int:
             if pl.category == "Effect":
                 ez = pl.extra_z if pl.extra_z is not None else 0
                 if ez >= 0:
-                    return zmap_size + ez
-                return ez
+                    return effect_front_base + ez
+                return effect_back_base + ez
             return effective_slot_z(pl)
 
         placements.sort(key=z_for)
