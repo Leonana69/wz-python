@@ -2288,15 +2288,21 @@ class CharacterRenderer:
                 parent_z[pl.equip_id] = z
 
         # ``ladder`` and ``rope`` are MapleStory's only back-facing
-        # poses — the character is shown from behind so the body
+        # poses — the character is shown from behind so the visible
         # canvases come from the ``back*`` zmap cluster (backHair,
-        # backHead, backBody, …). The front-facing zmap was authored
-        # back-to-front; viewed from behind that order is REVERSED, so
-        # what was deepest (backHair, idx ~162) needs to render on top
-        # and any front-only canvas that slipped through (face) sinks
-        # behind everything else. Negate the per-slot z to flip the
-        # whole stack rather than maintaining a separate back zmap.
+        # backHead, backBody, backMailChest, …) which is already
+        # authored in the correct relative order: backMailChest
+        # (225) sits above backBody (185) for the same reason
+        # mailChest (242) sits above body (205) in front view.
+        # We DO NOT reverse the cluster — that would put backBody
+        # in front of backMailChest, the opposite of what the
+        # artist wanted. Instead we just sink any front-only
+        # canvas that slipped through (e.g. ``face`` at idx 310,
+        # whose part img has no back variant so the front canvas
+        # is what _collect_part_canvases returns) behind the
+        # entire back cluster so it can't poke through.
         back_facing = pose in ("ladder", "rope")
+        back_floor = -1  # below backHair (~162); any non-back slot lands here
 
         def z_for(pl: _Placement) -> int:
             if pl.category == "Effect":
@@ -2305,7 +2311,11 @@ class CharacterRenderer:
                 out = base + ez
             else:
                 out = slot_z(pl)
-            return -out if back_facing else out
+            if back_facing and pl.category != "Effect":
+                slot = pl.z_slot
+                if not slot or not slot.startswith("back"):
+                    return back_floor
+            return out
 
         placements.sort(key=z_for)
         return (placements, world_anchors) if return_anchors else placements
