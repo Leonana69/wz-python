@@ -829,18 +829,20 @@ def create_app(
             effects_obj = app.config.get("CHARACTER_EFFECTS")
             if (strings_obj is not None and effects_obj is not None
                     and _character_supported(wz)):
-                # Flatten the Character pack's contents directly under
-                # the bundle root and mount Effect / String as named
-                # peers. This keeps the character-builder URL contract
-                # — paths like ``Hair/00030020.img/default/hair`` still
-                # resolve from the root the way they would when only
-                # Character is loaded — while the auxiliary packs are
-                # reachable as ``Effect/...`` and ``String/...``.
+                # Mount the three packs as peers under a synthetic
+                # root so the tree browser shows Character / Effect /
+                # String at the top level. The ``_resolve`` walker
+                # transparently retries inside ``Character/`` for the
+                # first segment, which keeps the character-builder's
+                # legacy URL contract — paths like
+                # ``Hair/00030020.img/default/hair`` still resolve
+                # without a ``Character/`` prefix.
                 bundle = WzDirectory(name="", parent=None)
-                bundle.subdirs = {**wz.root.subdirs,
-                                  "Effect": effects_obj.root,
-                                  "String": strings_obj.root}
-                bundle.images = dict(wz.root.images)
+                bundle.subdirs = {
+                    "Character": wz.root,
+                    "Effect": effects_obj.root,
+                    "String": strings_obj.root,
+                }
                 app.config["BUNDLE_ROOT"] = bundle
             else:
                 app.config["BUNDLE_ROOT"] = None
@@ -868,13 +870,26 @@ def create_app(
         Returns ``(node, remaining)`` where ``node`` is the deepest WZ tree
         node (directory or image) we could reach, and ``remaining`` is the
         path inside the .img property tree (may be empty).
+
+        Bundle mode special-case: when the first segment isn't a direct
+        child of the synthetic root but ``Character/<segment>`` is, we
+        rewrite the path to descend through Character. This preserves
+        the character-builder's legacy URL shape (no ``Character/``
+        prefix on equip-image paths) while still letting the tree
+        browser show Character / Effect / String as top-level peers.
         """
         path = path.strip("/")
         root = _browse_root()
         if not path:
             return root, ""
-        node: Any = root
         parts = path.split("/")
+        if (app.config.get("BUNDLE_ROOT") is not None
+                and isinstance(root, WzDirectory)
+                and root.child(parts[0]) is None):
+            char_dir = root.child("Character")
+            if char_dir is not None and char_dir.child(parts[0]) is not None:
+                parts = ["Character"] + parts
+        node: Any = root
         i = 0
         while i < len(parts):
             part = parts[i]
