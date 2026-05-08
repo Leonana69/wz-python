@@ -400,7 +400,29 @@ _DEFAULT_ZMAP: Tuple[str, ...] = (
     "accessoryEyeOverCap",
     "shieldOverHair",
     "emotionOverBody",
+    # ``characterStart`` is an absolute "frontmost" slot (e.g. cape
+    # 01102984's ladder/rope canvas uses z=characterStart so the cape
+    # drapes in front of the back-facing body silhouette). Sits above
+    # everything else — including the back-facing override cluster —
+    # in either pose orientation. Mirrors ``characterEnd`` at idx 1
+    # which is the absolute "deepest" slot.
+    "characterStart",
 )
+
+# Slots whose z is ABSOLUTE — independent of pose orientation. The
+# back-facing branch in ``z_for`` normally pushes any non-``back*``
+# slot to ``back_floor`` so that front-only canvases (face, hair,
+# etc., with no back variant) sink behind the body silhouette. These
+# slots opt out of that rule because they're explicit absolute
+# positions: ``characterStart`` always renders in front of every
+# other layer, ``characterEnd`` always renders behind every other
+# layer, regardless of whether the character is being shown from
+# the front or the back. The back-facing values are picked to
+# beat the head/cap/shield/weapon overrides above (max ~275).
+_BACK_FACING_ABSOLUTE_Z: Dict[str, int] = {
+    "characterStart": 999,    # frontmost — above every back-facing override
+    "characterEnd":   -999,   # deepest — below every other slot
+}
 
 
 # Conditional z-slot remap applied during compose. Each entry is
@@ -2392,6 +2414,9 @@ class CharacterRenderer:
             if not back_facing:
                 return z
             slot = pl.z_slot
+            absolute = _BACK_FACING_ABSOLUTE_Z.get(slot)
+            if absolute is not None:
+                return absolute
             if not slot or not slot.startswith("back"):
                 return back_floor
             override = _BACK_FACING_Z_OVERRIDE.get(slot)
