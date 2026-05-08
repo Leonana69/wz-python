@@ -2494,9 +2494,17 @@ class CharacterRenderer:
         #     too — otherwise an effect like ItemEff.img/1103248's
         #     ``backDefault`` z=2 ended up behind backHair (override
         #     254) on the ladder pose.
+        # ``effect_back_base`` lands negative effect z below
+        # ``characterEnd`` so the absolute "deepest" character slot
+        # still draws on top of any background effect (cape /
+        # backdrop sparkles authored with z=-1, -2, ...). In
+        # front-facing the natural zmap order already does this
+        # — characterEnd is at idx 1 and effect z=-1 → -1, deeper.
+        # In back-facing the absolute characterEnd is -999, so the
+        # effect base needs to sit below that.
         if back_facing and _BACK_FACING_Z_OVERRIDE:
             effect_front_base = max(_BACK_FACING_Z_OVERRIDE.values()) + 1
-            effect_back_base = back_floor - 1
+            effect_back_base = _BACK_FACING_ABSOLUTE_Z["characterEnd"] - 1
         else:
             effect_front_base = zmap_size
             effect_back_base = 0
