@@ -1745,7 +1745,11 @@ def create_app(
                     walk_property(root, full)
 
         try:
-            walk(wz.root, "")
+            # Walk from the same root the tree browser navigates from
+            # (synthetic bundle root in --char mode, plain wz.root
+            # otherwise) so result paths line up with what
+            # ``selectSearchResult`` will hand back to ``navigateToPath``.
+            walk(_browse_root(), "")
         except _SearchFull:
             truncated = True
         return jsonify({"results": results, "truncated": truncated})
