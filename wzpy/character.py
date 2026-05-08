@@ -131,6 +131,32 @@ _DEFAULT_ANCHOR_BY_CATEGORY: Dict[str, str] = {
 _ANCHOR_PRIORITY: Tuple[str, ...] = ("navel", "neck", "hand", "brow", "handMove")
 
 
+# Back-facing pose (ladder, rope) z overrides for the head-region
+# ``back*`` cluster. The front-facing zmap puts backHair (162) below
+# backHead (184) and below the body/coat cluster (backBody 185,
+# backMailChest 225) — in FRONT view those slots represent hair /
+# cap canvases drawn BEHIND the body silhouette (e.g. long hair
+# trailing past the torso). For a back-facing pose the same canvases
+# represent the back of the head and need to render ON TOP of the
+# body / coat / head: hair covers head, cap covers hair, just like
+# in front view (hair > head, cap > hair). The numeric values are
+# picked to land above ``backMailChest`` (225, the topmost body-
+# cluster slot) while preserving cap > hair > head ordering.
+_BACK_FACING_Z_OVERRIDE: Dict[str, int] = {
+    # Hair sub-cluster (above body / coat).
+    "backHairBelowCapWide":   250,
+    "backHairBelowCapNarrow": 251,
+    "backHairBelowCap":       252,
+    "backHairOverCape":       253,
+    "backHair":               254,
+    # Cap sub-cluster (above hair).
+    "backCap":                260,
+    "backCapOverHair":        261,
+    "backCapAccessory":       262,
+    "backAccessoryEar":       263,
+}
+
+
 # Default Z-order, populated by walking every ``z`` string in a stock GMS
 # v83 ``Character.wz`` and ordering them semantically. The list is
 # back-to-front: index 0 is drawn first (deepest), the last entry sits on
@@ -2267,10 +2293,45 @@ class CharacterRenderer:
                 slot = target
             return self._z_index(slot)
 
+        # ``ladder`` and ``rope`` are MapleStory's only back-facing
+        # poses — the character is shown from behind so the visible
+        # canvases come from the ``back*`` zmap cluster (backHair,
+        # backHead, backBody, backMailChest, …). The body/coat
+        # cluster is already authored in the correct relative order:
+        # backMailChest sits above backBody for the same reason
+        # mailChest sits above body in front view. The HEAD-region
+        # cluster (backHair, backCap, backAccessoryEar) however is
+        # authored DEEP in the front zmap because in front view those
+        # canvases represent things drawn behind the body silhouette —
+        # for back view the same canvases are the back of the head
+        # and need to render ON TOP of the body / coat / head, with
+        # cap > hair > head. ``_BACK_FACING_Z_OVERRIDE`` patches the
+        # head-region slots to land above the body cluster while
+        # leaving everything else at its natural zmap index. Any
+        # front-only canvas that slipped through (e.g. ``face`` —
+        # the Face img has no back variant) is pushed below the
+        # back cluster so it can't poke through.
+        back_facing = pose in ("ladder", "rope")
+        back_floor = -1  # below backHair; any non-back slot lands here
+
+        def effective_slot_z(pl: _Placement) -> int:
+            """slot_z with the back-facing override / floor applied,
+            so ``parent_z`` (used by effects to land relative to the
+            equip they decorate) sees the SAME z that the equip's
+            canvas will sort to."""
+            z = slot_z(pl)
+            if not back_facing:
+                return z
+            slot = pl.z_slot
+            if not slot or not slot.startswith("back"):
+                return back_floor
+            override = _BACK_FACING_Z_OVERRIDE.get(slot)
+            return override if override is not None else z
+
         # Effect overlays carry an integer z that's authored RELATIVE
-        # to the equip they decorate (e.g. a cap's effect with
-        # ``z=2`` should render two layers above the cap canvas, not
-        # at absolute slot ``zmap_size+2`` where it floats above
+        # to the equip they decorate (e.g. a cap with effect ``z=2``
+        # should render two layers above the cap canvas, not at
+        # absolute slot ``zmap_size+2`` where it floats above
         # everything regardless of where the cap sits). Pre-compute
         # each non-effect equip's effective z (max across all its
         # placements, in case a single equip spans multiple slots
@@ -2280,42 +2341,19 @@ class CharacterRenderer:
         for pl in placements:
             if pl.category == "Effect":
                 continue
-            z = slot_z(pl)
+            z = effective_slot_z(pl)
             if pl.equip_id in parent_z:
                 if z > parent_z[pl.equip_id]:
                     parent_z[pl.equip_id] = z
             else:
                 parent_z[pl.equip_id] = z
 
-        # ``ladder`` and ``rope`` are MapleStory's only back-facing
-        # poses — the character is shown from behind so the visible
-        # canvases come from the ``back*`` zmap cluster (backHair,
-        # backHead, backBody, backMailChest, …) which is already
-        # authored in the correct relative order: backMailChest
-        # (225) sits above backBody (185) for the same reason
-        # mailChest (242) sits above body (205) in front view.
-        # We DO NOT reverse the cluster — that would put backBody
-        # in front of backMailChest, the opposite of what the
-        # artist wanted. Instead we just sink any front-only
-        # canvas that slipped through (e.g. ``face`` at idx 310,
-        # whose part img has no back variant so the front canvas
-        # is what _collect_part_canvases returns) behind the
-        # entire back cluster so it can't poke through.
-        back_facing = pose in ("ladder", "rope")
-        back_floor = -1  # below backHair (~162); any non-back slot lands here
-
         def z_for(pl: _Placement) -> int:
             if pl.category == "Effect":
                 ez = pl.extra_z if pl.extra_z is not None else 0
                 base = parent_z.get(pl.equip_id, zmap_size)
-                out = base + ez
-            else:
-                out = slot_z(pl)
-            if back_facing and pl.category != "Effect":
-                slot = pl.z_slot
-                if not slot or not slot.startswith("back"):
-                    return back_floor
-            return out
+                return base + ez
+            return effective_slot_z(pl)
 
         placements.sort(key=z_for)
         return (placements, world_anchors) if return_anchors else placements
