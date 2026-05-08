@@ -192,9 +192,10 @@ _BACK_FACING_Z_OVERRIDE: Dict[str, int] = {
     # (cape 01102292's main cloth uses it). The slot name reads as
     # weapon-related but the artist's intent for capes is "above
     # everything" — wing/cloak shapes that drape from the back and
-    # need to be visible past hair / cap. Place above the hair
-    # cluster but below the shield/weapon-on-back cluster.
-    "weaponOverGlove":        268,
+    # need to be visible past hair / cap AND past any
+    # back-strapped weapon/shield (the cape covers them from a
+    # back-facing view). Place above the entire back cluster.
+    "weaponOverGlove":        280,
 }
 
 
