@@ -29,7 +29,7 @@ pip install -r requirements.txt
 ## Usage
 
 > [!WARNING]
-> **Do not load wz data while the game is open.**
+> **It's recommended to copy your game data folder to somewhere else. If not, do not load wz data while the game is open.**
 > The game holds exclusive locks on its `.wz` files; loading them concurrently can corrupt the archives or crash the client.
 
 Run the WebUI and load wz data:
