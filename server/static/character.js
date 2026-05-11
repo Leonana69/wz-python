@@ -136,6 +136,15 @@ const state = {
   // final composite horizontally on the server (a simple
   // ``Image.FLIP_LEFT_RIGHT``).
   facing: "left",
+  // Multi-character support: ``characters`` is the list of saved
+  // snapshots (one per card in the strip under "Equipped"); the
+  // entry at ``activeIdx`` is the one currently being edited and
+  // its equipped/pose/etc. are mirrored into the live fields above.
+  // ``snapshotCurrent()`` re-captures the live state into the active
+  // entry when the user switches away. Initialized in boot() once
+  // the default equipped slots are settled.
+  characters: [],
+  activeIdx: 0,
 };
 
 // Per-category color configuration. ``palette`` is a list of
@@ -195,6 +204,7 @@ const $subtabs = document.getElementById("char-subtabs");
 const $search = document.getElementById("char-search");
 const $grid = document.getElementById("char-grid");
 const $equipped = document.getElementById("char-equipped");
+const $cards = document.getElementById("char-cards");
 const $scale = document.getElementById("char-scale");
 const $export = document.getElementById("char-export");
 const $exportFrames = document.getElementById("char-export-frames");
@@ -1225,6 +1235,15 @@ async function refreshCompose() {
     _stopPreviewAnimation();
     _revokePreviewFrames();
     _previewFrameUrls = blobs.map(b => URL.createObjectURL(b));
+    // Update the active character's card thumbnail with a fresh URL
+    // for frame 0 — independent of ``_previewFrameUrls`` so revoking
+    // the animation's URLs on the next refresh doesn't break the card.
+    const activeCard = state.characters[state.activeIdx];
+    if (activeCard) {
+      if (activeCard.thumbUrl) URL.revokeObjectURL(activeCard.thumbUrl);
+      activeCard.thumbUrl = URL.createObjectURL(blobs[0]);
+      renderCharacterCards();
+    }
     // Per-frame delays: prefer the server's authored delays so each
     // pose plays at its native tempo (walk1=180ms, swing has
     // variable delays, prone=100ms one-shot). Fall back to a 500ms
@@ -1496,6 +1515,184 @@ $importFile.addEventListener("change", async () => {
   }
 });
 
+// ── character list (multi-character cards) ────────────────────────
+// Each entry in ``state.characters`` is a snapshot of one character's
+// equipped slots and view preferences. The entry at ``activeIdx`` is
+// the *current* character — its fields are mirrored into the live
+// ``state.equipped``/``state.pose``/etc. while it's active, and only
+// re-captured into the snapshot when the user switches away. The
+// thumbnail (``thumbUrl``) is an own-URL pointing at the most recent
+// compose frame 0; it's refreshed every time ``refreshCompose`` runs
+// for the active character.
+
+function newDefaultEquipped() {
+  return Object.fromEntries(
+    Object.entries(DEFAULTS).map(([cat, id]) => [
+      cat, { id, iconPaths: iconPathsFor(cat, id) },
+    ])
+  );
+}
+
+function cloneEquipped(eq) {
+  const out = {};
+  for (const [cat, slot] of Object.entries(eq)) {
+    const copy = { ...slot };
+    if (slot.iconPaths) copy.iconPaths = slot.iconPaths.slice();
+    if (slot.colors) copy.colors = slot.colors.slice();
+    out[cat] = copy;
+  }
+  return out;
+}
+
+function snapshotCurrent() {
+  return {
+    equipped: cloneEquipped(state.equipped),
+    pose: state.pose,
+    earType: state.earType,
+    facing: state.facing,
+    colorByCategory: { ...state.colorByCategory },
+    thumbUrl: null,
+  };
+}
+
+function captureActive() {
+  const entry = state.characters[state.activeIdx];
+  if (!entry) return;
+  entry.equipped = cloneEquipped(state.equipped);
+  entry.pose = state.pose;
+  entry.earType = state.earType;
+  entry.facing = state.facing;
+  entry.colorByCategory = { ...state.colorByCategory };
+}
+
+function loadFromSnapshot(entry) {
+  state.equipped = cloneEquipped(entry.equipped);
+  state.pose = entry.pose;
+  state.earType = entry.earType;
+  state.facing = entry.facing;
+  state.colorByCategory = { ...entry.colorByCategory };
+  // Mirror facing back into the radio input — the live preview
+  // reads from state.facing but the form control needs to match.
+  const radio = document.querySelector(
+    `input[name="char-facing"][value="${state.facing}"]`,
+  );
+  if (radio) radio.checked = true;
+}
+
+// Re-sync the dependent UI bits (pose dropdown, ear selector,
+// equipped list, active-tab grid) and re-render the cards. Pulled
+// out so switchCharacter and removeCharacter can share it.
+async function reconcileActiveCharacter() {
+  state.weaponPoses = [];
+  state.headEarTypes = ["humanEar"];
+  if (state.equipped.Weapon) {
+    await syncWeaponPose(state.equipped.Weapon.id);
+  }
+  if (state.equipped.Head) {
+    await syncHeadEars(state.equipped.Head.id);
+  }
+  renderPoseControls();
+  renderEarControls();
+  renderEquipped();
+  // Re-render the currently-visible category so colour swatches /
+  // equipped highlight reflect the newly-loaded character.
+  const cat = state.activeTab;
+  const parts = state.parts.get(cat);
+  renderSubTabs(cat, parts || null);
+  if (parts) renderGrid(cat, filterPartsBySubTab(cat, parts));
+  renderCharacterCards();
+  refreshCompose();
+}
+
+async function switchCharacter(idx) {
+  if (idx === state.activeIdx) return;
+  if (idx < 0 || idx >= state.characters.length) return;
+  captureActive();
+  state.activeIdx = idx;
+  loadFromSnapshot(state.characters[idx]);
+  await reconcileActiveCharacter();
+}
+
+async function addCharacter() {
+  captureActive();
+  state.characters.push({
+    equipped: newDefaultEquipped(),
+    pose: "stand1",
+    earType: "humanEar",
+    facing: "left",
+    colorByCategory: { Hair: 0, Face: 0 },
+    thumbUrl: null,
+  });
+  state.activeIdx = state.characters.length - 1;
+  loadFromSnapshot(state.characters[state.activeIdx]);
+  await reconcileActiveCharacter();
+}
+
+async function removeCharacter(idx) {
+  if (state.characters.length <= 1) return;
+  if (idx < 0 || idx >= state.characters.length) return;
+  const dying = state.characters[idx];
+  if (dying.thumbUrl) URL.revokeObjectURL(dying.thumbUrl);
+
+  if (idx === state.activeIdx) {
+    // Pick a neighbour to become active *after* we splice. Prefer
+    // the next one over; fall back to the prior one when removing
+    // the last entry.
+    const neighbour = idx === state.characters.length - 1 ? idx - 1 : idx + 1;
+    state.characters.splice(idx, 1);
+    state.activeIdx = neighbour > idx ? neighbour - 1 : neighbour;
+    loadFromSnapshot(state.characters[state.activeIdx]);
+    await reconcileActiveCharacter();
+  } else {
+    state.characters.splice(idx, 1);
+    if (idx < state.activeIdx) state.activeIdx--;
+    renderCharacterCards();
+  }
+}
+
+function renderCharacterCards() {
+  if (!$cards) return;
+  $cards.innerHTML = "";
+  for (let i = 0; i < state.characters.length; i++) {
+    const c = state.characters[i];
+    const card = document.createElement("div");
+    card.className = "char-card" + (i === state.activeIdx ? " active" : "");
+    card.title = `Character ${i + 1}`;
+    if (c.thumbUrl) {
+      const img = document.createElement("img");
+      img.src = c.thumbUrl;
+      img.alt = `Character ${i + 1}`;
+      card.appendChild(img);
+    } else {
+      const ph = document.createElement("div");
+      ph.className = "char-card-placeholder";
+      ph.textContent = String(i + 1);
+      card.appendChild(ph);
+    }
+    card.addEventListener("click", () => switchCharacter(i));
+    if (state.characters.length > 1) {
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.className = "char-card-remove";
+      rm.textContent = "×";
+      rm.title = "Remove character";
+      rm.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        removeCharacter(i);
+      });
+      card.appendChild(rm);
+    }
+    $cards.appendChild(card);
+  }
+  // Right-most "+" tile — always present, even with one character.
+  const add = document.createElement("div");
+  add.className = "char-card add";
+  add.textContent = "+";
+  add.title = "Add new character";
+  add.addEventListener("click", addCharacter);
+  $cards.appendChild(add);
+}
+
 // ── boot ──────────────────────────────────────────────────────────
 (async function boot() {
   selectTab(state.activeTab);
@@ -1513,5 +1710,11 @@ $importFile.addEventListener("change", async () => {
   renderPoseControls();
   renderEarControls();
   renderEquipped();
+  // Seed the character list with the initial character so the cards
+  // strip renders, and so refreshCompose() below has a slot to write
+  // the first thumbnail into.
+  state.characters = [snapshotCurrent()];
+  state.activeIdx = 0;
+  renderCharacterCards();
   refreshCompose();
 })();

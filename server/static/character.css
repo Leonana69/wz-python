@@ -305,6 +305,69 @@
 }
 .equipped-list .eq-remove:hover { color: #ff7777; }
 
+/* Horizontal strip of character thumbnails. Each card is the
+ * compose-preview frame 0 of that character's equipped set; the
+ * active card is highlighted, and the right-most tile is a "+"
+ * that adds a fresh default character to the list. Scrolls
+ * horizontally when the strip overflows the panel width. */
+.char-cards {
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 4px 2px 8px;
+  margin: 0;
+}
+.char-card {
+  flex: 0 0 64px;
+  width: 64px;
+  height: 80px;
+  background: #2b2d31;
+  border: 1px solid #1a1b1d;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+.char-card:hover { border-color: #e8b96b; }
+.char-card.active { border-color: #5e8a3a; }
+.char-card img {
+  max-width: 56px;
+  max-height: 72px;
+  image-rendering: pixelated;
+}
+.char-card .char-card-placeholder {
+  color: #777;
+  font-size: 11px;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+}
+.char-card.add {
+  font-size: 28px;
+  color: #888;
+  font-weight: 200;
+  line-height: 1;
+}
+.char-card.add:hover { color: #e8b96b; }
+.char-card-remove {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  background: rgba(30, 31, 34, 0.7);
+  border: none;
+  color: #c25555;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  border-radius: 2px;
+  display: none;
+}
+.char-card:hover .char-card-remove { display: block; }
+.char-card-remove:hover { color: #ff7777; }
+
 .char-pickers {
   flex: 1 1 0;
   min-width: 0;
