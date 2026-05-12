@@ -295,12 +295,16 @@ if ($search) {
 }
 
 function filterPartsBySubTab(category, parts) {
+  const q = (state.search[category] || "").trim().toLowerCase();
   let filtered = parts;
-  if (CATEGORIES_WITH_SUBTABS.has(category)) {
+  // When there's a search query, ignore the Cash / Non-Cash split — the
+  // match runs across *both* sub-categories so a name/ID you remember
+  // turns up regardless of which tab it lives on. With no query, fall
+  // back to filtering by the active sub-tab.
+  if (!q && CATEGORIES_WITH_SUBTABS.has(category)) {
     const wantCash = state.subTab[category] === "cash";
     filtered = filtered.filter(p => Boolean(p.cash) === wantCash);
   }
-  const q = (state.search[category] || "").trim().toLowerCase();
   if (q) {
     filtered = filtered.filter(p =>
       p.id.toLowerCase().includes(q) ||
