@@ -199,250 +199,187 @@ _BACK_FACING_Z_OVERRIDE: Dict[str, int] = {
 }
 
 
-# Default Z-order, populated by walking every ``z`` string in a stock GMS
-# v83 ``Character.wz`` and ordering them semantically. The list is
-# back-to-front: index 0 is drawn first (deepest), the last entry sits on
-# top. Used when ``Base/zmap.img`` isn't present in the WZ (HaSuite-style
-# exports frequently drop ``Base/``).
+# Canonical MapleStory z-order, embedded verbatim from
+# ``Base.wz/Base/zmap.img``. The list is back-to-front: index 0 is
+# drawn first (deepest), the last entry sits on top. Used when
+# ``Base/zmap.img`` isn't reachable inside the Character pack
+# (HaSuite-style exports frequently drop ``Base/``); the embedded
+# copy keeps the renderer self-contained.
 #
-# When a slot name appears that's not in this table, ``_z_index`` falls
-# back to a name-pattern heuristic (``back…`` → behind, ``…Below…`` → mid,
-# ``…Over…`` → in front) so a previously-unseen variant still composites
-# in roughly the right place instead of pinning to mid-stack.
+# The leading two-letter tokens (``Bd``, ``Hd``, …) are vslot
+# aliases that Maple's zmap stores alongside the real z-slots; they
+# never match any canvas's ``z`` string, so they sit harmlessly at
+# the deepest indices.
+#
+# When a slot name appears that's not in this table, ``_z_index``
+# falls back to a name-pattern heuristic (``back…`` → behind,
+# ``…Below…`` → mid, ``…Over…`` → in front) so a previously-unseen
+# variant still composites in roughly the right place instead of
+# pinning to mid-stack.
 _DEFAULT_ZMAP: Tuple[str, ...] = (
-    # Deepest back: shadows, mount + saddle back panels.
-    "shadow",
-    "characterEnd",
+    "Bd", "Hd", "Hr", "Fc", "At", "Af", "Am", "Ae", "As", "Ay",
+    "Cp", "Ri", "Gv", "Wp", "Si", "So", "Pn", "Ws", "Ma", "Wg",
+    "Sr", "Tm", "Sd",
+    "backTamingMobMid",
     "backMobEquipUnderSaddle",
     "backSaddle",
-    "backSaddleFront",
-    "backTamingMobMid",
+    "backMobEquipMid",
     "backTamingMobFront",
-    "saddleRear",
-    "saddleMid",
-    "saddleFront",
+    "backMobEquipFront",
+    "mobEquipRear",
     "tamingMobRear",
-    "tamingMobMid",
-    "tamingMobFront",
-    "mobEquipMid",
-    # Back hair, cape, back accessories.
-    "backWing",
-    "backHair",
-    "backHairBelowCapWide",
-    "backHairBelowCapNarrow",
-    "backHairBelowCap",
-    "backHairOverCape",
-    "backCape",
-    # ``cape`` itself moves to AFTER mailArm / outfit layers so cape
-    # canvases that are meant to be visible from the front (e.g.
-    # 01102164's ``capeArm`` — a backpack-strap accessory that
-    # passes over the chest) render on top of the coat and pants.
-    # The actual cape cloth uses ``capeBelowBody`` and stays here.
-    # ``capeBelowHair`` (e.g. cape 01101000) is similarly a
-    # back-cluster slot — the cape drapes from the shoulders behind
-    # the body and back hair flows over it. It sits next to
-    # ``capeBelowBody`` so the body covers it from front view.
-    "capeBelowBody",
-    "capeBelowHair",
-    "backShieldBelowBody",
-    "backShield",
+    "saddleRear",
+    "characterEnd",
+    "backWeaponEffectUnder",
     "backWeapon",
-    "backWeaponOverHead",
-    "backWeaponOverShield",
-    "backWeaponOverGlove",
-    "backCap",
-    "backCapOverHair",
-    "backCapAccessory",
-    "backAccessoryEar",
-    "backHead",
-    "backBody",
-    # Body / torso reference.
-    "shieldBelowBody",
-    "weaponBelowBody",
-    "hairBelowBody",
-    "body",
-    # Pants / shoes stack (behind body parts that overlap).
-    "backPantsBelowShoes",
-    "backShoesBelowPants",
-    "backShoes",
-    "backPants",
-    "pantsBelowShoes",
-    "shoes",
-    "shoesOverPants",
-    "shoesTop",
-    "pants",
-    "pantsOverShoes",
-    "backPantsOverShoesBelowMailChest",
-    "pantsOverShoesBelowMailChest",
-    "backMailChestBelowPants",
-    "mailChestBelowPants",
-    "backPantsOverMailChest",
-    "pantsOverMailChest",
+    "backWeaponEffectOver",
+    "backHairBelowHead",
+    "backShieldBelowBody",
     "backMailChestAccessory",
-    "backMailChestOverPants",
-    "backMailChest",
-    # Mail / coat torso.
-    "shieldBelowArm",
-    "mailArmBelowHeadOverMailChest",
-    "mailArmBelowHead",
-    "armBelowHeadOverMailChest",
-    "armBelowHead",
-    "shield",
-    "shieldOverBody",
-    # Coat / mail layers come BEFORE the default weapon slot so that
-    # a held one-handed weapon (z="weapon") draws in front of the
-    # mailChest plate — otherwise the coat covered the blade going
-    # across the torso. The arm / mailArm still draw after the weapon
-    # so the grip stays hidden behind the gripping arm.
-    "coatBelowArmoverMail",
-    "coat",
-    "mail",
-    "mailChest",
-    "mailChestOverPants",
-    "mailChestTop",
-    # ``mailChestOverHighest`` is used by 184 coats / longcoats in stock
-    # GMS v83 (e.g. 01050021). The literal "OverHighest" is misleading
-    # — this is just the topmost coat layer in the mail/chest stack,
-    # not "above everything". My earlier fallback put it at the very
-    # end of the zmap which masked weapons and hands.
-    "mailChestOverHighest",
-    # ``gloveOverBody`` is the back-side glove slot (e.g. 01082794's
-    # lGlove anchored on the off-side of navel). It renders ON TOP
-    # of body / pants / coat so the back hand peeks out, but the
-    # weapon (held in front) and the front arm sit ABOVE it.
-    "gloveOverBody",
-    # Default weapon slot ("weapon" / "Weapon"): tucked between the
-    # coat/mail and the arm so a held sword shows in front of the
-    # torso garments but the arm + hand sit on top of the grip — what
-    # Maple v83 stand1 looks like in-game. ``weaponBelowArm`` (some
-    # two-handed weapons) lives here too so its blade likewise shows
-    # over the coat while remaining hidden behind the arm proper.
-    "weaponBelowArm",
-    "weaponOveArm",  # appears in stock data — likely a Maple typo
-    "weapon",
-    "Weapon",  # case variant seen in stock data
-    # Arms / hands / gloves.
-    "arm",
-    "armOverHair",
-    "armOverHairBelowWeapon",
-    # ``gloveBelowMailArm`` / ``gloveWristBelowMailArm`` go AFTER
-    # the bare arm so the gloved hand replaces the body's skin-
-    # colored arm canvas (otherwise the arm covers the glove —
-    # e.g. 01082794's rGlove sat at the same screen position as
-    # ``arm`` and was invisible). They still go before ``mailArm``
-    # so a coat sleeve, when present, covers the glove cuff.
-    "gloveWristBelowMailArm",
-    "gloveBelowMailArm",
-    # Coat / longcoat sleeve goes ON TOP of the bare arm — otherwise
-    # the body image's skin-colored arm canvas covers the sleeve and
-    # mailArm becomes invisible.
-    "mailArm",
-    "mailArmOverHair",
-    "mailArmOverHairBelowWeapon",
-    # Cape / capeArm canvases authored to sit IN FRONT of the
-    # outfit (e.g. 01102164's backpack strap with ``z='cape'``).
-    # Real hanging-cloth cape canvases use ``capeBelowBody`` up in
-    # the back-of-body cluster and aren't affected by this slot.
-    "cape",
-    "weaponOverArmBelowHead",
-    "weaponBelowHand",
-    "hand",
-    "handBelowWeapon",
-    "weaponWrist",
-    "weaponWristOverGlove",
-    "gloveWristBelowWeapon",
-    "gloveWristBelowHead",
-    "gloveBelowWeapon",
-    "gloveBelowHead",
+    "backCapAccessory",
+    "backAccessoryFace",
+    "backAccessoryEar",
+    "backBody",
     "backGlove",
     "backGloveWrist",
-    "gloveWrist",
+    "backWeaponOverGloveEffectUnder",
+    "backWeaponOverGlove",
+    "backWeaponOverGloveEffectOver",
+    "backMailChestBelowPants",
+    "backPantsBelowShoes",
+    "backShoesBelowPants",
+    "backPants",
+    "backShoes",
+    "backPantsOverShoesBelowMailChest",
+    "backMailChest",
+    "backPantsOverMailChest",
+    "backMailChestOverPants",
+    "backHead",
+    "backAccessoryFaceOverHead",
+    "backAccessoryOverHead",
+    "backCape",
+    "backHairBelowCap",
+    "backHairBelowCapNarrow",
+    "backHairBelowCapWide",
+    "backWeaponOverHeadEffectUnder",
+    "backWeaponOverHead",
+    "backWeaponOverHeadEffectOver",
+    "backCap",
+    "backHair",
+    "backCapOverHair",
+    "backShield",
+    "backWeaponOverShieldEffectUnder",
+    "backWeaponOverShield",
+    "backWeaponOverShieldEffectOver",
+    "backWing",
+    "backHairOverCape",
+    "weaponBelowBodyEffectUnder",
+    "weaponBelowBody",
+    "weaponBelowBodyEffectOver",
+    "hairBelowBody",
+    "capeBelowBody",
+    "shieldBelowBody",
+    "capAccessoryBelowBody",
+    "gloveBelowBody",
+    "gloveWristBelowBody",
+    "body",
+    "gloveOverBody",
+    "mailChestBelowPants",
+    "pantsBelowShoes",
+    "shoes",
+    "pants",
+    "mailChestOverPants",
+    "shoesOverPants",
+    "pantsOverShoesBelowMailChest",
+    "shoesTop",
+    "mailChest",
+    "pantsOverMailChest",
+    "mailChestOverHighest",
     "gloveWristOverBody",
+    "mailChestTop",
+    "capeBelowWeapon",
+    "weaponOverBodyEffectUnder",
+    "weaponOverBody",
+    "weaponOverBodyEffectOver",
+    "armBelowHead",
+    "mailArmBelowHead",
+    "armBelowHeadOverMailChest",
+    "gloveBelowHead",
+    "mailArmBelowHeadOverMailChest",
+    "gloveWristBelowHead",
+    "weaponOverArmBelowHeadEffectUnder",
+    "weaponOverArmBelowHead",
+    "weaponOverArmBelowHeadEffectOver",
+    "shield",
+    "weaponEffectUnder",
+    "weapon",
+    "weaponEffectOver",
+    "arm",
+    "hand",
     "glove",
-    # Head, ear, face.
+    "mailArm",
+    "gloveWrist",
+    "cape",
     "head",
-    "ear",
-    "accessoryEarBelowFace",
+    "hairShade",
     "accessoryFaceBelowFace",
     "accessoryEyeBelowFace",
     "face",
-    "faceOverHair",
-    "hairShade",
-    "hair",
-    # Face / eye / ear accessories whose z slot doesn't end in
-    # ``*OverCap``. Per the canonical v83 zmap these sit ABOVE the
-    # face / hair canvas but BELOW ``hairOverHead`` so bangs cover
-    # them — what the user expects when no cap is equipped (otherwise
-    # cap-less glasses, earrings, and most FaceAcc render on top of
-    # the bangs).
-    "accessoryEar",
-    "accessoryFace",
     "accessoryFaceOverFaceBelowCap",
-    "accessoryFaceOverFaceAcc",
-    "accessoryFaceOverEar",
-    "accessoryEyes",
-    "accessoryEye",
-    # Synthetic slot used by ``_OVER_CAP_REMAP`` as the target for
-    # cap canvases (z=``cap`` / ``capOverHair`` / ``capAccessory``)
-    # when the cap doesn't actually hide any hair (e.g., a headband
-    # with ``vslot=Cp`` / ``CpH5``). Sits just above the face / eye
-    # accessory slots and just below ``hairOverHead`` so the cap
-    # rides on top of the face but bangs still cover the front of
-    # it. Real WZ data never declares this slot directly.
-    "capBelowHairOverHead",
-    "hairOverHead",
-    # Cap layers (above hair, below face accessories that overlap caps).
-    # ``capBelowHead`` / ``capBelowHair`` / ``capBelowBody`` /
-    # ``capAccessoryBelowBody`` despite their ``Below*`` names are
-    # the BACK layers of a multi-piece cap and need to render above
-    # hair / head so the user sees the hat — caps like 01000111 put
-    # their entire main hat shape on ``capAccessoryBelowBody`` while
-    # the front-side ``default`` is just a thin headband. Place them
-    # below the front cap layer so the front piece (cap /
-    # capOverHair / capAccessory) still draws on top.
-    "capeOverHead",
     "capBelowAccessory",
+    "accessoryEar",
     "capAccessoryBelowAccFace",
-    "capBelowHead",
-    "capBelowHair",
-    "capBelowBody",
-    "capAccessoryBelowBody",
+    "accessoryFace",
+    "accessoryEyeShadow",
+    "accessoryEye",
+    "capeOverFace",
+    "hair",
     "cap",
-    "capOverHair",
     "capAccessory",
-    # Front-of-hand / two-handed weapon variants. These sit ABOVE head
-    # / hair / cap so a vertically-held spear or polearm shaft remains
-    # visible past the face — matches MapleStory's stand2 in-game look.
-    "weaponOverGlove",
+    "accessoryEyeOverCap",
+    "hairOverHead",
+    "accessoryOverHair",
+    "accessoryEarOverHair",
+    "capOverHair",
+    "weaponBelowArmEffectUnder",
+    "weaponBelowArm",
+    "weaponBelowArmEffectOver",
+    "armOverHairBelowWeapon",
+    "mailArmOverHairBelowWeapon",
+    "armOverHair",
+    "gloveBelowMailArm",
+    "mailArmOverHair",
+    "gloveWristBelowMailArm",
+    "weaponOverArmEffectUnder",
     "weaponOverArm",
+    "weaponOverArmEffectOver",
+    "handBelowWeapon",
+    "gloveBelowWeapon",
+    "gloveWristBelowWeapon",
+    "shieldOverHair",
+    "weaponOverHandEffectUnder",
     "weaponOverHand",
-    "weaponOverBody",
-    # ``*OverHair`` slots fire AFTER the weapon stack so the body's
-    # stand2 ``hand`` canvas (z=handOverHair) and any glove ``*OverHair``
-    # variants land on top of a vertically-held spear/polearm — making
-    # both gripping hands visible across the shaft. ``handOverHair`` was
-    # previously listed before the weapon stack and got covered.
+    "weaponOverHandEffectOver",
     "handOverHair",
     "gloveOverHair",
     "gloveWristOverHair",
-    # Face / eye accessories that explicitly sit ABOVE the cap
-    # (named ``*OverCap``). These render at the very top of the
-    # stack only when a cap is actually equipped — when no cap is on,
-    # ``compose`` remaps each one to its non-OverCap sibling so the
-    # bangs (hairOverHead) cover the glasses / face accessory like
-    # they should. See ``_OVER_CAP_REMAP``.
-    "accessoryFaceOverCap",
-    "accessoryFaceUpperOverCap",
-    "accessoryEyeOverCap",
-    "shieldOverHair",
+    "weaponOverGloveEffectUnder",
+    "weaponOverGlove",
+    "weaponOverGloveEffectOver",
+    "capeOverHead",
+    "weaponWristOverGloveEffectUnder",
+    "weaponWristOverGlove",
+    "weaponWristOverGloveEffectOver",
     "emotionOverBody",
-    # ``characterStart`` is an absolute "frontmost" slot (e.g. cape
-    # 01102984's ladder/rope canvas uses z=characterStart so the cape
-    # drapes in front of the back-facing body silhouette). Sits above
-    # everything else — including the back-facing override cluster —
-    # in either pose orientation. Mirrors ``characterEnd`` at idx 1
-    # which is the absolute "deepest" slot.
     "characterStart",
+    "backSaddleFront",
+    "saddleMid",
+    "tamingMobMid",
+    "mobEquipUnderSaddle",
+    "saddleFront",
+    "mobEquipMid",
+    "tamingMobFront",
+    "mobEquipFront",
 )
 
 # Slots whose z is ABSOLUTE — independent of pose orientation. The
@@ -1059,9 +996,9 @@ class CharacterRenderer:
 
     # ── tree traversal helpers ──────────────────────────────────────────
     def _load_zmap(self) -> Tuple[str, ...]:
-        """Try to read ``Base/zmap.img``; otherwise use the hardcoded order
-        from HaCreator. Most HaSuite-exported Character.wz files don't ship
-        Base/, so the fallback is the common case."""
+        """Try to read ``Base/zmap.img`` from the Character pack itself
+        (HaSuite-exported packs sometimes embed it); otherwise fall back
+        to the embedded canonical :data:`_DEFAULT_ZMAP`."""
         node = self.wz.root.get("Base/zmap.img")
         if isinstance(node, WzImage):
             try:
@@ -1106,6 +1043,20 @@ class CharacterRenderer:
             except (ValueError, IndexError):
                 # Generic back layer — between shadow and body.
                 return max(1, self._zmap.index("body") - 1) if "body" in self._zmap else 1
+        # Non-canonical cap*Below* slots — ``capBelowBody`` /
+        # ``capBelowHead`` / ``capBelowHair`` aren't in Maple's stock
+        # ``Base/zmap.img`` but a number of caps use them, and in
+        # those caps the *Below* canvas frequently IS the main
+        # visible hat shape (e.g. 01001036's mushroom dome on
+        # ``capBelowBody`` while the front-side ``cap`` canvas is
+        # just a thin white trim). Default these slots to land just
+        # before the front ``cap`` slot so the main hat draws above
+        # hair/head; the cap-back-piece detection in
+        # ``_build_placements`` handles the secondary back-piece
+        # case (demoting them behind the body when the front cap
+        # canvas is the larger one).
+        if s.startswith("cap") and "below" in s and "cap" in self._zmap:
+            return max(1, self._zmap.index("cap") - 1)
         # ``…Below…`` → sits behind the named target.
         for separator in ("Below", "below"):
             if separator in slot:
@@ -2307,12 +2258,80 @@ class CharacterRenderer:
 
         zmap_size = len(self._zmap)
 
+        # Caps frequently ship a front canvas (z=``cap`` /
+        # ``capOverHair`` / ``capAccessory``) plus a ``z=cap*Below*``
+        # canvas. The default zmap promotes the cap*Below* slots
+        # ABOVE hair/head because for some caps (e.g. 01001036
+        # mushroom) the main visible hat lives on ``capBelowBody``
+        # while the front canvas is just a thin trim. But for caps
+        # where the cap*Below* is a back-accessory (a piece tucked
+        # behind the head/body), the promoted placement renders it
+        # on top of the face — e.g. 01006186's ``defaultAc`` red
+        # back-of-head shape, or 01000111's ``default2`` dome that
+        # belongs behind the body silhouette. Demote those back-
+        # accessory placements to ``_z_index("body") - 1`` so the
+        # body, head, and face all cover them.
+        #
+        # Slot-name based split:
+        #   * ``capAccessoryBelowBody`` — the slot name says
+        #     "accessory below body", canonical placement is behind
+        #     body. Always demote when the cap also has a non-
+        #     ``*Below*`` front canvas.
+        #   * ``capBelowBody`` / ``capBelowHead`` / ``capBelowHair``
+        #     — the back of the main cap; in many caps this IS the
+        #     main visible hat shape. Demote only when the front
+        #     canvas's bitmap area is at least the ``*Below*``
+        #     canvas's area AND the ``*Below*`` doesn't extend
+        #     above the front canvas's top (i.e. the front IS the
+        #     main hat and the ``*Below*`` is a secondary back-
+        #     piece). 01001036's mushroom and 01000114's witch-hat
+        #     brim both have a larger ``*Below*`` than front and
+        #     are correctly skipped by this guard.
+        _FRONT_CAP_SLOTS = frozenset({"cap", "capOverHair", "capAccessory"})
+        _ALWAYS_BACK_BELOW = frozenset({"capAccessoryBelowBody"})
+        caps_by_id: Dict[str, List[_Placement]] = {}
+        for pl in placements:
+            if pl.category == "Cap":
+                caps_by_id.setdefault(pl.equip_id, []).append(pl)
+        cap_below_demote: set = set()
+        for cap_pls in caps_by_id.values():
+            front_candidates = [
+                p for p in cap_pls
+                if p.z_slot in _FRONT_CAP_SLOTS and p.top_left is not None
+            ]
+            if not front_candidates:
+                continue
+            front = max(
+                front_candidates,
+                key=lambda p: p.pixel_canvas.width * p.pixel_canvas.height,
+            )
+            front_area = front.pixel_canvas.width * front.pixel_canvas.height
+            front_top_y = front.top_left[1]
+            for p in cap_pls:
+                if (p is front or p.top_left is None
+                        or not p.z_slot
+                        or not p.z_slot.startswith("cap")
+                        or "Below" not in p.z_slot):
+                    continue
+                if p.z_slot in _ALWAYS_BACK_BELOW:
+                    cap_below_demote.add(id(p))
+                    continue
+                p_area = p.pixel_canvas.width * p.pixel_canvas.height
+                if front_area >= p_area and p.top_left[1] >= front_top_y:
+                    cap_below_demote.add(id(p))
+
         def slot_z(pl: _Placement) -> int:
             """zmap index for a non-effect placement, after the
             pose/category-aware slot remaps below. Extracted so
             ``z_for`` can use it both directly and to seed
             ``parent_z`` for effect placements (whose z is
             authored RELATIVE to the equip they overlay)."""
+            # Demote secondary cap*Below* canvases that the
+            # back-piece detection above flagged: render them just
+            # before ``body`` so the body, head, and face all cover
+            # them.
+            if id(pl) in cap_below_demote:
+                return self._z_index("body") - 1
             slot = pl.z_slot
             if slot is None:
                 return self._z_index(slot)
