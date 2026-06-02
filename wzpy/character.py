@@ -130,6 +130,20 @@ _DEFAULT_ANCHOR_BY_CATEGORY: Dict[str, str] = {
 
 _ANCHOR_PRIORITY: Tuple[str, ...] = ("navel", "neck", "hand", "brow", "handMove")
 
+# Anchors that ride on the breathing body's per-frame arm rather than the
+# (still) head. In :meth:`CharacterRenderer.compose_animation`'s stabilized
+# stand poses the head-family anchors (``neck`` / ``brow``) are frozen at
+# frame 0 so head / hair / cap / face don't jitter, but the hand sits at the
+# end of the arm canvas whose breathing IS baked into each frame. Held items
+# (weapon / glove / shield) anchor on the hand, so the hand world anchor must
+# track the body's current-frame arm — freezing it makes a weapon with a
+# single shared canvas drift down-then-up relative to the moving grip. These
+# anchors are therefore re-registered from the body's per-frame canvases even
+# when the rest of the anchor map is frozen. ``navel`` stays frozen (it's the
+# body's own reference point, and body-anchored equipment tracks it through
+# the right-edge re-pin delta instead).
+_DYNAMIC_ANIM_ANCHORS: frozenset = frozenset({"hand", "lHand"})
+
 
 # Back-facing pose (ladder, rope) z overrides for the head-region
 # ``back*`` cluster. The front-facing zmap puts backHair (162) below
@@ -2208,6 +2222,27 @@ class CharacterRenderer:
         )
         body_anchored = False
 
+        # In stabilized animation (``frozen_anchors`` set) the supplied
+        # anchor map keeps head-family anchors pinned to frame 0, but the
+        # hand-family anchors (:data:`_DYNAMIC_ANIM_ANCHORS`) must follow
+        # the body's per-frame arm so held items stay glued to the moving
+        # grip. We re-register those from the body's own canvases as we
+        # position them, first-body-part-wins to mirror the unfrozen path
+        # (``_register_anchors(overwrite=False)`` lets the arm define
+        # ``hand`` before any later canvas can).
+        dynamic_seen: set = set()
+
+        def _refresh_dynamic_anchors(pl: _Placement) -> None:
+            if frozen_anchors is None or pl.category != "Body" \
+                    or pl.top_left is None:
+                return
+            ox, oy = pl.origin
+            tx, ty = pl.top_left
+            for name, vec in pl.map_anchors.items():
+                if name in _DYNAMIC_ANIM_ANCHORS and name not in dynamic_seen:
+                    world_anchors[name] = (tx + ox + vec[0], ty + oy + vec[1])
+                    dynamic_seen.add(name)
+
         for pl in placements:
             if pl.category == "Body" and pl.name == "body" and not body_anchored:
                 navel = pl.map_anchors.get("navel", (0, 0))
@@ -2215,6 +2250,8 @@ class CharacterRenderer:
                                -pl.origin[1] - navel[1])
                 if frozen_anchors is None:
                     self._register_anchors(pl, world_anchors, overwrite=True)
+                else:
+                    _refresh_dynamic_anchors(pl)
                 body_anchored = True
                 continue
 
@@ -2230,6 +2267,8 @@ class CharacterRenderer:
                 )
             if frozen_anchors is None:
                 self._register_anchors(pl, world_anchors, overwrite=False)
+            else:
+                _refresh_dynamic_anchors(pl)
 
         # ItemEff overlays: composite per-equip effects (e.g. cap
         # 01004759 ember-flames) on top of the character. Anchored
