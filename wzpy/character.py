@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image
 
-from .canvas import decode_canvas
+from .canvas import apply_hsv_adjust, decode_canvas
 from .properties import (
     WzCanvasProperty,
     WzProperty,
@@ -1378,6 +1378,7 @@ class CharacterRenderer:
         flip: bool = False,
         frame: int = 0,
         bbox: Optional[Tuple[int, int, int, int]] = None,
+        hair_hsv: Optional[Tuple[float, float, float]] = None,
     ) -> Image.Image:
         """Render the equipped parts as a single RGBA :class:`PIL.Image`.
 
@@ -1412,13 +1413,14 @@ class CharacterRenderer:
         )
         if not placements:
             return Image.new("RGBA", (1, 1), (0, 0, 0, 0))
-        return self._render_placements(placements, flip=flip, bbox=bbox)
+        return self._render_placements(placements, flip=flip, bbox=bbox, hair_hsv=hair_hsv)
 
     def compose_animation_timeline(
         self, equip_ids: List[str], pose: Optional[str] = None,
         ear_type: str = DEFAULT_EAR_TYPE,
         flip: bool = False,
         max_total_ms: int = 6000,
+        hair_hsv: Optional[Tuple[float, float, float]] = None,
     ) -> Tuple[List[Image.Image], List[int], List[Tuple[int, Dict[str, int]]]]:
         """Render a full animation cycle that respects each ItemEff
         overlay's authored frame rate independently of the body's.
@@ -1478,6 +1480,7 @@ class CharacterRenderer:
         if not effect_cycles:
             imgs = self.compose_animation(
                 equip_ids, pose=pose, ear_type=ear_type, flip=flip,
+                hair_hsv=hair_hsv,
             )
             steps = [(s, {}) for s in body_seq]
             # Stretch / fold images to match body_seq (compose_animation
@@ -1635,7 +1638,7 @@ class CharacterRenderer:
             max(p.top_left[1] + _h(p) for p in all_pls),
         )
         images = [
-            self._render_placements(pls, flip=flip, bbox=bbox)
+            self._render_placements(pls, flip=flip, bbox=bbox, hair_hsv=hair_hsv)
             if pls else Image.new(
                 "RGBA",
                 (max(1, bbox[2] - bbox[0]), max(1, bbox[3] - bbox[1])),
@@ -1650,6 +1653,7 @@ class CharacterRenderer:
         ear_type: str = DEFAULT_EAR_TYPE,
         flip: bool = False,
         frames: Optional[Tuple[int, ...]] = None,
+        hair_hsv: Optional[Tuple[float, float, float]] = None,
     ) -> List[Image.Image]:
         """Compose multiple frames at consistent image dimensions.
 
@@ -1836,7 +1840,7 @@ class CharacterRenderer:
             max(p.top_left[1] + _h(p) for p in all_pls),
         )
         return [
-            self._render_placements(pls, flip=flip, bbox=bbox)
+            self._render_placements(pls, flip=flip, bbox=bbox, hair_hsv=hair_hsv)
             if pls else Image.new(
                 "RGBA",
                 (max(1, bbox[2] - bbox[0]), max(1, bbox[3] - bbox[1])),
@@ -2566,6 +2570,7 @@ class CharacterRenderer:
     def _render_placements(
         self, placements: List[_Placement], *, flip: bool = False,
         bbox: Optional[Tuple[int, int, int, int]] = None,
+        hair_hsv: Optional[Tuple[float, float, float]] = None,
     ) -> Image.Image:
         """Composite the supplied placements into a single image. When
         ``bbox`` is None, the canvas is the tight bounding box of
@@ -2606,6 +2611,11 @@ class CharacterRenderer:
                     continue
             if layer.mode != "RGBA":
                 layer = layer.convert("RGBA")
+            # Custom-hair recolor: HSV-recolor every Hair canvas (hair,
+            # hairOverHead, hairShade, backHair, …) before compositing, so the
+            # whole head recolors consistently and matches the live preview.
+            if hair_hsv is not None and pl.category == "Hair":
+                layer = apply_hsv_adjust(layer, *hair_hsv)
             composite.alpha_composite(
                 layer,
                 (pl.top_left[0] - min_x, pl.top_left[1] - min_y),

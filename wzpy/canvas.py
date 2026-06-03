@@ -326,6 +326,70 @@ def decode_canvas(canvas: "WzCanvasProperty", region: str = "GMS") -> Image.Imag
     return _decode_pixels(raw, canvas.width, canvas.height, fmt)
 
 
+# ── HSV recolor (custom hair colour) ───────────────────────────────────────
+#
+# The character compositor recolors the *red* hair variant to an arbitrary
+# custom colour by replacing each pixel's hue and scaling its saturation /
+# value. Red is the base because it has full chroma to shift; black (the stock
+# default) has none, so its hue can't be moved. Applied per-canvas before the
+# z-ordered alpha composite, so it reaches every pose identically.
+
+
+def apply_hsv_adjust(
+    img: Image.Image, hue: float, sat: float, val: float,
+) -> Image.Image:
+    """Recolor every pixel of an RGBA hair image: set its hue to ``hue``
+    (degrees, wrapped to ``[0, 360)``), scale its saturation by ``sat`` and
+    value by ``val`` (each clamped to ``[0, 1]``). Alpha is preserved, so
+    anti-aliased edges keep their coverage. Near-grey pixels (white highlights,
+    black outlines) have ~zero chroma, so the hue swap leaves them neutral —
+    only the coloured strands shift. Vectorized with numpy; returns a new RGBA
+    ``Image``. Defaults (``sat == val == 1.0``, ``hue`` = the base's own hue)
+    leave the image unchanged.
+    """
+    if img.mode != "RGBA":
+        img = img.convert("RGBA")
+    arr = np.asarray(img, dtype=np.float32)
+    rgb = arr[..., :3] / 255.0
+    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    mx = np.maximum(np.maximum(r, g), b)
+    mn = np.minimum(np.minimum(r, g), b)
+    d = mx - mn
+    # value = max; saturation = chroma / max (0 where max is ~0).
+    s = np.where(mx <= 1e-6, 0.0, d / np.where(mx <= 1e-6, 1.0, mx))
+    v = mx
+
+    h = float(hue) % 360.0
+    ns = np.clip(s * float(sat), 0.0, 1.0)
+    nv = np.clip(v * float(val), 0.0, 1.0)
+
+    # HSV -> RGB at the single target hue (same for every pixel).
+    c = nv * ns
+    hp = (h / 60.0) % 6.0
+    x = c * (1.0 - abs((hp % 2.0) - 1.0))
+    m = nv - c
+    sector = int(hp)  # 0..5
+    if sector == 0:
+        r1, g1, b1 = c, x, np.zeros_like(c)
+    elif sector == 1:
+        r1, g1, b1 = x, c, np.zeros_like(c)
+    elif sector == 2:
+        r1, g1, b1 = np.zeros_like(c), c, x
+    elif sector == 3:
+        r1, g1, b1 = np.zeros_like(c), x, c
+    elif sector == 4:
+        r1, g1, b1 = x, np.zeros_like(c), c
+    else:
+        r1, g1, b1 = c, np.zeros_like(c), x
+
+    out = np.empty_like(arr)
+    out[..., 0] = np.clip(np.rint((r1 + m) * 255.0), 0, 255)
+    out[..., 1] = np.clip(np.rint((g1 + m) * 255.0), 0, 255)
+    out[..., 2] = np.clip(np.rint((b1 + m) * 255.0), 0, 255)
+    out[..., 3] = arr[..., 3]  # alpha untouched
+    return Image.fromarray(out.astype(np.uint8), "RGBA")
+
+
 # ── pixel encoders (inverse of _decode_pixels) ─────────────────────────
 # Used by the canvas-replacement save path. We support the same formats
 # that the decoder supports for ARGB/RGB565 family. DXT is intentionally

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import re
 import sys
@@ -41,6 +42,27 @@ _NUMBER_RE = re.compile(r"(\d+)")
 def _natural_key(s: str):
     """Sort key that orders ``"2.img"`` before ``"10.img"`` and ``"0"`` before ``"10"``."""
     return [int(p) if p.isdigit() else p.lower() for p in _NUMBER_RE.split(s)]
+
+
+def _parse_hair_hsv(raw: str) -> Optional[Tuple[float, float, float]]:
+    """Parse the ``?hair_hsv=hue,sat,val`` query param (e.g. ``"210,1,1.1"``)
+    into ``(hue, sat, val)``: an absolute target hue (wrapped to ``[0, 360)``)
+    plus saturation / value multipliers. Returns ``None`` for an empty or
+    malformed value (⇒ no recolor). Mirrors wz-core's ``HsvAdjust::parse`` and
+    the JS ``hairHsvArg()``."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    parts = raw.split(",")
+    if len(parts) != 3:
+        return None
+    try:
+        hue, sat, val = (float(p.strip()) for p in parts)
+    except ValueError:
+        return None
+    if not all(map(math.isfinite, (hue, sat, val))):
+        return None
+    return (hue % 360.0, max(0.0, sat), max(0.0, val))
 
 
 # ── recursive serializers used by the export routes ─────────────────────
@@ -1420,9 +1442,11 @@ def create_app(
             frame = max(0, min(n_frames - 1, frame))
         else:
             frame = 0
+        hair_hsv = _parse_hair_hsv(request.args.get("hair_hsv", ""))
         try:
             img = renderer.compose(
                 ids, pose=pose, ear_type=ear_type, flip=flip, frame=frame,
+                hair_hsv=hair_hsv,
             )
         except Exception as exc:
             print(f"  [compose error] {exc}", flush=True)
@@ -1488,6 +1512,7 @@ def create_app(
             # is unchanged.
             frames_imgs, frame_delays, _steps = renderer.compose_animation_timeline(
                 ids, pose=pose, ear_type=ear_type, flip=flip,
+                hair_hsv=_parse_hair_hsv(request.args.get("hair_hsv", "")),
             )
         except Exception as exc:
             print(f"  [compose_animation error] {exc}", flush=True)
@@ -1521,6 +1546,7 @@ def create_app(
     def _render_animation_for_export(
         ids: List[str], pose_arg: Optional[str], ear_type: str,
         flip: bool, scale: int,
+        hair_hsv: Optional[Tuple[float, float, float]] = None,
     ) -> Tuple[List[Image.Image], List[int], str]:
         """Shared body for the ZIP / GIF export endpoints. Returns the
         per-frame images (already scaled), the per-frame delays in ms,
@@ -1536,6 +1562,7 @@ def create_app(
         try:
             frames_imgs, delays, _steps = renderer.compose_animation_timeline(
                 ids, pose=pose_arg, ear_type=ear_type, flip=flip,
+                hair_hsv=hair_hsv,
             )
         except Exception as exc:
             print(f"  [export render error] {exc}", flush=True)
@@ -1572,6 +1599,7 @@ def create_app(
             scale = 2
         frames_imgs, delays, resolved_pose = _render_animation_for_export(
             ids, pose, ear_type, flip, scale,
+            _parse_hair_hsv(request.args.get("hair_hsv", "")),
         )
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
@@ -1614,6 +1642,7 @@ def create_app(
             scale = 2
         frames_imgs, delays, resolved_pose = _render_animation_for_export(
             ids, pose, ear_type, flip, scale,
+            _parse_hair_hsv(request.args.get("hair_hsv", "")),
         )
         if not frames_imgs:
             abort(500, "no frames to encode")

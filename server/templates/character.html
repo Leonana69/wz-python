@@ -85,6 +85,14 @@
 
   <div id="char-tooltip" class="char-tooltip" role="tooltip" hidden></div>
 
+  <div id="hair-custom-popup" class="hair-custom-popup" role="dialog" aria-label="Custom hair color" hidden>
+    <div class="hcp-head"><span>Custom Hair Color</span><button id="hcp-close" type="button" class="hcp-close" title="Close">×</button></div>
+    <label class="hcp-row"><span class="hcp-name">Hue</span><input type="range" id="hcp-hue" min="0" max="360" step="1"><span class="hcp-num" id="hcp-hue-val">0°</span></label>
+    <label class="hcp-row"><span class="hcp-name">Sat</span><input type="range" id="hcp-sat" min="0" max="200" step="1"><span class="hcp-num" id="hcp-sat-val">100%</span></label>
+    <label class="hcp-row"><span class="hcp-name">Val</span><input type="range" id="hcp-val" min="0" max="200" step="1"><span class="hcp-num" id="hcp-val-val">100%</span></label>
+    <div class="hcp-foot"><span class="hcp-preview-dot" id="hcp-preview"></span><span class="hcp-hint">Recolors the red hair to your custom HSV — applies to every pose.</span></div>
+  </div>
+
   <script src="{{ url_for('static', filename='character.js') }}"></script>
 </body>
 </html>

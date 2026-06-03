@@ -131,6 +131,12 @@ const state = {
   // re-skins every visible thumbnail in that category and, if a
   // member is equipped, swaps the equipped ID to the new variant.
   colorByCategory: { Hair: 0, Face: 0 },
+  // Custom HSV hair recolor. When ``active``, the equipped Hair is
+  // forced to its red variant (black has no chroma to hue-shift) and
+  // ``hue`` (absolute, deg) / ``sat`` / ``val`` (multipliers) are sent
+  // to the server's compose endpoints, which recolor every Hair canvas
+  // before compositing — so it applies to every pose.
+  hairCustom: { active: false, hue: 0, sat: 1, val: 1 },
   // Facing direction. ``"left"`` is the canonical orientation in
   // which Character.wz authors the bitmaps; ``"right"`` flips the
   // final composite horizontally on the server (a simple
@@ -198,6 +204,56 @@ function pickAvailableColor(availableColors, requested) {
   return availableColors[0];
 }
 
+// ── custom hair color (HSV recolor of the red base) ────────────────
+// Hair colour digit 1 = red — the preferred base for the custom recolor.
+const RED_HAIR_COLOR = 1;
+// Base-colour preference: red first, then the other chromatic colours,
+// BLACK LAST — black (digit 0) has no chroma to hue-shift, so it's only
+// used when a style ships nothing else. Picks the first available.
+const CUSTOM_HAIR_BASE_PREF = [1, 2, 3, 4, 5, 6, 7, 0];
+function customHairBase(colors) {
+  if (!colors || colors.length === 0) return RED_HAIR_COLOR;
+  for (const c of CUSTOM_HAIR_BASE_PREF) if (colors.includes(c)) return c;
+  return colors[0];
+}
+function defaultHairCustom() {
+  return { active: false, hue: 0, sat: 1, val: 1 };
+}
+// "hue,sat,val" for the server when the custom recolor is on, else "".
+function hairHsvArg() {
+  const h = state.hairCustom;
+  return h.active ? `${h.hue},${h.sat},${h.val}` : "";
+}
+// Append ``&hair_hsv=…`` to a compose URL when custom is active.
+function hairHsvParam() {
+  const arg = hairHsvArg();
+  return arg ? `&hair_hsv=${encodeURIComponent(arg)}` : "";
+}
+// Approximate CSS colour for the custom swatch / popup preview: the
+// target hue at the (display-clamped) saturation/value. Mirrors the
+// server's HSV→RGB.
+function hsvToRgbCss(hue, sat, val) {
+  const s = Math.min(1, Math.max(0, sat));
+  const v = Math.min(1, Math.max(0, val));
+  const c = v * s;
+  const hp = (((hue / 60) % 6) + 6) % 6;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let r = 0, g = 0, b = 0;
+  if (hp < 1) [r, g, b] = [c, x, 0];
+  else if (hp < 2) [r, g, b] = [x, c, 0];
+  else if (hp < 3) [r, g, b] = [0, c, x];
+  else if (hp < 4) [r, g, b] = [0, x, c];
+  else if (hp < 5) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const m = v - c;
+  const to = t => Math.round((t + m) * 255);
+  return `rgb(${to(r)}, ${to(g)}, ${to(b)})`;
+}
+function customSwatchColor() {
+  const h = state.hairCustom;
+  return hsvToRgbCss(h.hue, h.sat, h.val);
+}
+
 const $img = document.getElementById("char-img");
 const $tabs = document.getElementById("char-tabs");
 const $subtabs = document.getElementById("char-subtabs");
@@ -210,6 +266,17 @@ const $export = document.getElementById("char-export");
 const $exportFrames = document.getElementById("char-export-frames");
 const $exportGif = document.getElementById("char-export-gif");
 const $progress = document.getElementById("char-progress");
+
+// Custom-hair HSV popup.
+const $hairPopup = document.getElementById("hair-custom-popup");
+const $hcpHue = document.getElementById("hcp-hue");
+const $hcpSat = document.getElementById("hcp-sat");
+const $hcpVal = document.getElementById("hcp-val");
+const $hcpHueVal = document.getElementById("hcp-hue-val");
+const $hcpSatVal = document.getElementById("hcp-sat-val");
+const $hcpValVal = document.getElementById("hcp-val-val");
+const $hcpPreview = document.getElementById("hcp-preview");
+const $hcpClose = document.getElementById("hcp-close");
 
 // Inflight-fetch counter that drives the bottom progress bar. Fetches
 // that hit ``/api/character/*`` (parts list, compose, ear types,
@@ -247,6 +314,7 @@ for (const cat of CATEGORIES) {
 
 function selectTab(category) {
   state.activeTab = category;
+  hideHairCustomPopup();
   for (const b of $tabs.querySelectorAll("button")) {
     b.classList.toggle("active", b.dataset.category === category);
   }
@@ -362,6 +430,7 @@ function renderColorSubTabs(category) {
   const cfg = COLOR_CONFIG[category];
   if (!cfg) return;
   const active = state.colorByCategory[category] ?? 0;
+  const customActive = category === "Hair" && state.hairCustom.active;
   const label = document.createElement("span");
   label.className = "subtab-label";
   label.textContent = "Color";
@@ -372,7 +441,7 @@ function renderColorSubTabs(category) {
     btn.type = "button";
     btn.dataset.color = String(i);
     btn.classList.add("color-btn");
-    btn.classList.toggle("active", i === active);
+    btn.classList.toggle("active", !customActive && i === active);
     btn.title = c.name;
     const swatch = document.createElement("span");
     swatch.className = "color-swatch";
@@ -380,6 +449,22 @@ function renderColorSubTabs(category) {
     btn.appendChild(swatch);
     btn.appendChild(document.createTextNode(c.name));
     btn.addEventListener("click", () => selectColor(category, i));
+    $subtabs.appendChild(btn);
+  }
+  // Hair-only: a "Custom" swatch that opens the HSV popup (recolors red hair).
+  if (category === "Hair") {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.color = "custom";
+    btn.classList.add("color-btn", "custom-btn");
+    btn.classList.toggle("active", customActive);
+    btn.title = "Custom HSV color — recolors the red hair";
+    const swatch = document.createElement("span");
+    swatch.className = "color-swatch";
+    swatch.style.background = customSwatchColor();
+    btn.appendChild(swatch);
+    btn.appendChild(document.createTextNode("Custom"));
+    btn.addEventListener("click", () => toggleHairCustom(btn));
     $subtabs.appendChild(btn);
   }
 }
@@ -395,7 +480,13 @@ function selectSubTab(category, key) {
 }
 
 function selectColor(category, color) {
-  if (state.colorByCategory[category] === color) return;
+  // Picking a palette swatch turns the custom recolor off (Hair only).
+  const wasCustom = category === "Hair" && state.hairCustom.active;
+  if (!wasCustom && state.colorByCategory[category] === color) return;
+  if (wasCustom) {
+    state.hairCustom.active = false;
+    hideHairCustomPopup();
+  }
   state.colorByCategory[category] = color;
   for (const b of $subtabs.querySelectorAll("button.color-btn")) {
     b.classList.toggle("active", Number(b.dataset.color) === color);
@@ -412,6 +503,9 @@ function selectColor(category, color) {
   // from the equipped ID and assume the full palette so the swap
   // still works without waiting for the parts list.
   const eq = state.equipped[category];
+  // Turning the custom recolor off must re-compose even if the equipped
+  // id is unchanged (the hair_hsv argument just dropped to "").
+  let composeNeeded = wasCustom;
   if (eq) {
     const cfg = COLOR_CONFIG[category];
     const baseId = eq.baseId ?? cfg.variantId(eq.id, 0);
@@ -424,9 +518,145 @@ function selectColor(category, color) {
       eq.baseId = baseId;
       eq.colors = colors;
       renderEquipped();
-      refreshCompose();
+      composeNeeded = true;
     }
   }
+  if (composeNeeded) refreshCompose();
+}
+
+// Re-point the equipped Hair to the right colour variant for the
+// current mode: the chromatic base while custom is on (red preferred,
+// black last), otherwise the active palette colour.
+function rewriteEquippedHair() {
+  const eq = state.equipped.Hair;
+  if (!eq) return;
+  const cfg = COLOR_CONFIG.Hair;
+  const baseId = eq.baseId ?? cfg.variantId(eq.id, 0);
+  const colors = eq.colors ?? cfg.palette.map((_, i) => i);
+  const target = state.hairCustom.active
+    ? customHairBase(colors)
+    : pickAvailableColor(colors, state.colorByCategory.Hair ?? 0);
+  const newId = cfg.variantId(baseId, target);
+  if (newId !== eq.id) {
+    eq.id = newId;
+    eq.iconPaths = iconPathsFor("Hair", newId);
+    eq.baseId = baseId;
+    eq.colors = colors;
+    renderEquipped();
+  }
+}
+
+// Toggle which Hair color swatch shows as active without rebuilding the strip.
+function refreshHairColorActive() {
+  if (state.activeTab !== "Hair") return;
+  const customActive = state.hairCustom.active;
+  const palActive = state.colorByCategory.Hair ?? 0;
+  for (const b of $subtabs.querySelectorAll("button.color-btn")) {
+    const isCustom = b.dataset.color === "custom";
+    b.classList.toggle(
+      "active",
+      isCustom ? customActive : (!customActive && Number(b.dataset.color) === palActive),
+    );
+    if (isCustom) {
+      const sw = b.querySelector(".color-swatch");
+      if (sw) sw.style.background = customSwatchColor();
+    }
+  }
+}
+
+function activateHairCustom() {
+  if (!state.hairCustom.active) {
+    state.hairCustom.active = true;
+    rewriteEquippedHair(); // force the chromatic base the HSV is applied to
+  }
+  refreshHairColorActive();
+  const parts = state.parts.get("Hair");
+  if (parts) renderGrid("Hair", parts); // tiles → red base
+  refreshCompose();
+}
+
+function toggleHairCustom(btn) {
+  if (!state.hairCustom.active) {
+    activateHairCustom();
+    showHairCustomPopup(btn);
+  } else if ($hairPopup.hidden) {
+    showHairCustomPopup(btn);
+  } else {
+    hideHairCustomPopup();
+  }
+}
+
+function syncHairCustomInputs() {
+  const h = state.hairCustom;
+  $hcpHue.value = String(Math.round(h.hue));
+  $hcpSat.value = String(Math.round(h.sat * 100));
+  $hcpVal.value = String(Math.round(h.val * 100));
+  $hcpHueVal.textContent = `${Math.round(h.hue)}°`;
+  $hcpSatVal.textContent = `${Math.round(h.sat * 100)}%`;
+  $hcpValVal.textContent = `${Math.round(h.val * 100)}%`;
+  $hcpPreview.style.background = customSwatchColor();
+}
+
+function showHairCustomPopup(anchor) {
+  if (!$hairPopup) return;
+  syncHairCustomInputs();
+  $hairPopup.hidden = false;
+  const m = 6;
+  const ar = anchor.getBoundingClientRect();
+  const pr = $hairPopup.getBoundingClientRect();
+  let left = Math.min(ar.left, window.innerWidth - m - pr.width);
+  if (left < m) left = m;
+  let top = ar.bottom + m;
+  if (top + pr.height > window.innerHeight - m) {
+    top = Math.max(m, ar.top - pr.height - m);
+  }
+  $hairPopup.style.left = `${left}px`;
+  $hairPopup.style.top = `${top}px`;
+}
+function hideHairCustomPopup() {
+  if ($hairPopup) $hairPopup.hidden = true;
+}
+
+// Debounced re-compose while dragging a slider (composeSeq drops stale renders).
+let _hairComposeTimer = null;
+function scheduleHairCompose() {
+  if (_hairComposeTimer !== null) clearTimeout(_hairComposeTimer);
+  _hairComposeTimer = setTimeout(() => {
+    _hairComposeTimer = null;
+    refreshCompose();
+  }, 80);
+}
+function onHairCustomChange() {
+  if (!state.hairCustom.active) {
+    state.hairCustom.active = true;
+    rewriteEquippedHair();
+  }
+  syncHairCustomInputs();
+  refreshHairColorActive();
+  scheduleHairCompose();
+}
+if ($hcpHue) {
+  $hcpHue.addEventListener("input", () => {
+    state.hairCustom.hue = Number($hcpHue.value);
+    onHairCustomChange();
+  });
+  $hcpSat.addEventListener("input", () => {
+    state.hairCustom.sat = Number($hcpSat.value) / 100;
+    onHairCustomChange();
+  });
+  $hcpVal.addEventListener("input", () => {
+    state.hairCustom.val = Number($hcpVal.value) / 100;
+    onHairCustomChange();
+  });
+  $hcpClose.addEventListener("click", hideHairCustomPopup);
+  // Click outside the popup (but not on the Custom swatch, which
+  // toggles it) closes it.
+  document.addEventListener("mousedown", (ev) => {
+    if ($hairPopup.hidden) return;
+    const t = ev.target;
+    if ($hairPopup.contains(t) || (t.closest && t.closest(".custom-btn"))) return;
+    hideHairCustomPopup();
+  });
 }
 
 // Progressive renderer: only mount the first ``BATCH_SIZE`` tiles, then
@@ -530,7 +760,11 @@ function makeTile(category, part, equippedId) {
   let candidates;
   const cfg = COLOR_CONFIG[category];
   if (cfg) {
-    const color = pickAvailableColor(part.colors, state.colorByCategory[category] ?? 0);
+    // With the custom recolor on, Hair tiles show the chromatic base
+    // (red preferred) the HSV is applied to.
+    const color = (category === "Hair" && state.hairCustom.active)
+      ? customHairBase(part.colors)
+      : pickAvailableColor(part.colors, state.colorByCategory[category] ?? 0);
     displayId = cfg.variantId(part.id, color);
     candidates = iconPathsFor(category, displayId);
   } else {
@@ -631,6 +865,14 @@ function unequipPart(category) {
     state.headEarTypes = ["humanEar"];
     state.earType = "humanEar";
     renderEarControls();
+  }
+  // No hair ⇒ no custom hair colour: drop custom mode so the Custom
+  // chip doesn't linger active (and close the dangling popup). The
+  // hue/sat/val are kept so re-enabling custom later restores them.
+  if (category === "Hair" && state.hairCustom.active) {
+    state.hairCustom.active = false;
+    hideHairCustomPopup();
+    refreshHairColorActive();
   }
   renderEquipped();
   refreshCompose();
@@ -1223,6 +1465,7 @@ async function refreshCompose() {
     `&pose=${encodeURIComponent(state.pose)}` +
     `&ear=${encodeURIComponent(state.earType)}` +
     (state.facing === "right" ? "&flip=1" : "") +
+    hairHsvParam() +
     `&scale=${scale}&_=${seq}`;
   try {
     const resp = await trackedFetch(url);
@@ -1317,6 +1560,7 @@ $export.addEventListener("click", async () => {
     `&ear=${encodeURIComponent(state.earType)}` +
     (state.facing === "right" ? "&flip=1" : "") +
     `&frame=0` +
+    hairHsvParam() +
     `&scale=${scale}`;
   try {
     const resp = await trackedFetch(url);
@@ -1347,6 +1591,7 @@ async function _downloadAnimation(endpoint, suffix) {
     `&pose=${encodeURIComponent(state.pose)}` +
     `&ear=${encodeURIComponent(state.earType)}` +
     (state.facing === "right" ? "&flip=1" : "") +
+    hairHsvParam() +
     `&scale=${scale}`;
   try {
     const resp = await trackedFetch(url);
@@ -1402,6 +1647,20 @@ function buildCharacterExport() {
     earType: state.earType,
     facing: state.facing,
     colorByCategory: { ...state.colorByCategory },
+    hairCustom: { ...state.hairCustom },
+  };
+}
+
+// Coerce an imported ``hairCustom`` blob into a valid object (defaults on bad data).
+function sanitizeHairCustom(h) {
+  const d = defaultHairCustom();
+  if (!h || typeof h !== "object") return d;
+  const num = (v, fallback) => (typeof v === "number" && isFinite(v) ? v : fallback);
+  return {
+    active: h.active === true,
+    hue: (((num(h.hue, d.hue)) % 360) + 360) % 360,
+    sat: Math.max(0, num(h.sat, d.sat)),
+    val: Math.max(0, num(h.val, d.val)),
   };
 }
 
@@ -1459,6 +1718,9 @@ async function applyImportedCharacter(payload) {
       if (Number.isInteger(v)) state.colorByCategory[k] = v;
     }
   }
+  state.hairCustom = sanitizeHairCustom(payload.hairCustom);
+  hideHairCustomPopup();
+  if (state.hairCustom.active) rewriteEquippedHair();
   // Refresh weapon/head dependent state (pose dropdown filter, ear
   // selector). These hit the API so we await; refreshCompose comes
   // afterwards so the preview lands once everything's settled.
@@ -1555,6 +1817,7 @@ function snapshotCurrent() {
     earType: state.earType,
     facing: state.facing,
     colorByCategory: { ...state.colorByCategory },
+    hairCustom: { ...state.hairCustom },
     thumbUrl: null,
   };
 }
@@ -1567,6 +1830,7 @@ function captureActive() {
   entry.earType = state.earType;
   entry.facing = state.facing;
   entry.colorByCategory = { ...state.colorByCategory };
+  entry.hairCustom = { ...state.hairCustom };
 }
 
 function loadFromSnapshot(entry) {
@@ -1575,6 +1839,8 @@ function loadFromSnapshot(entry) {
   state.earType = entry.earType;
   state.facing = entry.facing;
   state.colorByCategory = { ...entry.colorByCategory };
+  state.hairCustom = { ...(entry.hairCustom || defaultHairCustom()) };
+  hideHairCustomPopup();
   // Mirror facing back into the radio input — the live preview
   // reads from state.facing but the form control needs to match.
   const radio = document.querySelector(
@@ -1595,6 +1861,7 @@ async function reconcileActiveCharacter() {
   if (state.equipped.Head) {
     await syncHeadEars(state.equipped.Head.id);
   }
+  if (state.hairCustom.active) rewriteEquippedHair(); // keep the red base under custom
   renderPoseControls();
   renderEarControls();
   renderEquipped();
@@ -1625,6 +1892,7 @@ async function addCharacter() {
     earType: "humanEar",
     facing: "left",
     colorByCategory: { Hair: 0, Face: 0 },
+    hairCustom: defaultHairCustom(),
     thumbUrl: null,
   });
   state.activeIdx = state.characters.length - 1;

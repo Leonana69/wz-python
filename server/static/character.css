@@ -488,6 +488,78 @@
   border: 1px solid #1a1b1d;
   flex: 0 0 12px;
 }
+.char-subtabs button.custom-btn .color-swatch {
+  background-image: conic-gradient(red, orange, yellow, lime, cyan, blue, magenta, red);
+}
+
+/* ── custom-hair HSV popup ── */
+.hair-custom-popup {
+  position: fixed;
+  z-index: 250;
+  width: 246px;
+  background: #232428;
+  border: 1px solid #1a1b1d;
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  color: #d6d6d6;
+  font-size: 12px;
+}
+.hair-custom-popup[hidden] { display: none; }
+.hcp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 500;
+  color: #e8b96b;
+}
+.hcp-close {
+  background: transparent;
+  border: none;
+  color: #999;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.hcp-close:hover { color: #ff7777; }
+.hcp-row {
+  display: grid;
+  grid-template-columns: 30px 1fr 42px;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+.hcp-name { color: #aaa; }
+.hcp-row input[type="range"] {
+  width: 100%;
+  margin: 0;
+  accent-color: #e8b96b;
+  cursor: pointer;
+}
+.hcp-num {
+  color: #c5c5c5;
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+  text-align: right;
+}
+.hcp-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid #2e2f33;
+  padding-top: 8px;
+}
+.hcp-preview-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid #1a1b1d;
+  flex: 0 0 18px;
+}
+.hcp-hint { color: #777; font-size: 11px; line-height: 1.35; }
 
 .char-grid {
   flex: 1;
