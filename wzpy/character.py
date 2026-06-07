@@ -2247,11 +2247,13 @@ class CharacterRenderer:
                     world_anchors[name] = (tx + ox + vec[0], ty + oy + vec[1])
                     dynamic_seen.add(name)
 
+        body_navel = (0, 0)
         for pl in placements:
             if pl.category == "Body" and pl.name == "body" and not body_anchored:
                 navel = pl.map_anchors.get("navel", (0, 0))
                 pl.top_left = (-pl.origin[0] - navel[0],
                                -pl.origin[1] - navel[1])
+                body_navel = navel
                 if frozen_anchors is None:
                     self._register_anchors(pl, world_anchors, overwrite=True)
                 else:
@@ -2260,15 +2262,29 @@ class CharacterRenderer:
                 continue
 
             anchor_name = _determine_anchor(pl.canvas, pl.category)
-            anchor_world = world_anchors.get(anchor_name)
             map_pt = pl.map_anchors.get(anchor_name, (0, 0))
-            if anchor_world is None:
-                pl.top_left = (-pl.origin[0], -pl.origin[1])
-            else:
+            anchor_world = world_anchors.get(anchor_name)
+            if anchor_world is not None:
                 pl.top_left = (
                     anchor_world[0] - pl.origin[0] - map_pt[0],
                     anchor_world[1] - pl.origin[1] - map_pt[1],
                 )
+            elif anchor_name == "handMove":
+                # `handMove` is the off-hand's attach point in weapon / aim
+                # stances (body `lHand` in `alert` / `heal`; z=`handBelowWeapon`).
+                # No earlier part registers a `handMove` world anchor, so the
+                # first such part is the *definer*: per the v83 client
+                # (HeavenClient `BodyDrawInfo`/`Body` — `hand_position` is the
+                # body lHand's own `handMove`, so its draw shift is 0) it pins to
+                # the body's navel pivot, NOT the arm's `hand` grip. That lands it
+                # on the body's far side; attaching to `hand` would cluster it on
+                # the near hand. ``top_left = -origin - body_navel``. It then
+                # registers `handMove` below, so an equipped glove sharing this
+                # slot chains onto the same off-hand grip.
+                pl.top_left = (-pl.origin[0] - body_navel[0],
+                               -pl.origin[1] - body_navel[1])
+            else:
+                pl.top_left = (-pl.origin[0], -pl.origin[1])
             if frozen_anchors is None:
                 self._register_anchors(pl, world_anchors, overwrite=False)
             else:
