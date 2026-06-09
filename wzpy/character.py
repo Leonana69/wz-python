@@ -168,17 +168,33 @@ _BACK_FACING_Z_OVERRIDE: Dict[str, int] = {
     "backCapOverHair":        261,
     "backCapAccessory":       262,
     "backAccessoryEar":       263,
-    # Shield + weapon strapped to the back: outermost from back view,
-    # so above the head/cap cluster. The intra-cluster ordering keeps
-    # ``backWeaponOverShield`` above ``backShield`` (the slot name
-    # spells out the intent) and the ``OverHead`` / ``OverGlove``
-    # variants above their plain weapon counterpart.
-    "backShieldBelowBody":    270,
+    # Back-strapped shield + weapon. Only the slots the stock
+    # ``Base.wz/zmap.img`` places ABOVE the whole head/hair/cap cluster
+    # are overridden here — because that cluster itself is re-tuned to
+    # 250-263 above, a slot that should out-rank it needs an explicit
+    # value above 263 rather than its raw (sub-263) zmap index.
+    # Canonically ``backShield`` (idx 70) and ``backWeaponOverShield``
+    # (72) both sit above ``backHair`` (68) / ``backCap`` (67), so a
+    # shield (and a weapon drawn over it) strapped to the back stays
+    # visible over the back of the head while climbing.
     "backShield":             271,
-    "backWeapon":             272,
-    "backWeaponOverHead":     273,
     "backWeaponOverShield":   274,
-    "backWeaponOverGlove":    275,
+    # NOTE: the remaining back weapon/shield slots are deliberately
+    # NOT overridden — they fall through to their canonical zmap
+    # index. The stock zmap places them at or BELOW the head/hair/cap
+    # cluster, so lifting them (as an earlier "outermost from back
+    # view" version did, ``backWeaponOverGlove`` -> 275 etc.) painted
+    # them on top of the head, which is wrong:
+    #   * ``backWeapon`` (34) / ``backShieldBelowBody`` (37) — below
+    #     the back body entirely.
+    #   * ``backWeaponOverGlove`` (46) — just above ``backBody`` (42)
+    #     but below ``backMailChest`` (54) / ``backHead`` (57) /
+    #     hair / cap. This is the climbing-claw case (e.g. 01472026's
+    #     ladder/rope canvas): it peeks out from behind the body and
+    #     is occluded by the head and hair instead of floating above
+    #     the hair.
+    #   * ``backWeaponOverHead`` (65) — above ``backHead`` (57) but
+    #     still below the hair (68) / cap (67) that drape over it.
     # Cape slots used by back-view animations. From a back-facing
     # view the cape is on the side of the character we're looking at,
     # so cape canvases should render IN FRONT of the body cluster.
@@ -1055,8 +1071,24 @@ class CharacterRenderer:
                 base = slot[4].lower() + slot[5:] if len(slot) > 4 else slot
                 return max(1, self._zmap.index(base) - 5)
             except (ValueError, IndexError):
-                # Generic back layer — between shadow and body.
-                return max(1, self._zmap.index("body") - 1) if "body" in self._zmap else 1
+                pass
+            # ``backXxxBelow/OverYyy`` variants the stock zmap omits
+            # (e.g. ``backWeaponBelowGlove``) resolve against the
+            # BACK-prefixed target so they stay down in the back
+            # cluster. Without this they fell to ``body`` - 1 (~84,
+            # mid front-stack) and, in a climbing pose, painted the
+            # weapon on top of the back of the head — the same defect
+            # the canonical-order ``backWeapon*`` slots avoid. Sitting
+            # just behind ``backGlove`` keeps a "below glove" weapon
+            # with the rest of the back-strapped gear, below the head.
+            for sep, delta in (("Below", -1), ("Over", 1)):
+                if sep in slot:
+                    tail = slot.split(sep)[-1]
+                    sib = "back" + tail[:1].upper() + tail[1:] if tail else ""
+                    if sib in self._zmap:
+                        return max(1, self._zmap.index(sib) + delta)
+            # Generic back layer — between shadow and body.
+            return max(1, self._zmap.index("body") - 1) if "body" in self._zmap else 1
         # Non-canonical cap*Below* slots — ``capBelowBody`` /
         # ``capBelowHead`` / ``capBelowHair`` aren't in Maple's stock
         # ``Base/zmap.img`` but a number of caps use them, and in
