@@ -795,6 +795,37 @@ def create_app(
         if not os.path.exists(path):
             raise FileNotFoundError(f"path does not exist: {path}")
         with _load_lock:
+            # ``.ms`` files — either a Snow2 archive (MsPackage) or a Pack
+            # WZ-tree container (MsContainer). Handle before region detection,
+            # which uses WzFile.open and can't read them.
+            from wzpy.ms_file import is_ms_path
+            if is_ms_path(path):
+                old = wz
+                new_wz = open_wz(path)          # MsPackage or MsContainer
+                wz = new_wz
+                wz_path = path
+                region = getattr(new_wz, "region", None) or "BMS"
+                version = req_version
+                hierarchical = False
+                app.config["WZ"] = wz
+                app.config["WZ_HIERARCHICAL"] = False
+                app.config["WZ_REGION"] = region
+                app.config["WZ_DIRTY_PATHS"] = set()
+                app.config["WZ_FORCE_FULL_REWRITE"] = False
+                app.config["CHARACTER_RENDERER"] = None
+                app.config["CHARACTER_STRINGS"] = None
+                app.config["CHARACTER_EFFECTS"] = None
+                app.config["BUNDLE_ROOT"] = None
+                kind = type(new_wz).__name__
+                n = len(getattr(new_wz, "imgs", {})) or "?"
+                print(f"  loaded {kind} ({n} imgs)" if kind == "MsContainer"
+                      else f"  loaded {kind}")
+                if old is not None and hasattr(old, "close"):
+                    try:
+                        old.close()
+                    except Exception:
+                        pass
+                return
             if req_region == "auto":
                 print(f"auto-detecting region for {path}:")
                 r = _auto_detect_region(path, req_version)

@@ -393,7 +393,26 @@ def open_wz(path: str, region: str = "GMS",
     A hierarchical pack is detected by sibling ``<base>_NNN.wz``
     files. Hierarchical packs ignore ``writable`` because re-splitting
     edits across multiple files isn't currently supported.
+
+    ``.ms`` files dispatch by content: a Snow2 ``.ms`` archive opens as
+    :class:`wzpy.ms_file.MsPackage` (read-only, BMS); the WZ-tree containers in
+    ``data/Packs/*.ms`` (mob/skill canvases + embedded Spine skeletons) open as
+    :class:`wzpy.ms_container.MsContainer` — note that's a different object
+    (structure inventory + skeletons, not a WZ tree handle), see
+    ``docs/ms_format_findings.md``.
     """
+    from .ms_file import MsPackage, is_ms_path
+    if is_ms_path(path):
+        try:
+            return MsPackage.open(path, region="BMS", version=version)
+        except Exception:
+            # Not a Snow2 .ms — fall back to the WZ-tree Pack container
+            # (mob/skill _Canvas trees + Spine skeletons) for a single file.
+            import os
+            from .ms_container import MsContainer
+            if os.path.isfile(path):
+                return MsContainer.open(path)
+            raise
     if is_hierarchical_pack(path):
         return WzPackage.open(path, region=region, version=version,
                               writable=writable)
