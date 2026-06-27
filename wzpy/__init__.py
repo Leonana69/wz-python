@@ -27,6 +27,7 @@ from .ms_spine import (
     read_skeleton,
 )
 from .ms_container import MsContainer
+from .ms_wz import parse_skill_imgs
 from .snow2 import Snow2, snow_decrypt
 from .properties import (
     WzProperty,
@@ -60,6 +61,7 @@ __all__ = [
     "is_ms_spine_path",
     "read_skeleton",
     "MsContainer",
+    "parse_skill_imgs",
     "Snow2",
     "snow_decrypt",
     "open_wz",

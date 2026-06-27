@@ -162,6 +162,24 @@ s = MsSpineContainer.open("data/Packs/Mob_00000.ms")
 raw = s.raw_skeleton_bytes(s.entries[0])
 ```
 
+Skill **stats** (cooldown, attack range, …) from the body — see
+`### Cracked further` below:
+
+```python
+from wzpy import open_wz
+c = open_wz("data/Packs/Skill_00000.ms")        # -> MsContainer
+img = c.root.get("Skill/000.img")               # a job-group stat img
+print(img.get("skill/0001001/level/1/cooltime").value)        # 120
+trees = c.skill_imgs()                           # {stem: WzSubProperty}, all imgs
+c.close()
+
+c = open_wz("data/Packs/Skill_00007.ms")
+img = c.root.get("Skill/520.img")
+print(img.get("skill/5201017/common/lt").value)               # (-570, -200)  attack-range box
+print(img.get("skill/5201017/common/rb").value)               # (0, 150)
+c.close()
+```
+
 (`open_wz` returns an `MsContainer` for these Pack files — a structure inventory
 + skeletons, **not** a `WzPackage`. For a genuine Snow2 `.ms` it still returns
 `MsPackage`.)
@@ -174,6 +192,73 @@ data/Packs/Mob_00000.ms` (or the welcome page's *Browse File…* / *Open*, now
 `MsContainer.root` (in `wzpy/ms_container.py`) builds that tree lazily; canvas
 leaves carry no pixels (codec unidentified), so it's a structure view.
 
+### Cracked further: the body WZ **property tree** (skill stats) is parseable
+
+`wzpy/ms_wz.py` (`parse_skill_imgs`) recovers the actual **stat/property data**
+from `Skill_*.ms` — `cooltime`, `lt`/`rb` (attack-range box), `mpCon`, `damage`,
+`mobCount`, `attackCount`, `maxLevel`, `level/<n>/…`, `common/…` — as navigable
+`WzSubProperty` trees, one per job-group img, **without** decrypting the header.
+
+How the body decodes (the previously-"open" indirect-offset puzzle, solved):
+
+- The body is standard MapleStory WZ property serialization (same tags as
+  `wzpy/properties.py`) under the **BMS zero-key** string cipher (`byte ^
+  (0xAA+i)`). Verified by hand against skill `0001227`'s `common` block: tag-9
+  Property → `block_size` → ext-type → reserved → `count` → children, closing
+  exactly on the computed block end. Real values round-trip — e.g. `0001000`
+  (Three Snails): `level/{1,2,3}` `mpCon` 3/5/7, `fixdamage` 10/25/40;
+  `0001001` (Recover): `cooltime` 120, `time` 30, `x` 4/8/12.
+- **Three string-block markers**, and the indirect bases differ by marker:
+  - `0x00`/`0x73` inline → zero-key string in place.
+  - `0x1b` → a **global** type-name pool in the encrypted header, referenced by a
+    tiny *constant* offset. We never decrypt it; the offsets that recur with
+    huge, structurally-consistent counts across every file map directly:
+    **`1`→Property, `44`→Canvas, `70`→Shape2D#Vector2D** (the `lt`/`rb`/`origin`
+    vectors). Offset 70 was the key miss in the first cut — names resolved but
+    vector *coordinates* were skipped until it was mapped. Other (file-specific)
+    pool offsets are dispatched by **structure** at parse time
+    (`_dispatch_unknown`: the type whose framing consumes exactly the block).
+  - `0x01` → a **per-img** back-reference: target = `img_base + offset`.
+    `img_base` (the WZ `img.Offset`) is recovered per img by `_solve_base`: the
+    base making the img's refs resolve to the most *distinct* real property names
+    (diversity, not raw hit count — a wrong base piles many refs onto one or two
+    strings). Large offsets land in the zero-key body (resolve); small offsets
+    land in the per-img **encrypted name-table** (don't — see below).
+- Skills are located by their inline 7-/8-digit id followed by a tag-9 byte and
+  grouped by `skillId[:-4]` (`5201001` → img `520`). An img is a *contiguous*
+  file region, but the same id recurs far away as a cross-reference (inside other
+  jobs' `skillList`s); each stem's anchors are therefore split into **proximity
+  clusters** and a base solved per cluster — mixing a stray cross-ref's refs into
+  the solve corrupts the base and makes every `0x01` name in the img fail. A
+  second pass recovers skills whose id is itself a `0x01` ref (deduped). The
+  first skill of each img has its *name* in the encrypted table, so it's the one
+  entry that may be missed; everything else parses in full.
+
+**The per-img encrypted name-table.** Each img begins with an encrypted region
+holding a *pool of property-name strings* (`common`, `maxLevel`, the type pool,
+icon labels) referenced by the small `0x01`/`0x1b` offsets; the rest of the names
+and **all values** are zero-key in the body. This table resists cracking from the
+data files alone: not the zero-key cipher, not any region WZ key (GMS/EMS/BMS),
+and **per-img keyed** — an img's encrypted `Property` bytes occur exactly once in
+the file, so there's no shared/relative keystream to exploit, and the body being
+plaintext rules out a global stream. The key derivation lives in the game client
+(same shape as the Snow2 `.ms` per-image keys), so it's out of reach here. Values
+(`lt`/`rb`/`cooltime`/`damage`/`mpCon`) are unaffected — only some *names* are
+hidden. To keep the tree navigable, `_infer_block_names` labels the unresolved
+blocks by structure (never overriding a file-sourced name): a block with `lt`/`rb`
+or a level-formula → `common`/`PVPcommon`; numeric `0/1/2…` sub-levels → `level`;
+canvases after `icon` → `iconMouseOver`/`iconDisabled`. Field names *inside* an
+encrypted table (which `_ref_<n>` is `mpCon` vs `damage`) stay `_ref_<n>`.
+
+**Coverage** (verified across all 9 `Skill_*.ms`): **14.7k skills, 0 parse
+errors**, ~3 s/file (file 8 ~6 s). After inference, **~94 %** of attack-range
+blocks carry a real name (`common`/`level`); `lt`/`rb`/`cooltime` and all values
+are correct throughout. The trees are wired into `MsContainer` beside `_Canvas`
+(`Skill/<stem>.img/skill/<id>/…`) — navigable through `open_wz` and the web tree
+browser, e.g. `Skill/1510.img/skill/15101021/common/lt` → `(-400, -130)`.
+`Skill_00002` has no inline skill defs and `Skill_00005` is mostly references —
+both recover less (different layout, future work).
+
 ### Still open
 
 - **Canvas pixels (sprites)**: the per-mob bitmaps live in the `_Canvas` tree the
@@ -181,11 +266,18 @@ leaves carry no pixels (codec unidentified), so it's a structure view.
   valid zlib stream decompresses) — it's an unidentified codec, so raw sprite
   decoding isn't implemented. Structure, names, stats and skeletons are all
   recovered; pixels are the remaining frontier.
-- **Per-img indirect-offset base**: most strings decode inline; the WZ
-  `0x1b`/`0x01` indirected-string base differs per img and has format-specific
-  quirks (the `Property` sub-property type name is never stored), so a fully
-  navigable wzpy `WzImage` parse isn't wired up — the path scan recovers the
-  same logical tree without it.
+- **Per-img encrypted name-table / header cipher**: the per-img name pool (and
+  the file's TOC) uses an **unidentified per-img-keyed cipher** — confirmed not
+  zero-key, not any region WZ key, and not a shared/global keystream (an img's
+  encrypted `Property` signature occurs exactly once file-wide). The key
+  derivation appears to live in the game client (cf. the Snow2 per-image keys),
+  so it can't be recovered from the `.ms` files alone. The body parser sidesteps
+  it; block names are recovered by structural inference, but the field names
+  inside these tables (and the exact img names/offsets) stay hidden. Cracking it
+  would need reversing the client's key schedule.
+- **Mob/Npc stat trees**: `ms_wz` anchors on skill-ids; the same body grammar
+  holds for `Mob_*.ms` (`maxHP`, `PADamage`, …) but a mob-id anchor isn't wired
+  up yet.
 - **Textures/atlases** (Spine mobs): the blobs between skeletons are texture
   data; decoding + atlas mapping (and actual Spine *rendering*, which is a
   Spine-runtime job, not wzpy's WZ pipeline) is not implemented.

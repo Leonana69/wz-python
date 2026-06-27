@@ -117,6 +117,7 @@ class MsContainer:
     version: Optional[int] = None             # n/a for these packs; kept for API parity
     _spine: Optional[MsSpineContainer] = None
     _root: object = None                      # lazily-built synthetic WzDirectory tree
+    _skill_imgs: Optional[dict] = None        # lazily-parsed stat trees (Skill_*)
 
     # mob id -> {animation -> {frame}} (the simple <id>.img/<anim>/<frame> view,
     # a convenience projection of ``imgs`` for plain numeric-id mobs).
@@ -159,6 +160,23 @@ class MsContainer:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
+    # ── property/stat trees (Skill_*) ────────────────────────────────────
+    def skill_imgs(self) -> Dict[str, object]:
+        """Parsed per-job skill stat trees ``{stem: WzSubProperty}`` recovered
+        from the body (``cooltime``, ``lt``/``rb``, ``mpCon``, ``damage``,
+        ``level/<n>/…``, …). Empty for non-``Skill`` packs. Parsed once and
+        cached; see :mod:`wzpy.ms_wz`."""
+        if self._skill_imgs is None:
+            self._skill_imgs = {}
+            if self.category == "Skill":
+                from .ms_wz import parse_skill_imgs
+                try:
+                    with open(self.path, "rb") as f:
+                        self._skill_imgs = parse_skill_imgs(f.read())
+                except Exception:
+                    self._skill_imgs = {}
+        return self._skill_imgs
+
     # ── synthetic WZ tree (for the web tree browser) ─────────────────────
     @property
     def root(self):
@@ -179,6 +197,7 @@ class MsContainer:
 
     def _build_tree(self):
         from .wz_file import WzDirectory
+        from .wz_image import WzImage
         from .properties import (
             WzSubProperty, WzStringProperty, WzIntProperty, WzNullProperty,
         )
@@ -192,13 +211,21 @@ class MsContainer:
             img = _PackImage(stem + ".img", canvas_dir, subs)
             canvas_dir.images[img.name] = img
 
+        # Stat/property trees (Skill_*): one navigable <stem>.img per job group,
+        # sitting beside _Canvas exactly like a real Skill.wz directory.
+        for stem, tree in self.skill_imgs().items():
+            wi = WzImage(name=stem + ".img", parent=cat, offset=0, size=0,
+                         wz_file=None)
+            wi._root = tree
+            wi._parsed = True
+            cat.images[wi.name] = wi
+
         if self.skeletons:
             spine = WzDirectory("_Spine", parent=root)
             root.subdirs["_Spine"] = spine
             for i, sk in enumerate(self.skeletons):
                 safe = re.sub(r"[^A-Za-z0-9]", "", sk.hash or "skel")[:16] or "skel"
                 name = f"{i:03d}_{safe}.img"
-                from .wz_image import WzImage
                 img = WzImage(name=name, parent=spine, offset=0, size=0, wz_file=None)
                 r = WzSubProperty(name)
                 info = WzSubProperty("info"); r.add(info)
