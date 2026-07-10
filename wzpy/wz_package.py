@@ -394,25 +394,23 @@ def open_wz(path: str, region: str = "GMS",
     files. Hierarchical packs ignore ``writable`` because re-splitting
     edits across multiple files isn't currently supported.
 
-    ``.ms`` files dispatch by content: a Snow2 ``.ms`` archive opens as
-    :class:`wzpy.ms_file.MsPackage` (read-only, BMS); the WZ-tree containers in
-    ``data/Packs/*.ms`` (mob/skill canvases + embedded Spine skeletons) open as
-    :class:`wzpy.ms_container.MsContainer` — note that's a different object
-    (structure inventory + skeletons, not a WZ tree handle), see
-    ``docs/ms_format_findings.md``.
+    A ``.ms`` file (the WZ-tree containers in ``data/Packs/*.ms`` — mob/skill
+    canvases + embedded Spine skeletons) opens as
+    :class:`wzpy.ms_container.MsContainer` — a structure inventory + skeletons,
+    not a WZ tree handle (see ``docs/ms_format_findings.md``). To read the
+    *decrypted* skill/mob image trees instead, use
+    :class:`wzpy.ms_file_v2.MsPackageV2` directly.
     """
-    from .ms_file import MsPackage, is_ms_path
+    from .ms_file_v2 import is_ms_path
     if is_ms_path(path):
-        try:
-            return MsPackage.open(path, region="BMS", version=version)
-        except Exception:
-            # Not a Snow2 .ms — fall back to the WZ-tree Pack container
-            # (mob/skill _Canvas trees + Spine skeletons) for a single file.
-            import os
-            from .ms_container import MsContainer
-            if os.path.isfile(path):
-                return MsContainer.open(path)
-            raise
+        import os
+        from .ms_container import MsContainer
+        if os.path.isfile(path):
+            return MsContainer.open(path)
+        raise ValueError(
+            f"{path!r} is a folder of .ms Pack files; open a single .ms with "
+            "open_wz(), or use wzpy.ms_file_v2.MsPackageV2 for the whole folder."
+        )
     if is_hierarchical_pack(path):
         return WzPackage.open(path, region=region, version=version,
                               writable=writable)

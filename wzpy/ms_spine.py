@@ -1,8 +1,8 @@
 """Reading ``data/Packs/*.ms`` — Spine skeleton asset containers.
 
 These ``.ms`` files are **not** the MapleLib/Elem8100 Snow2 ``.ms`` archive
-(see :mod:`wzpy.ms_file`; that format is implemented separately and verified,
-but these files are a different container). They are an uncompressed,
+(that SNOW2 format is a different container from these files). They are an
+uncompressed,
 unencrypted asset container holding **Spine 2.1.x binary skeletons** (plus
 texture/atlas data) for a Spine-animation-based MapleStory client. See
 ``docs/ms_format_findings.md`` for how this was established.

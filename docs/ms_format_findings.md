@@ -54,11 +54,27 @@ dispatches to `MsPackage`; always read-only, always BMS).
 
 ## 2. `data/Packs/*.ms` are a different format
 
+> **Update — RESOLVED (they are Ms *V2* / ChaCha20).** The analysis below was
+> done against MapleLib/WzComparerR2's **V1** `Ms_File` (`version == 2`, SNOW2)
+> only. WzComparerR2 later added `Ms_FileV2` (`version == 4`, **ChaCha20**), and
+> `data/Packs/*.ms` are exactly that: a normal encrypted WZ-image archive whose
+> **first 1024 bytes per entry** are ChaCha20-encrypted and whose remainder is
+> plaintext WZ — which is why cleartext WZ strings appear at arbitrary offsets
+> below, and why the "per-img encrypted name-table" resisted cracking (it is
+> just that first 1 KB). The V2 reader is ported in `wzpy/ms_file_v2.py`
+> (`MsPackageV2`) + `wzpy/chacha20.py`; it recovers the **complete** skill trees
+> with real property names — e.g. `Skill/112.img/skill/1121008` (Raging Blow)
+> `common/lt`=(-350,-220) `rb`=(20,70), cross-checked byte-for-byte against
+> WzComparerR2. The header-less body scanner (`ms_wz.py`, §"Cracked further"
+> below) remains as a fallback but is superseded by the proper decrypt.
+>
+> The original V1 findings are kept below for the record.
+
 Running MapleLib's **own** C# `ReadHeader` on `Mob_00000.ms` yields
 `version = 243`, `entryCount = 1939311213`, header-hash check **fails** — i.e.
-MapleLib itself cannot read these files (and our port reproduces the identical
-result). So this is not a bug in either implementation; the files are simply a
-different container.
+MapleLib's **V1** `Ms_File` cannot read these files (and our port reproduces the
+identical result). This is not a bug in either implementation; the files are a
+**V2** container (see the resolution note above), which needs the ChaCha20 path.
 
 ### What they actually are (observed)
 
@@ -266,15 +282,14 @@ both recover less (different layout, future work).
   valid zlib stream decompresses) — it's an unidentified codec, so raw sprite
   decoding isn't implemented. Structure, names, stats and skeletons are all
   recovered; pixels are the remaining frontier.
-- **Per-img encrypted name-table / header cipher**: the per-img name pool (and
-  the file's TOC) uses an **unidentified per-img-keyed cipher** — confirmed not
-  zero-key, not any region WZ key, and not a shared/global keystream (an img's
-  encrypted `Property` signature occurs exactly once file-wide). The key
-  derivation appears to live in the game client (cf. the Snow2 per-image keys),
-  so it can't be recovered from the `.ms` files alone. The body parser sidesteps
-  it; block names are recovered by structural inference, but the field names
-  inside these tables (and the exact img names/offsets) stay hidden. Cracking it
-  would need reversing the client's key schedule.
+- ~~**Per-img encrypted name-table / header cipher**~~ — **RESOLVED.** This was
+  never a bespoke per-img cipher: the files are Ms **V2** and the "encrypted
+  name-table" is simply each entry's ChaCha20-encrypted first 1024 bytes (the
+  img header + its property-name pool). The TOC is likewise ChaCha20. Both keys
+  derive from `filename + salt` exactly like WzComparerR2's `Ms_FileV2`; the port
+  in `wzpy/ms_file_v2.py` decrypts them and hands the standard WZ image to
+  `WzImage`, so **all** names/offsets/fields come out correct — no structural
+  inference needed. See the resolution note under §2.
 - **Mob/Npc stat trees**: `ms_wz` anchors on skill-ids; the same body grammar
   holds for `Mob_*.ms` (`maxHP`, `PADamage`, …) but a mob-id anchor isn't wired
   up yet.

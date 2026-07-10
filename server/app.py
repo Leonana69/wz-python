@@ -795,13 +795,13 @@ def create_app(
         if not os.path.exists(path):
             raise FileNotFoundError(f"path does not exist: {path}")
         with _load_lock:
-            # ``.ms`` files — either a Snow2 archive (MsPackage) or a Pack
-            # WZ-tree container (MsContainer). Handle before region detection,
-            # which uses WzFile.open and can't read them.
-            from wzpy.ms_file import is_ms_path
+            # ``.ms`` files open as a Pack WZ-tree container (MsContainer).
+            # Handle before region detection, which uses WzFile.open and can't
+            # read them.
+            from wzpy.ms_file_v2 import is_ms_path
             if is_ms_path(path):
                 old = wz
-                new_wz = open_wz(path)          # MsPackage or MsContainer
+                new_wz = open_wz(path)          # MsContainer for a .ms pack
                 wz = new_wz
                 wz_path = path
                 region = getattr(new_wz, "region", None) or "BMS"

@@ -1,7 +1,7 @@
 """Reading ``data/Packs/*.ms`` as MapleStory **WZ Mob/Skill trees**.
 
-These ``.ms`` files (see ``docs/ms_format_findings.md``) are *not* the Snow2
-``.ms`` archive of :mod:`wzpy.ms_file`. They are a custom container holding a
+These ``.ms`` files (see ``docs/ms_format_findings.md``) are *not* a SNOW2
+``.ms`` archive. They are a custom container holding a
 **WZ-encoded property tree** (the standard MapleStory WZ string cipher —
 ``cipher[i] ^ (0xAA + i)`` — plus WZ property tags ``0x09``/``0x73``…) describing
 mobs, their animations, frames and parts, with two kinds of leaf art:

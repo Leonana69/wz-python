@@ -1,7 +1,7 @@
 """SNOW 2.0 stream cipher — Python port of MapleLib's ``Snow2CryptoTransform``.
 
-``.ms`` packs (see :mod:`wzpy.ms_file`) encrypt their header, entry table and
-image payloads with SNOW 2.0 used as an **additive** stream cipher over 32-bit
+The legacy V1 ``.ms`` archive format encrypts its header, entry table and image
+payloads with SNOW 2.0 used as an **additive** stream cipher over 32-bit
 little-endian words::
 
     cipher_word = (plain_word + keystream_word) & 0xFFFFFFFF    # encrypt

@@ -18,7 +18,10 @@ from .wz_package import (
     open_wz,
     resolve_canvas_link,
 )
-from .ms_file import MsFile, MsPackage, is_ms_path
+from .ms_file_v2 import (
+    MsFileV2, MsPackageV2, detect_ms_version, is_ms_v2, is_ms_path,
+)
+from .chacha20 import ChaCha20, chacha20_xor
 from .ms_spine import (
     MsSpineContainer,
     MsSpineEntry,
@@ -52,9 +55,13 @@ __all__ = [
     "WzImage",
     "WzKey",
     "WzPackage",
-    "MsFile",
-    "MsPackage",
     "is_ms_path",
+    "MsFileV2",
+    "MsPackageV2",
+    "detect_ms_version",
+    "is_ms_v2",
+    "ChaCha20",
+    "chacha20_xor",
     "MsSpineContainer",
     "MsSpineEntry",
     "SkeletonData",
