@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """A tiny HTTP server for looking up MapleStory **skill** info by name.
 
-It stitches together the three data sources in this repo:
+It stitches together three data sources found under ``--wz-folder`` (default
+``data/``). Each is resolved as either a ``<Name>/`` hierarchical pack folder or
+a ``<Name>.wz`` single file:
 
-* ``data/String``  — ``String.wz/Skill.img`` maps a skill **name** to its **id**
+* ``String`` — ``String.wz/Skill.img`` maps a skill **name** to its **id**
   (and holds the localized ``desc`` / ``h`` help text).
-* ``data/Skill``   — ``_Canvas/<stem>.img/skill/<id>/{icon,effect}`` holds the
-  real **icon** bitmap and the **effect** animation frames.
-* ``data/Packs``   — ``Skill_*.ms`` (V2 / ChaCha20 archives) holds the skill
+* ``Skill``  — ``_Canvas/<stem>.img/skill/<id>/{icon,effect}`` holds the real
+  **icon** bitmap and the **effect** animation frames.
+* ``Packs``  — ``Skill_*.ms`` (V2 / ChaCha20 archives) holds the skill
   **stats**, including the **attack-range box** (``lt``/``rb``), decoded by
-  :mod:`wzpy.ms_file_v2`.
+  :mod:`wzpy.ms_file_v2`. (Folder-only; optional — without it, no ranges.)
 
 A skill id groups into an img by dropping its last four digits
 (``1121008`` → ``112``), which is the ``<stem>`` used for both ``_Canvas`` and
@@ -17,9 +19,9 @@ the ``.ms`` skill tree.
 
 Usage::
 
-    python scripts/skill_server.py                 # serves data/ at :5001
-    python scripts/skill_server.py --region GMS --port 8000
-    python scripts/skill_server.py --data-root /path/to/data
+    python scripts/skill_server.py                      # serves ./data at :5001
+    python scripts/skill_server.py --wz-folder data/v83 --region GMS
+    python scripts/skill_server.py --wz-folder /path/to/wz --port 8000
 
 Then open http://127.0.0.1:5001/ and search a skill by name.
 
@@ -55,7 +57,24 @@ from wzpy.ms_file_v2 import MsPackageV2                      # noqa: E402
 from wzpy.properties import (                                # noqa: E402
     WzCanvasProperty, WzSubProperty, WzVectorProperty,
 )
+from wzpy.wz_file import WzFile                              # noqa: E402
 from wzpy.wz_package import WzPackage, resolve_canvas_link   # noqa: E402
+
+
+def open_wz_component(folder: Path, name: str, region: str):
+    """Open a WZ component named ``name`` under ``folder``.
+
+    Prefers a ``<name>/`` **hierarchical pack** (opened as a :class:`WzPackage`),
+    else falls back to a ``<name>.wz`` **single file** (a :class:`WzFile`). Both
+    expose ``.root`` / ``.close``. Returns ``None`` when neither exists.
+    """
+    d = folder / name
+    f = folder / f"{name}.wz"
+    if d.is_dir():
+        return WzPackage.open(str(d), region=region)
+    if f.is_file():
+        return WzFile.open(str(f), region=region)
+    return None
 
 
 # ── small WZ-tree helpers ────────────────────────────────────────────────
@@ -127,13 +146,13 @@ class SkillData:
     name index and PNG cache are guarded here.
     """
 
-    def __init__(self, data_root: Path, region: str = "BMS"):
-        self.data_root = Path(data_root)
+    def __init__(self, wz_folder: Path, region: str = "BMS"):
+        self.wz_folder = Path(wz_folder)
         self.region = region
         self._lock = threading.RLock()
         self._loaded = False
-        self._string: Optional[WzPackage] = None
-        self._skill: Optional[WzPackage] = None
+        self._string = None                 # WzPackage or WzFile
+        self._skill = None                  # WzPackage or WzFile
         self._packs: Optional[MsPackageV2] = None
         self._string_img = None
         self._name_index: Dict[str, List[str]] = {}
@@ -160,10 +179,24 @@ class SkillData:
             if self._loaded:
                 return
             region = self.region
-            self._string = WzPackage.open(str(self.data_root / "String"), region=region)
-            self._skill = WzPackage.open(str(self.data_root / "Skill"), region=region)
-            self._packs = MsPackageV2.open(str(self.data_root / "Packs"), region=region)
-            self._string_img = self._string.get("Skill.img").parse()
+            self._string = open_wz_component(self.wz_folder, "String", region)
+            if self._string is None:
+                raise FileNotFoundError(
+                    f"no String/ folder or String.wz in {self.wz_folder}")
+            self._skill = open_wz_component(self.wz_folder, "Skill", region)
+            if self._skill is None:
+                raise FileNotFoundError(
+                    f"no Skill/ folder or Skill.wz in {self.wz_folder}")
+            # Packs is a folder of .ms files (no .wz form); optional — without it
+            # skills simply carry no attack range.
+            packs_dir = self.wz_folder / "Packs"
+            self._packs = (MsPackageV2.open(str(packs_dir), region=region)
+                           if packs_dir.is_dir() else None)
+            skill_img = self._string.root.get("Skill.img")
+            if skill_img is None:
+                raise ValueError(
+                    f"String data in {self.wz_folder} has no Skill.img")
+            self._string_img = skill_img.parse()
             self._build_name_index()
             self._loaded = True
 
@@ -262,7 +295,7 @@ class SkillData:
     def _ms_skill(self, sid: str, stem: Optional[str]):
         if not stem or self._packs is None:
             return None
-        img = self._packs.get(f"Skill/{stem}.img")
+        img = self._packs.root.get(f"Skill/{stem}.img")
         if img is None:
             return None
         try:
@@ -274,7 +307,7 @@ class SkillData:
     def _canvas_skill(self, sid: str, stem: Optional[str]):
         if not stem or self._skill is None:
             return None
-        img = self._skill.get(f"_Canvas/{stem}.img")
+        img = self._skill.root.get(f"_Canvas/{stem}.img")
         if img is None:
             return None
         try:
@@ -612,18 +645,32 @@ function setupEffect(el, m){
 
 # ── entry point ──────────────────────────────────────────────────────────
 def main(argv: Optional[List[str]] = None) -> int:
+    # Force UTF-8 console output so the docstring / prints (which contain a few
+    # non-ASCII glyphs) don't crash on a legacy codepage console (e.g. GBK/cp936)
+    # when stdout is redirected.
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except Exception:
+            pass
+
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--data-root", default=str(REPO_ROOT / "data"),
-                        help="folder containing String/, Skill/, Packs/ (default: ./data)")
+    parser.add_argument("--wz-folder", dest="wz_folder",
+                        default=str(REPO_ROOT / "data"),
+                        help="folder holding String, Skill and Packs — each "
+                             "resolved as a '<Name>/' pack folder or a '<Name>.wz' "
+                             "file (Packs is folder-only). Default: ./data")
+    parser.add_argument("--data-root", dest="wz_folder",
+                        help=argparse.SUPPRESS)   # backwards-compatible alias
     parser.add_argument("--region", default="BMS",
                         help="WZ region key for decoding (default: BMS)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5001)
     args = parser.parse_args(argv)
 
-    data = SkillData(Path(args.data_root), region=args.region)
-    print(f"Loading packs from {args.data_root} (region={args.region}) …")
+    data = SkillData(Path(args.wz_folder), region=args.region)
+    print(f"Loading WZ data from {args.wz_folder} (region={args.region}) ...")
     data.open()
     print(f"  indexed {len(data._all_names)} named skills.")
 
