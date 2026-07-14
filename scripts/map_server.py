@@ -22,18 +22,32 @@ Data sources — under ``--wz-folder`` (default ``data/v83``), each resolved as 
                      Map source for that code, so maps revised since v83 match
                      their newer foothold set.
 
+Skill ranges (optional overlay) come from a **separate** folder/region
+(``--skill-folder``, default ``data/``; ``--skill-region``, default ``BMS``) so
+the map's WZ region need not match the skill packs'. This is the same
+``String`` + ``Skill`` + ``Packs`` trio the sibling ``skill_server`` reads: a
+skill's ``lt``/``rb`` box is in raw world pixels, so dividing it by the map's
+``2**mag`` scale places it in the very same minimap-pixel space as the
+platforms and mobs — i.e. the range is drawn to the map's scale.
+
 Usage::
 
     python scripts/map_server.py                       # serves data/v83 at :5002
     python scripts/map_server.py --wz-folder /path/to/wz --region GMS
     python scripts/map_server.py --map-wz path/to/Map.wz --string-wz path/to/String.wz
+    python scripts/map_server.py --skill-folder data --skill-region BMS
+    python scripts/map_server.py --no-skills            # map only, no overlay
 
 Endpoints
 ---------
-* ``GET /``                     the viewer
-* ``GET /api/search?q=<name>``  ``[{code,name,street}]`` map-name autocomplete
-* ``GET /api/map?code=<code>``  footholds / ropes / portals + minimap metadata
-* ``GET /minimap/<code>.png``   the WZ minimap bitmap
+* ``GET /``                        the viewer
+* ``GET /api/search?q=<name>``     ``[{code,name,street}]`` map-name autocomplete
+* ``GET /api/map?code=<code>``     footholds / ropes / portals + minimap metadata
+* ``GET /minimap/<code>.png``      the WZ minimap bitmap
+* ``GET /api/skill_search?q=<s>``  ``{available,results:[{id,name}]}`` skill search
+* ``GET /api/skill?id=<id>``       ``{matches:[{id,name,icon,ranges,range}]}``
+* ``GET /api/skill?name=<name>``   same, for every skill matching a name
+* ``GET /skill_icon/<id>.png``     the skill icon bitmap
 """
 
 from __future__ import annotations
@@ -49,9 +63,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+SCRIPTS_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPTS_DIR.parent
+for _p in (REPO_ROOT, SCRIPTS_DIR):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from wzpy.canvas import decode_canvas                       # noqa: E402
 from wzpy.crypto import WzKey                                # noqa: E402
@@ -59,6 +75,12 @@ from wzpy.properties import WzCanvasProperty, WzSubProperty  # noqa: E402
 from wzpy.wz_file import WzFile                              # noqa: E402
 from wzpy.wz_image import WzImage                            # noqa: E402
 from wzpy.wz_package import WzPackage                        # noqa: E402
+
+# Skill lookup (icons + lt/rb attack-range boxes) is reused verbatim from the
+# sibling ``skill_server`` so a single map server can overlay skill ranges on
+# the map. It is optional: if the skill data (String/Skill/Packs) is missing the
+# map still renders and the skill endpoints simply report themselves unavailable.
+from skill_server import SkillData                           # noqa: E402
 
 
 def open_wz_component(folder: Path, name: str, region: str):
@@ -506,10 +528,30 @@ class MapData:
         return buf.getvalue()
 
 
+# ── skill overlay payload ────────────────────────────────────────────────
+def _skill_map_payload(skills: SkillData, sid: str) -> dict:
+    """Slim ``SkillData.skill_info`` down to what the map overlay needs: name, an
+    icon URL in *this* server's namespace, and the attack-range boxes.
+
+    ``lt``/``rb`` stay in raw world pixels; the viewer divides them by the map's
+    ``2**mag`` scale so the box is drawn to the same scale as the platforms.
+    """
+    info = skills.skill_info(sid)
+    return {
+        "id": info["id"],
+        "name": info["name"],
+        "icon": f"/skill_icon/{info['id']}.png" if info.get("icon") else None,
+        "iconSize": info.get("iconSize"),
+        "ranges": info.get("attackRanges") or [],
+        "range": info.get("attackRange"),
+    }
+
+
 # ── HTTP layer ───────────────────────────────────────────────────────────
 class MapHandler(BaseHTTPRequestHandler):
     server_version = "MapServer/1.0"
     data: MapData = None
+    skills: Optional[SkillData] = None
 
     def log_message(self, fmt, *args):
         sys.stderr.write("  %s - %s\n" % (self.address_string(), fmt % args))
@@ -551,12 +593,43 @@ class MapHandler(BaseHTTPRequestHandler):
                     self._json({"error": "no minimap"}, 404)
                 else:
                     self._send(200, png, "image/png")
+            elif path == "/api/skill_search":
+                if self.skills is None:
+                    self._json({"available": False, "results": []})
+                else:
+                    q = (qs.get("q") or [""])[0]
+                    self._json({"available": True,
+                                "results": self.skills.search(q)})
+            elif path == "/api/skill":
+                if self.skills is None:
+                    self._json({"available": False, "matches": []})
+                else:
+                    self._json(self._skill_lookup(qs))
+            elif path.startswith("/skill_icon/") and path.endswith(".png"):
+                sid = path[len("/skill_icon/"):-len(".png")]
+                png = self.skills.icon_png(sid) if self.skills is not None else None
+                if png is None:
+                    self._json({"error": "no icon"}, 404)
+                else:
+                    self._send(200, png, "image/png")
             else:
                 self._json({"error": "not found", "path": path}, 404)
         except BrokenPipeError:
             pass
         except Exception as exc:
             self._json({"error": str(exc)}, 500)
+
+    def _skill_lookup(self, qs) -> dict:
+        """``/api/skill`` body: one skill by ``id``, or every match for a ``name``."""
+        if "id" in qs:
+            sid = (qs.get("id") or [""])[0].strip()
+            return {"matches": [_skill_map_payload(self.skills, sid)] if sid else []}
+        name = (qs.get("name") or [""])[0].strip()
+        if not name:
+            return {"error": "pass ?id=<skill id> or ?name=<skill name>",
+                    "matches": []}
+        ids = self.skills.ids_for_name(name)
+        return {"matches": [_skill_map_payload(self.skills, sid) for sid in ids]}
 
 
 # ── viewer ───────────────────────────────────────────────────────────────
@@ -604,6 +677,51 @@ INDEX_HTML = r"""<!doctype html>
          border-radius: 4px; font-size: 12px; pointer-events: none; display: none;
          z-index: 20; color: #fff; white-space: nowrap; }
   #status { color: #8b93a7; }
+  .skill { color: #ffd479; }
+  /* ── skill-range overlay ── */
+  #skillPanel { position: absolute; top: 10px; right: 10px; z-index: 7; display: none;
+                width: 266px; background: #171a22ee; border: 1px solid #2b303c;
+                border-radius: 10px; padding: 8px 8px 6px;
+                box-shadow: 0 6px 24px #0008; backdrop-filter: blur(4px); }
+  #skillPanel .sptitle { font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+                         color: #7d8494; margin: 2px 2px 7px; }
+  .sksearch { position: relative; }
+  #skq { width: 100%; padding: 6px 9px; font: 13px ui-monospace, monospace; border-radius: 7px;
+         border: 1px solid #333846; background: #1b1e27; color: #dfe3ec; }
+  #skq:focus { outline: none; border-color: #5b8cff; }
+  #sksuggest { position: absolute; left: 0; right: 0; top: 34px; z-index: 9;
+               background: #1b1e27; border: 1px solid #333846; border-radius: 7px;
+               overflow: hidden auto; max-height: 260px; display: none; }
+  #sksuggest div { padding: 6px 9px; cursor: pointer; display: flex; gap: 8px; }
+  #sksuggest div:hover, #sksuggest div.active { background: #2a3550; }
+  #sksuggest .sid { color: #8b93a7; font-variant-numeric: tabular-nums; }
+  #skillList { margin-top: 7px; max-height: calc(100vh - 330px); overflow: hidden auto; }
+  #skillList .empty2 { color: #6b7488; font-size: 12px; padding: 6px 2px; }
+  .skchip { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 7px;
+            background: #0e1016; margin-bottom: 5px; border-left: 3px solid var(--c); }
+  .skchip .ci { width: 22px; height: 22px; image-rendering: pixelated; border-radius: 4px;
+                background: #0d0f14; flex: none; }
+  .skchip .nm { font-size: 12px; color: #e6e8ee; flex: 1 1 auto; min-width: 0;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .skchip .dm { font-size: 11px; color: #8b93a7; font-variant-numeric: tabular-nums; flex: none; }
+  .skchip select { font: 11px ui-monospace, monospace; background: #1b1e27; color: #dfe3ec;
+                   border: 1px solid #333846; border-radius: 5px; max-width: 78px; }
+  .skchip button { background: #232a3a; color: #dfe3ec; border: 1px solid #33405e;
+                   border-radius: 5px; cursor: pointer; font-size: 11px; padding: 2px 6px; flex: none; }
+  .skchip button:hover { background: #2f3b57; }
+  #skillPins { position: absolute; top: 0; left: 0; pointer-events: none; }
+  #skillPins .pin { position: absolute; transform: translate(-50%, -50%); cursor: grab;
+                    display: flex; flex-direction: column; align-items: center;
+                    pointer-events: auto; z-index: 5; user-select: none; }
+  #skillPins .pin.dragging { cursor: grabbing; z-index: 8; }
+  #skillPins .pin img { width: 26px; height: 26px; image-rendering: pixelated;
+                        border: 1.5px solid var(--c); border-radius: 6px; background: #0d0f14c0; }
+  #skillPins .pin .dot { width: 15px; height: 15px; border-radius: 50%; background: var(--c);
+                         border: 2px solid #0d0f14; box-shadow: 0 0 0 1.5px var(--c); }
+  #skillPins .pin .plabel { margin-top: 2px; font-size: 10px; color: #fff; background: #000a;
+                            padding: 0 4px; border-radius: 3px; white-space: nowrap;
+                            border: 1px solid var(--c); max-width: 120px; overflow: hidden;
+                            text-overflow: ellipsis; }
 </style>
 </head>
 <body>
@@ -615,7 +733,7 @@ INDEX_HTML = r"""<!doctype html>
              autocomplete="off" spellcheck="false">
       <div id="suggest"></div>
     </div>
-    <span class="hint">scroll = zoom · drag = pan · hover a line for coords</span>
+    <span class="hint">scroll = zoom · drag = pan · hover a line for coords · drag a skill pin to move it</span>
     <span id="status"></span>
   </div>
 </header>
@@ -624,13 +742,24 @@ INDEX_HTML = r"""<!doctype html>
   <b class="rope">ropes/ladders</b> ·
   <b class="plocal">portals→same map</b> ·
   <b class="pother">portals→other map</b> ·
-  <b class="mob">mob spawns</b>
+  <b class="mob">mob spawns</b> ·
+  <b class="skill">skill ranges</b>
   &nbsp;— x/y match <code>map_define_v2.py</code>
 </div>
 <div class="viewport" id="vp">
   <div class="layer" id="layer">
     <img id="bg" onerror="this.style.display='none'">
     <canvas id="cv"></canvas>
+    <div id="skillPins"></div>
+  </div>
+  <div id="skillPanel">
+    <div class="sptitle">Skill ranges</div>
+    <div class="sksearch">
+      <input id="skq" placeholder="Add a skill…  (e.g. Raging Blow)"
+             autocomplete="off" spellcheck="false">
+      <div id="sksuggest"></div>
+    </div>
+    <div id="skillList"></div>
   </div>
 </div>
 <div id="tip"></div>
@@ -644,6 +773,16 @@ const vp = document.getElementById('vp'), tip = document.getElementById('tip');
 let hover = null, items = [], active = -1, timer = null;
 
 const esc = s => String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// ── skill-range overlay state ──
+let SKILLS_OK = false;              // backend has skill data (String/Skill/Packs)
+let placed = [];                   // [{uid,id,name,icon,ranges,range,rangeIdx,flip,color,x,y}]
+let skUid = 1, pinDrag = null;
+let skItems = [], skActive = -1, skTimer = null;
+const SK_PALETTE = ['#ffd479','#5b8cff','#ff6bd6','#5ad16b','#ff8a5b','#8b5bff','#22d3ee','#f4788a'];
+const skPanel = document.getElementById('skillPanel'), skPins = document.getElementById('skillPins');
+const skList = document.getElementById('skillList');
+const skq = document.getElementById('skq'), sksuggest = document.getElementById('sksuggest');
 
 // ── search ──
 const q = document.getElementById('q'), suggest = document.getElementById('suggest');
@@ -692,6 +831,8 @@ async function load(code) {
   zoom = Math.max(2, Math.min(12, Math.min(r.width / (m.width + 20), r.height / (m.height + 20))));
   panX = (r.width - m.width * zoom) / 2;
   panY = (r.height - m.height * zoom) / 2;
+  placed = [];                     // ranges are scaled per-map — reset on map change
+  renderSkillList(); renderPins(); updateSkillUI();
   apply();
 }
 
@@ -702,6 +843,7 @@ function apply() {
     if (bg.style.display !== 'none') { bg.style.width = M.width*zoom+'px'; bg.style.height = M.height*zoom+'px'; }
     draw();
   }
+  positionPins();
 }
 function draw() {
   if (!M) return;
@@ -738,6 +880,7 @@ function draw() {
     ctx.fillStyle = local ? '#37e06a' : '#46a8ff';
     ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(1.4, 2.5/zoom), 0, 7); ctx.fill();
   });
+  drawSkills();
 }
 
 // ── interaction ──
@@ -749,8 +892,17 @@ vp.addEventListener('wheel', e => {
   panX = mx - (mx-panX)*(nz/zoom); panY = my - (my-panY)*(nz/zoom); zoom = nz; apply();
 }, { passive: false });
 vp.addEventListener('mousedown', e => { drag = {x: e.clientX-panX, y: e.clientY-panY}; vp.classList.add('grab'); });
-window.addEventListener('mouseup', () => { drag = null; vp.classList.remove('grab'); });
+window.addEventListener('mouseup', () => {
+  drag = null; vp.classList.remove('grab');
+  if (pinDrag) { const el = skPins.querySelector('.pin.dragging'); if (el) el.classList.remove('dragging'); pinDrag = null; }
+});
 window.addEventListener('mousemove', e => {
+  if (pinDrag) {                     // moving a skill pin — origin follows the cursor
+    const r = vp.getBoundingClientRect();
+    pinDrag.s.x = Math.round((e.clientX-r.left-panX)/zoom);
+    pinDrag.s.y = Math.round((e.clientY-r.top-panY)/zoom);
+    positionPins(); draw(); return;
+  }
   if (drag) { panX = e.clientX-drag.x; panY = e.clientY-drag.y; apply(); return; }
   if (M) hoverTest(e);
 });
@@ -781,6 +933,156 @@ function hoverTest(e) {
     tip.style.left = (e.clientX+12)+'px'; tip.style.top = (e.clientY+12)+'px'; tip.style.display='block';
   } else tip.style.display = 'none';
 }
+
+// ── skill-range overlay ─────────────────────────────────────────────────
+function updateSkillUI(){
+  skPanel.style.display = (SKILLS_OK && M && M.mag != null) ? 'block' : 'none';
+}
+function curRange(s){
+  if (s.rangeIdx >= 0 && s.ranges[s.rangeIdx]) return s.ranges[s.rangeIdx];
+  return s.range || null;
+}
+function primaryIdx(m){
+  if (!m.ranges || !m.ranges.length) return -1;
+  if (m.range){ const i = m.ranges.findIndex(r => r.source === m.range.source); if (i >= 0) return i; }
+  return 0;
+}
+
+// skill search (independent of the map search up top)
+skq.addEventListener('input', () => { clearTimeout(skTimer); skTimer = setTimeout(runSkSuggest, 130); });
+skq.addEventListener('keydown', e => {
+  if (e.key === 'ArrowDown') { skActive = Math.min(skActive+1, skItems.length-1); paintSk(); e.preventDefault(); }
+  else if (e.key === 'ArrowUp') { skActive = Math.max(skActive-1, 0); paintSk(); e.preventDefault(); }
+  else if (e.key === 'Enter') {
+    if (skActive >= 0 && skItems[skActive]) addSkill(skItems[skActive].id);
+    else if (skItems[0]) addSkill(skItems[0].id);
+    sksuggest.style.display = 'none';
+  } else if (e.key === 'Escape') sksuggest.style.display = 'none';
+});
+document.addEventListener('click', e => { if (!sksuggest.contains(e.target) && e.target !== skq) sksuggest.style.display = 'none'; });
+
+async function runSkSuggest(){
+  const v = skq.value.trim();
+  if (!v){ sksuggest.style.display = 'none'; return; }
+  const d = await (await fetch('/api/skill_search?q=' + encodeURIComponent(v))).json();
+  skItems = d.results || []; skActive = -1; paintSk();
+}
+function paintSk(){
+  if (!skItems.length){ sksuggest.style.display = 'none'; return; }
+  sksuggest.innerHTML = skItems.map((it,i) =>
+    `<div data-i="${i}" class="${i===skActive?'active':''}">`+
+    `<span class="sid">${esc(it.id)}</span><span>${esc(it.name)}</span></div>`).join('');
+  sksuggest.style.display = 'block';
+  [...sksuggest.children].forEach(el => el.onclick = () => addSkill(skItems[+el.dataset.i].id));
+}
+
+async function addSkill(id){
+  sksuggest.style.display = 'none';
+  if (!M || M.mag == null){ document.getElementById('status').textContent = 'load a map first'; return; }
+  const d = await (await fetch('/api/skill?id=' + encodeURIComponent(id))).json();
+  const m = d.matches && d.matches[0];
+  if (!m) return;
+  const r = vp.getBoundingClientRect();       // drop it at the centre of the current view
+  const cx = Math.round((r.width/2 - panX)/zoom), cy = Math.round((r.height/2 - panY)/zoom);
+  placed.push({ uid: skUid++, id: m.id, name: m.name, icon: m.icon,
+    ranges: m.ranges || [], range: m.range, rangeIdx: primaryIdx(m),
+    flip: false, color: SK_PALETTE[placed.length % SK_PALETTE.length], x: cx, y: cy });
+  skq.value = ''; skItems = [];
+  renderSkillList(); renderPins(); draw();
+}
+
+function renderSkillList(){
+  if (!placed.length){
+    skList.innerHTML = '<div class="empty2">No skills yet — search above to drop one on the map.</div>';
+    return;
+  }
+  skList.innerHTML = placed.map(s => {
+    const rg = curRange(s);
+    const dims = rg ? `${rg.rb[0]-rg.lt[0]}×${rg.rb[1]-rg.lt[1]}` : 'no range';
+    const sel = (s.ranges.length > 1)
+      ? `<select data-uid="${s.uid}">` + s.ranges.map((r,i) =>
+          `<option value="${i}" ${i===s.rangeIdx?'selected':''}>${esc(r.source)}</option>`).join('') + `</select>`
+      : '';
+    const ic = s.icon
+      ? `<img class="ci" src="${s.icon}" onerror="this.style.visibility='hidden'">`
+      : `<span class="ci" style="background:${s.color}"></span>`;
+    return `<div class="skchip" style="--c:${s.color}">${ic}`+
+      `<span class="nm" title="${esc(s.name||s.id)} · id ${esc(s.id)}">${esc(s.name||s.id)}</span>`+
+      `<span class="dm">${dims}</span>${sel}`+
+      `<button data-act="flip" data-uid="${s.uid}" title="flip facing">${s.flip?'▶':'◀'}</button>`+
+      `<button data-act="rm" data-uid="${s.uid}" title="remove">✕</button></div>`;
+  }).join('');
+  skList.querySelectorAll('button[data-act="rm"]').forEach(b => b.onclick = () => {
+    placed = placed.filter(p => String(p.uid) !== b.dataset.uid);
+    renderSkillList(); renderPins(); draw();
+  });
+  skList.querySelectorAll('button[data-act="flip"]').forEach(b => b.onclick = () => {
+    const s = placed.find(p => String(p.uid) === b.dataset.uid); if (!s) return;
+    s.flip = !s.flip; renderSkillList(); draw();
+  });
+  skList.querySelectorAll('select[data-uid]').forEach(sl => sl.onchange = () => {
+    const s = placed.find(p => String(p.uid) === sl.dataset.uid); if (!s) return;
+    s.rangeIdx = +sl.value; renderSkillList(); draw();
+  });
+}
+
+function renderPins(){
+  skPins.innerHTML = placed.map(s => {
+    const body = s.icon
+      ? `<img src="${s.icon}" draggable="false" onerror="this.style.display='none'">`
+      : `<span class="dot"></span>`;
+    return `<div class="pin" data-uid="${s.uid}" style="--c:${s.color}">${body}`+
+           `<span class="plabel">${esc(s.name||s.id)}</span></div>`;
+  }).join('');
+  [...skPins.children].forEach(el => {
+    const s = placed.find(p => String(p.uid) === el.dataset.uid);
+    el.addEventListener('mousedown', ev => {   // grab a pin without starting a map pan
+      ev.preventDefault(); ev.stopPropagation();
+      pinDrag = { s }; el.classList.add('dragging');
+    });
+  });
+  positionPins();
+}
+function positionPins(){
+  [...skPins.children].forEach(el => {
+    const s = placed.find(p => String(p.uid) === el.dataset.uid); if (!s) return;
+    el.style.left = (s.x*zoom)+'px'; el.style.top = (s.y*zoom)+'px';
+  });
+}
+
+function drawSkills(){
+  if (!M || M.mag == null) return;
+  const scale = Math.pow(2, M.mag);            // raw world px → this map's minimap px
+  placed.forEach(s => {
+    const rg = curRange(s);
+    // origin crosshair — the character stands here
+    ctx.strokeStyle = s.color; ctx.lineWidth = Math.max(0.4, 1.4/zoom);
+    const ch = Math.max(2, 4/zoom);
+    ctx.beginPath();
+    ctx.moveTo(s.x-ch, s.y); ctx.lineTo(s.x+ch, s.y);
+    ctx.moveTo(s.x, s.y-ch); ctx.lineTo(s.x, s.y+ch); ctx.stroke();
+    if (!rg) return;
+    let lx = rg.lt[0], ly = rg.lt[1], rx = rg.rb[0], ry = rg.rb[1];
+    if (s.flip){ const nlx = -rx, nrx = -lx; lx = nlx; rx = nrx; }   // mirror around origin
+    const x1 = s.x + lx/scale, y1 = s.y + ly/scale, x2 = s.x + rx/scale, y2 = s.y + ry/scale;
+    const bx = Math.min(x1,x2), by = Math.min(y1,y2), bw = Math.abs(x2-x1), bh = Math.abs(y2-y1);
+    ctx.fillStyle = s.color + '2e';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.strokeStyle = s.color; ctx.lineWidth = Math.max(0.5, 1.6/zoom);
+    ctx.strokeRect(bx, by, bw, bh);
+  });
+}
+
+// keep panel scroll / clicks from reaching the map (pan + zoom)
+skPanel.addEventListener('mousedown', e => e.stopPropagation());
+skPanel.addEventListener('wheel', e => e.stopPropagation());
+
+// probe skill availability once at startup, then reveal the panel if a map is up
+(async () => {
+  try { const d = await (await fetch('/api/skill_search?q=')).json(); SKILLS_OK = d.available !== false; }
+  catch(e){ SKILLS_OK = false; }
+  updateSkillUI();
+})();
 
 bg.onload = apply;
 window.addEventListener('resize', apply);
@@ -816,6 +1118,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="dir of standalone <code>.img files that override Map "
                         "(default: data/) - lets exports match their own foothold set")
     p.add_argument("--region", default="BMS", help="WZ region key (default: GMS)")
+    p.add_argument("--skill-folder", default=str(REPO_ROOT / "data"),
+                   help="folder holding String, Skill and Packs for the skill-range "
+                        "overlay (icons + lt/rb attack boxes). Default: data/")
+    p.add_argument("--skill-region", default="BMS",
+                   help="WZ region key for the skill packs (default: BMS) - "
+                        "independent of --region since the packs are BMS-only")
+    p.add_argument("--no-skills", action="store_true",
+                   help="disable the skill-range overlay entirely")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=5002)
     args = p.parse_args(argv)
@@ -827,7 +1137,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     data.open()
     print(f"  indexed {len(data._names)} named maps.")
 
+    # Skill-range overlay (optional). Its own folder + region so the map's WZ
+    # region need not match the skill packs' (v83 maps are GMS, packs are BMS).
+    skills: Optional[SkillData] = None
+    if not args.no_skills and args.skill_folder:
+        try:
+            skills = SkillData(Path(args.skill_folder), region=args.skill_region)
+            skills.open()
+            print(f"  indexed {len(skills._all_names)} named skills for ranges "
+                  f"(from {args.skill_folder}, region={args.skill_region}).")
+        except Exception as exc:
+            print(f"  (skill-range overlay unavailable: {exc})")
+            skills = None
+
     MapHandler.data = data
+    MapHandler.skills = skills
     httpd = ThreadingHTTPServer((args.host, args.port), MapHandler)
     url = f"http://{args.host}:{args.port}/"
     print(f"Map server ready at {url}  (Ctrl-C to stop)")
@@ -838,6 +1162,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     finally:
         httpd.server_close()
         data.close()
+        if skills is not None:
+            skills.close()
     return 0
 
 
