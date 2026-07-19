@@ -15,7 +15,9 @@ a ``<Name>.wz`` single file:
 
 A skill id groups into an img by dropping its last four digits
 (``1121008`` → ``112``), which is the ``<stem>`` used for both ``_Canvas`` and
-the ``.ms`` skill tree.
+the ``.ms`` skill tree. The 8-digit ``80xxxxxx`` event skills are the
+exception: they pack 100 per img, keyed by the first six digits
+(``80004061`` → ``800040``) — lookups try both stems.
 
 Usage::
 
@@ -138,6 +140,32 @@ def _pick_primary(ranges: List[Dict[str, object]]) -> Optional[Dict[str, object]
     return (non_pvp or ranges)[0]
 
 
+def _stem_candidates(sid: str) -> List[str]:
+    """Img stems that may hold a skill id, in lookup order. Regular skills
+    group by dropping the last four digits (``1121008`` → ``112``), but the
+    8-digit ``80xxxxxx`` event skills are packed 100 per img, keyed by the
+    first six digits (``80004061`` → ``800040``). Trying both is safe: a
+    candidate only counts when its img actually holds the skill."""
+    return [sid[:-n] for n in (4, 2) if len(sid) > n]
+
+
+def _skill_in_imgs(root, prefix: str, sid: str):
+    """Resolve ``<prefix>/<stem>.img → skill/<sid>`` under ``root``, trying
+    each stem candidate. ``(stem, node)``, or ``(None, None)`` when absent."""
+    for stem in _stem_candidates(sid):
+        img = root.get(f"{prefix}/{stem}.img")
+        if img is None:
+            continue
+        try:
+            skills = img.parse().get("skill")
+        except Exception:
+            continue
+        node = skills.get(sid) if isinstance(skills, WzSubProperty) else None
+        if node is not None:
+            return stem, node
+    return None, None
+
+
 # ── data access layer ────────────────────────────────────────────────────
 class SkillData:
     """Lazily opens the three packs and answers name / info / bitmap queries.
@@ -247,9 +275,8 @@ class SkillData:
     # ── full skill info ──────────────────────────────────────────────────
     def skill_info(self, sid: str) -> Dict[str, object]:
         self._ensure()
-        stem = sid[:-4] if len(sid) > 4 else None
         info: Dict[str, object] = {
-            "id": sid, "stem": stem, "name": None, "desc": None, "h": None,
+            "id": sid, "stem": None, "name": None, "desc": None, "h": None,
             "attackRange": None, "attackRanges": [], "stats": {}, "info": {},
             "icon": None, "iconSize": None, "effectFrames": 0, "effect": [],
         }
@@ -264,7 +291,7 @@ class SkillData:
                     info[key] = val
 
         # stats + attack range from the .ms skill tree
-        mnode = self._ms_skill(sid, stem)
+        stem, mnode = self._ms_skill(sid)
         if mnode is not None:
             ranges = _find_ranges(mnode)
             info["attackRanges"] = ranges
@@ -277,7 +304,8 @@ class SkillData:
                 info["info"] = _scalars(inode)
 
         # icon + effect frames from _Canvas
-        cnode = self._canvas_skill(sid, stem)
+        cstem, cnode = self._canvas_skill(sid)
+        info["stem"] = cstem or stem
         if cnode is not None:
             icon = self._render_png("icon", sid)
             if icon is not None:
@@ -292,29 +320,17 @@ class SkillData:
         return info
 
     # ── bitmaps ──────────────────────────────────────────────────────────
-    def _ms_skill(self, sid: str, stem: Optional[str]):
-        if not stem or self._packs is None:
-            return None
-        img = self._packs.root.get(f"Skill/{stem}.img")
-        if img is None:
-            return None
-        try:
-            skills = img.parse().get("skill")
-        except Exception:
-            return None
-        return skills.get(sid) if isinstance(skills, WzSubProperty) else None
+    def _ms_skill(self, sid: str) -> Tuple[Optional[str], Optional[WzSubProperty]]:
+        """``(stem, node)`` for a skill id in the .ms packs, or ``(None, None)``."""
+        if self._packs is None:
+            return None, None
+        return _skill_in_imgs(self._packs.root, "Skill", sid)
 
-    def _canvas_skill(self, sid: str, stem: Optional[str]):
-        if not stem or self._skill is None:
-            return None
-        img = self._skill.root.get(f"_Canvas/{stem}.img")
-        if img is None:
-            return None
-        try:
-            skills = img.parse().get("skill")
-        except Exception:
-            return None
-        return skills.get(sid) if isinstance(skills, WzSubProperty) else None
+    def _canvas_skill(self, sid: str) -> Tuple[Optional[str], Optional[WzSubProperty]]:
+        """``(stem, node)`` for a skill id under ``_Canvas``, or ``(None, None)``."""
+        if self._skill is None:
+            return None, None
+        return _skill_in_imgs(self._skill.root, "_Canvas", sid)
 
     def _decode(self, canvas) -> Optional["object"]:
         if not isinstance(canvas, WzCanvasProperty):
@@ -336,8 +352,7 @@ class SkillData:
             if key in self._png_cache:
                 return self._png_cache[key]
         self._ensure()
-        stem = sid[:-4] if len(sid) > 4 else None
-        cnode = self._canvas_skill(sid, stem)
+        cnode = self._canvas_skill(sid)[1]
         result: Optional[Tuple[bytes, Tuple[int, int]]] = None
         if cnode is not None:
             if kind == "icon":
