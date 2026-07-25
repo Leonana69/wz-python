@@ -664,7 +664,7 @@ INDEX_HTML = r"""<!doctype html>
             border-bottom: 1px solid #262a35; }
   .legend b { font-weight: 600; }
   .plat { color: #5ad16b; } .rope { color: #ff6b6b; }
-  .plocal { color: #37e06a; } .pother { color: #46a8ff; }
+  .plocal { color: #37e06a; } .pother { color: #46a8ff; } .pnone { color: #5c6472; }
   .mob { color: #ffb020; }
   .viewport { position: relative; width: 100%; height: calc(100vh - 150px);
               overflow: hidden; background: #0a0b0f; cursor: grab; }
@@ -742,6 +742,7 @@ INDEX_HTML = r"""<!doctype html>
   <b class="rope">ropes/ladders</b> ·
   <b class="plocal">portals→same map</b> ·
   <b class="pother">portals→other map</b> ·
+  <b class="pnone">portals→none</b> ·
   <b class="mob">mob spawns</b> ·
   <b class="skill">skill ranges</b>
   &nbsp;— x/y match <code>map_define_v2.py</code>
@@ -876,8 +877,14 @@ function draw() {
     ctx.lineWidth = Math.max(0.4, 1.4/zoom);
   });
   M.portals.forEach(p => {
-    const local = (p.type == 999999999 || String(p.type) === M.code);
-    ctx.fillStyle = local ? '#37e06a' : '#46a8ff';
+    // Same-map: type (tm) is this map's own code, or the hidden-teleport
+    // convention — tm 999999999 with a target (tn) naming a portal in this
+    // map (e.g. 410013707's pt_h1/h2/h3 cycle). tm 999999999 with no (or a
+    // dangling) target has no destination at all: script/decoration portals.
+    const sameMap = String(p.type) === M.code ||
+      (p.type == 999999999 && p.target &&
+       M.portals.some(q => q.name === p.target && q !== p));
+    ctx.fillStyle = sameMap ? '#37e06a' : (p.type == 999999999 ? '#5c6472' : '#46a8ff');
     ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(1.4, 2.5/zoom), 0, 7); ctx.fill();
   });
   drawSkills();
