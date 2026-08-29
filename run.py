@@ -1,4 +1,4 @@
-"""Convenience entry point: ``python run.py path/to/Mob.wz``."""
+"""Convenience entry point for the WZ browser and specialized builders."""
 
 from server.app import main
 

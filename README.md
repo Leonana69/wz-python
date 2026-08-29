@@ -17,6 +17,10 @@ scratch against the format documentation in
   export. The first milestone is verified with v83 data; see
   [Map Builder](docs/map_builder.md).
 
+- Legacy v83 Mob Browser with mob-name/ID search, authored sprite animations,
+  stats, Monster Book rewards, item names, and item/equipment icons. See
+  [Mob Browser](docs/mob_browser.md).
+
 Out of scope for now (the format docs cover them but they require more code):
 
 - `.ms` Snowcrypt pack files (v220+)
@@ -50,6 +54,7 @@ Run directly with wz data:
 python run.py path/to/Character           # hierarchical (latest GMS)
 python run.py path/to/Character.wz        # legacy MS
 python run.py --map data/v83 --region GMS # legacy Map Builder bundle
+python run.py --mob data/v83 --region GMS # v83 Mob Browser bundle
 ```
 
 Region is auto-detected by default. Override it if you see garbled text.
@@ -151,6 +156,20 @@ with WzFile.open(f"{root}/Map.wz", region="GMS") as maps, \
         reactor_source=reactors, region="GMS",
     )
     renderer.compose("100000000", scale=0.5).save("henesys.png")
+```
+
+Reading v83 mob details and animation:
+
+```python
+from wzpy import MobRenderer, WzFile
+
+root = "data/v83"
+with WzFile.open(f"{root}/Mob.wz", region="GMS") as mobs, \
+     WzFile.open(f"{root}/String.wz", region="GMS") as strings:
+    renderer = MobRenderer(mobs, string_source=strings, region="GMS")
+    print(renderer.describe("100100"))
+    with open("snail_move.png", "wb") as output:
+        output.write(renderer.animation_png("100100", "move"))
 ```
 
 A standalone `.img` file:

@@ -20,6 +20,9 @@
     {% if has_map %}
     <a class="char-link" href="{{ url_for('map_builder') }}">Map Builder →</a>
     {% endif %}
+    {% if has_mob %}
+    <a class="char-link" href="{{ url_for('mob_browser') }}">Mob Browser &rarr;</a>
+    {% endif %}
     <div id="save-slot"></div>
   </header>
 

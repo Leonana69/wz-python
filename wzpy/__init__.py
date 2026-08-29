@@ -32,6 +32,7 @@ from .ms_spine import (
 from .ms_container import MsContainer
 from .ms_wz import parse_skill_imgs
 from .map import MapBounds, MapRenderer
+from .mob import MobRenderer
 from .snow2 import Snow2, snow_decrypt
 from .properties import (
     WzProperty,
@@ -72,6 +73,7 @@ __all__ = [
     "parse_skill_imgs",
     "MapBounds",
     "MapRenderer",
+    "MobRenderer",
     "Snow2",
     "snow_decrypt",
     "open_wz",

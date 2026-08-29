@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mob Browser - wzpy</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='mob.css') }}">
+</head>
+<body class="mob-page" data-initial-mob-id="{{ initial_mob_id or '' }}">
+  <header>
+    <h1>wzpy <span class="sub">- v83 Mob Browser</span></h1>
+    <div class="meta">
+      <span class="badge">{{ wz_region }}</span>
+      <span class="badge">v{{ wz_version }}</span>
+      <span class="path">{{ wz_name }}</span>
+    </div>
+    <div class="header-actions">
+      <a class="open-link" href="{{ url_for('open_file_page') }}">Switch file...</a>
+      <a class="back-link" href="{{ url_for('tree_browser') }}">Tree browser</a>
+    </div>
+  </header>
+
+  <main class="mob-main">
+    <aside class="mob-sidebar">
+      <section class="mob-search-section">
+        <label for="mob-search">Mob name or ID</label>
+        <div class="mob-search-row">
+          <input id="mob-search" type="search" autocomplete="off" spellcheck="false"
+                 placeholder="Orange Mushroom or 1210102">
+          <button id="mob-load" type="button">Load</button>
+        </div>
+        <ul id="mob-suggestions" class="mob-suggestions" hidden></ul>
+      </section>
+
+      <section>
+        <h2 id="mob-title">Mob</h2>
+        <p id="mob-link" class="mob-muted"></p>
+        <div id="mob-stats" class="mob-stats"></div>
+      </section>
+
+      <section>
+        <h3>Animation</h3>
+        <label class="mob-field">Action
+          <select id="mob-action" disabled></select>
+        </label>
+        <label class="mob-check">
+          <input id="mob-flip" type="checkbox"> Face right
+        </label>
+        <div id="mob-action-meta" class="mob-code"></div>
+      </section>
+
+      <section class="mob-source-note">
+        <h3>Drop data</h3>
+        <p>Lists the v83 Monster Book rewards. Drop rates and quantities are
+          server-side and are not stored in these WZ files.</p>
+      </section>
+    </aside>
+
+    <section class="mob-workspace">
+      <div class="mob-stage-toolbar">
+        <span id="mob-status">Choose a mob.</span>
+        <span class="mob-stage-hint">Animated PNG using the authored frame delays</span>
+      </div>
+      <div class="mob-stage">
+        <img id="mob-animation" alt="animated MapleStory mob" hidden>
+      </div>
+      <section class="mob-drops-panel">
+        <div class="mob-drops-heading">
+          <h2>Dropped items <span id="mob-drop-count"></span></h2>
+          <p id="mob-drop-note"></p>
+        </div>
+        <div id="mob-drops" class="mob-drops"></div>
+      </section>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='mob.js') }}"></script>
+</body>
+</html>

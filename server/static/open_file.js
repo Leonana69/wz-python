@@ -12,13 +12,15 @@ const $browseFile = document.getElementById("open-browse-file");
 const $browseFolder = document.getElementById("open-browse-folder");
 const $charMode = document.getElementById("open-char");
 const $mapMode = document.getElementById("open-map");
+const $mobMode = document.getElementById("open-mob");
 
-if ($charMode && $mapMode) {
-  $charMode.addEventListener("change", () => {
-    if ($charMode.checked) $mapMode.checked = false;
-  });
-  $mapMode.addEventListener("change", () => {
-    if ($mapMode.checked) $charMode.checked = false;
+const bundleModes = [$charMode, $mapMode, $mobMode].filter(Boolean);
+for (const mode of bundleModes) {
+  mode.addEventListener("change", () => {
+    if (!mode.checked) return;
+    for (const other of bundleModes) {
+      if (other !== mode) other.checked = false;
+    }
   });
 }
 
@@ -49,6 +51,7 @@ $form.addEventListener("submit", async (ev) => {
     version: $version.value ? Number($version.value) : null,
     char: !!($charMode && $charMode.checked),
     map: !!($mapMode && $mapMode.checked),
+    mob: !!($mobMode && $mobMode.checked),
   };
   $submit.disabled = true;
   setStatus("info", "Loading…");
@@ -84,8 +87,11 @@ $form.addEventListener("submit", async (ev) => {
       dest = "/";
     } else if (dest === "/map" && !data.has_map) {
       dest = "/";
+    } else if (dest === "/mob" && !data.has_mob) {
+      dest = "/";
     } else if (!dest) {
-      dest = data.has_character ? "/character" : (data.has_map ? "/map" : "/");
+      dest = data.has_character ? "/character"
+        : (data.has_map ? "/map" : (data.has_mob ? "/mob" : "/"));
     }
     // Brief delay if there's a warning so the user can read it.
     setTimeout(() => { window.location.href = dest; },

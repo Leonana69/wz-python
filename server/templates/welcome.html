@@ -50,6 +50,10 @@
         <input type="checkbox" id="open-map">
         <span>Open as Map bundle <em>(loads Map + String + Mob + Npc + Reactor)</em></span>
       </label>
+      <label class="open-char-mode" title="Open the legacy v83 mob browser with names, Monster Book rewards, and item icons.">
+        <input type="checkbox" id="open-mob">
+        <span>Open as v83 Mob bundle <em>(loads Mob + String + Item + Character)</em></span>
+      </label>
       <div id="open-status" class="open-status" hidden></div>
     </form>
 
@@ -78,8 +82,8 @@
     <p class="open-tip">
       Tip: paste any local path. Hierarchical packs (e.g. <code>data/Character</code>)
       should point at the <em>folder</em>, single-file archives at the <code>.wz</code>.
-      For a complete legacy map scene, select Map bundle and point at the folder
-      containing <code>Map.wz</code> and its sibling archives.
+      For a complete legacy map scene, select Map bundle. For mob animations
+      and Monster Book drops, select v83 Mob bundle and point at <code>data/v83</code>.
     </p>
   </main>
 

@@ -527,6 +527,19 @@ def _map_supported(wz: "WzFile") -> bool:
     return needed.issubset(set(wz.root.subdirs))
 
 
+def _mob_supported(wz: "WzFile") -> bool:
+    """Recognize the legacy v83 Mob.wz layout.
+
+    This milestone is intentionally narrow: v83 has the Snail image at the
+    archive root and a ``QuestCountGroup`` directory.  Using both markers
+    avoids mistaking Npc.wz (which also has numeric image names) for Mob.wz.
+    """
+    if wz is None:
+        return False
+    return ("QuestCountGroup" in wz.root.subdirs
+            and wz.root.get("0100100.img") is not None)
+
+
 def _get_character_renderer(app: "Flask", region: str):
     """Lazy-build a CharacterRenderer once per Flask app and reuse it.
     Reading zmap + walking dirs is cheap, but calling list_parts() per
@@ -555,6 +568,19 @@ def _get_map_renderer(app: "Flask"):
     from wzpy.map import MapRenderer
     renderer = MapRenderer(wz, region=app.config.get("WZ_REGION"))
     app.config["MAP_RENDERER"] = renderer
+    return renderer
+
+
+def _get_mob_renderer(app: "Flask"):
+    renderer = app.config.get("MOB_RENDERER")
+    if renderer is not None:
+        return renderer
+    wz = app.config.get("WZ")
+    if not _mob_supported(wz):
+        return None
+    from wzpy.mob import MobRenderer
+    renderer = MobRenderer(wz, region=app.config.get("WZ_REGION"))
+    app.config["MOB_RENDERER"] = renderer
     return renderer
 
 
@@ -728,6 +754,50 @@ def _discover_map_root(path: str) -> Tuple[Optional[str], Optional[Dict[str, str
     return map_path, paths, None
 
 
+def _discover_mob_root(path: str) -> Tuple[Optional[str], Optional[Dict[str, str]], Optional[str]]:
+    """Resolve the complete legacy v83 mob-browser bundle.
+
+    ``path`` may point to ``Mob.wz`` itself or to its containing directory.
+    String supplies mob names and Monster Book rewards, Item supplies ordinary
+    item icons, and Character supplies equipment icons, so all four archives
+    are required for the complete mode.
+    """
+    if not path:
+        return None, None, "path is required"
+    abs_path = os.path.abspath(path)
+    if not os.path.exists(abs_path):
+        return None, None, f"path does not exist: {abs_path}"
+
+    base = os.path.basename(abs_path.rstrip(os.sep)).lower()
+    if base == "mob.wz":
+        mob_path = abs_path
+        parent = os.path.dirname(abs_path)
+    else:
+        if not os.path.isdir(abs_path):
+            return None, None, (
+                f"--mob path must be Mob.wz or a directory containing it: {abs_path}"
+            )
+        parent = abs_path
+        mob_path = _find_pack(parent, "Mob")
+        if mob_path is None:
+            return None, None, f"no Mob.wz found in {abs_path}"
+
+    paths: Dict[str, str] = {"mob": mob_path}
+    missing: List[str] = []
+    for component in ("String", "Item", "Character"):
+        found = _find_pack(parent, component)
+        if found is None:
+            missing.append(f"{component}.wz")
+        else:
+            paths[component.lower()] = found
+    if missing:
+        return None, None, (
+            f"found Mob at {mob_path} but the v83 mob browser also requires "
+            f"{', '.join(missing)} alongside it"
+        )
+    return mob_path, paths, None
+
+
 def _try_load_character_effects(
     wz_path: str, region: str, version: Optional[int],
 ):
@@ -844,12 +914,50 @@ def _try_load_map_renderer(
     return renderer, component_paths
 
 
+def _try_load_mob_renderer(
+    mob_wz: Any, wz_path: str, region: str, version: Optional[int],
+):
+    """Open the v83 String/Item/Character siblings for mob browsing."""
+    from wzpy.mob import MobRenderer
+
+    _mob_path, paths, error = _discover_mob_root(wz_path)
+    if error:
+        return MobRenderer(mob_wz, region=region), {"mob": wz_path}
+
+    loaded: Dict[str, Any] = {}
+    owned: List[Any] = []
+    for component in ("string", "item", "character"):
+        component_path = paths[component]
+        try:
+            source = open_wz(component_path, region=region, version=version)
+        except Exception as exc:
+            print(f"  mob bundle: could not load {component} from {component_path}: {exc}",
+                  flush=True)
+            continue
+        loaded[component] = source
+        owned.append(source)
+        print(f"  loaded mob {component} source from {component_path}", flush=True)
+
+    renderer = MobRenderer(
+        mob_wz,
+        string_source=loaded.get("string"),
+        item_source=loaded.get("item"),
+        character_source=loaded.get("character"),
+        region=region,
+        owned_sources=owned,
+    )
+    component_paths = {"mob": wz_path}
+    component_paths.update({name: paths[name] for name in loaded})
+    return renderer, component_paths
+
+
 def create_app(
     wz_path: Optional[str] = None, region: str = "auto",
     version: Optional[int] = None,
     recent_paths: Optional[List[str]] = None,
     char_mode: bool = False,
     map_mode: bool = False,
+    mob_mode: bool = False,
 ) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     # ``recent_paths`` shows up in the welcome page as quick-load
@@ -873,6 +981,8 @@ def create_app(
     app.config["CHARACTER_RENDERER"] = None
     app.config["MAP_RENDERER"] = None
     app.config["MAP_COMPONENTS"] = {}
+    app.config["MOB_RENDERER"] = None
+    app.config["MOB_COMPONENTS"] = {}
     app.config["BUNDLE_ROOT"] = None
     app.config["BUNDLE_PRIMARY"] = None
 
@@ -891,6 +1001,7 @@ def create_app(
         req_version: Optional[int] = None,
         char_mode: bool = False,
         map_mode: bool = False,
+        mob_mode: bool = False,
     ) -> None:
         nonlocal wz, hierarchical, wz_path, region, version
         if not path:
@@ -905,6 +1016,7 @@ def create_app(
             if is_ms_path(path):
                 old = wz
                 old_map_renderer = app.config.get("MAP_RENDERER")
+                old_mob_renderer = app.config.get("MOB_RENDERER")
                 new_wz = open_wz(path)          # MsContainer for a .ms pack
                 wz = new_wz
                 wz_path = path
@@ -921,6 +1033,8 @@ def create_app(
                 app.config["CHARACTER_EFFECTS"] = None
                 app.config["MAP_RENDERER"] = None
                 app.config["MAP_COMPONENTS"] = {}
+                app.config["MOB_RENDERER"] = None
+                app.config["MOB_COMPONENTS"] = {}
                 app.config["BUNDLE_ROOT"] = None
                 app.config["BUNDLE_PRIMARY"] = None
                 kind = type(new_wz).__name__
@@ -934,6 +1048,8 @@ def create_app(
                         pass
                 if old_map_renderer is not None:
                     old_map_renderer.close()
+                if old_mob_renderer is not None:
+                    old_mob_renderer.close()
                 return
             if req_region == "auto":
                 print(f"auto-detecting region for {path}:")
@@ -944,6 +1060,7 @@ def create_app(
             is_pack = is_hierarchical_pack(path)
             old = wz
             old_map_renderer = app.config.get("MAP_RENDERER")
+            old_mob_renderer = app.config.get("MOB_RENDERER")
             if is_pack:
                 new_wz = WzPackage.open(path, region=r, version=req_version)
                 print(f"  loaded hierarchical pack with {len(new_wz._files)} .wz file(s)")
@@ -966,6 +1083,8 @@ def create_app(
             app.config["CHARACTER_RENDERER"] = None
             app.config["MAP_RENDERER"] = None
             app.config["MAP_COMPONENTS"] = {}
+            app.config["MOB_RENDERER"] = None
+            app.config["MOB_COMPONENTS"] = {}
             app.config["BUNDLE_PRIMARY"] = None
             # String / Effect sibling auto-discovery is gated on char
             # mode (--char on the CLI, "Open as Character bundle" in
@@ -1035,8 +1154,27 @@ def create_app(
                             bundle.subdirs[component] = source.root
                     app.config["BUNDLE_ROOT"] = bundle
                     app.config["BUNDLE_PRIMARY"] = "Map"
+            if mob_mode and _mob_supported(wz):
+                mob_renderer, mob_components = _try_load_mob_renderer(
+                    wz, path, r, req_version,
+                )
+                app.config["MOB_RENDERER"] = mob_renderer
+                app.config["MOB_COMPONENTS"] = mob_components
+                bundle = WzDirectory(name="", parent=None)
+                bundle.subdirs = {"Mob": wz.root}
+                for component, source in (
+                    ("String", mob_renderer.string),
+                    ("Item", mob_renderer.item),
+                    ("Character", mob_renderer.character),
+                ):
+                    if source is not None:
+                        bundle.subdirs[component] = source.root
+                app.config["BUNDLE_ROOT"] = bundle
+                app.config["BUNDLE_PRIMARY"] = "Mob"
             if old_map_renderer is not None:
                 old_map_renderer.close()
+            if old_mob_renderer is not None:
+                old_mob_renderer.close()
             if old is not None and hasattr(old, "close"):
                 try:
                     old.close()
@@ -1046,7 +1184,7 @@ def create_app(
     if wz_path:
         _do_load(
             wz_path, region, version,
-            char_mode=char_mode, map_mode=map_mode,
+            char_mode=char_mode, map_mode=map_mode, mob_mode=mob_mode,
         )
 
     # ── helpers ──────────────────────────────────────────────────────
@@ -1239,6 +1377,7 @@ def create_app(
     # picks a file via the welcome dialog.
     _NO_WZ_OK_ENDPOINTS = frozenset({
         "index", "tree_browser", "open_file_page", "character_builder", "map_builder",
+        "mob_browser",
         "api_load", "api_load_status", "api_load_browse",
     })
 
@@ -1273,6 +1412,8 @@ def create_app(
             return redirect(url_for("character_builder"))
         if _map_supported(wz):
             return redirect(url_for("map_builder"))
+        if _mob_supported(wz):
+            return redirect(url_for("mob_browser"))
         return render_template(
             "index.html",
             wz_name=wz_path,
@@ -1280,6 +1421,7 @@ def create_app(
             wz_region=region,
             has_character=False,
             has_map=False,
+            has_mob=False,
             tree_flat_root=_is_bundle_mode(),
         )
 
@@ -1309,6 +1451,7 @@ def create_app(
             wz_region=region,
             has_character=_character_supported(wz),
             has_map=_map_supported(wz),
+            has_mob=_mob_supported(wz),
             tree_flat_root=_is_bundle_mode(),
         )
 
@@ -1361,11 +1504,30 @@ def create_app(
             initial_map_id=renderer.first_map_id() if renderer else None,
         )
 
+    @app.route("/mob")
+    def mob_browser() -> str:
+        if wz is None:
+            return render_template(
+                "welcome.html",
+                redirect_after_load="/mob",
+                recent_paths=app.config.get("RECENT_PATHS", []),
+            )
+        if not _mob_supported(wz):
+            abort(404, "Mob browser requires the v83 Mob.wz")
+        renderer = _get_mob_renderer(app)
+        return render_template(
+            "mob.html",
+            wz_name=wz_path,
+            wz_version=wz.version,
+            wz_region=region,
+            initial_mob_id=renderer.first_mob_id() if renderer else None,
+        )
+
     @app.route("/api/load", methods=["POST"])
     def api_load() -> Response:
         """Hot-load a WZ file or hierarchical pack folder. Body:
         ``{"path": "...", "region": "auto|GMS|EMS|BMS",
-           "version": int|null, "char": bool, "map": bool}``.
+           "version": int|null, "char": bool, "map": bool, "mob": bool}``.
 
         When ``char`` is true the path is resolved as a Character
         bundle root: it can point at the Character pack itself, or
@@ -1373,7 +1535,8 @@ def create_app(
         String alongside each other. Failure modes (missing pack,
         missing siblings) come back as 400 with a human-readable
         message the welcome dialog renders verbatim. ``map`` similarly
-        resolves Map plus any available String/Mob/Npc/Reactor siblings."""
+        resolves Map plus any available String/Mob/Npc/Reactor siblings.
+        ``mob`` resolves the complete v83 Mob/String/Item/Character bundle."""
         data = request.get_json(silent=True) or {}
         path = (data.get("path") or "").strip()
         region_arg = (data.get("region") or "auto").strip() or "auto"
@@ -1389,8 +1552,11 @@ def create_app(
                 return jsonify({"error": "version must be an integer"}), 400
         char_mode = bool(data.get("char"))
         map_mode = bool(data.get("map"))
-        if char_mode and map_mode:
-            return jsonify({"error": "choose either Character bundle or Map bundle mode"}), 400
+        mob_mode = bool(data.get("mob"))
+        if sum((char_mode, map_mode, mob_mode)) > 1:
+            return jsonify({
+                "error": "choose only one of Character, Map, or Mob bundle mode"
+            }), 400
         if not path:
             return jsonify({"error": "path is required"}), 400
         if char_mode:
@@ -1403,10 +1569,15 @@ def create_app(
             if err:
                 return jsonify({"error": err, "code": "MAP_DISCOVERY"}), 400
             path = map_path
+        elif mob_mode:
+            mob_path, _paths, err = _discover_mob_root(path)
+            if err:
+                return jsonify({"error": err, "code": "MOB_DISCOVERY"}), 400
+            path = mob_path
         try:
             _do_load(
                 path, region_arg, version_arg,
-                char_mode=char_mode, map_mode=map_mode,
+                char_mode=char_mode, map_mode=map_mode, mob_mode=mob_mode,
             )
         except FileNotFoundError as e:
             return jsonify({"error": str(e)}), 404
@@ -1431,6 +1602,7 @@ def create_app(
                     "version": wz.version, "hierarchical": hierarchical,
                     "has_character": _character_supported(wz),
                     "has_map": _map_supported(wz),
+                    "has_mob": _mob_supported(wz),
                     "warning": "char-mode partial load: " + "; ".join(missing),
                 })
         response = {
@@ -1441,6 +1613,7 @@ def create_app(
             "hierarchical": hierarchical,
             "has_character": _character_supported(wz),
             "has_map": _map_supported(wz),
+            "has_mob": _mob_supported(wz),
         }
         if map_mode:
             loaded_components = set(app.config.get("MAP_COMPONENTS", {}))
@@ -1449,6 +1622,14 @@ def create_app(
             if missing:
                 response["warning"] = (
                     "map-mode partial load; missing: " + ", ".join(missing)
+                )
+        if mob_mode:
+            loaded_components = set(app.config.get("MOB_COMPONENTS", {}))
+            missing = [name for name in ("string", "item", "character")
+                       if name not in loaded_components]
+            if missing:
+                response["warning"] = (
+                    "mob-mode partial load; missing: " + ", ".join(missing)
                 )
         return jsonify(response)
 
@@ -1506,7 +1687,70 @@ def create_app(
             "hierarchical": hierarchical,
             "has_character": _character_supported(wz),
             "has_map": _map_supported(wz),
+            "has_mob": _mob_supported(wz),
         })
+
+    @app.route("/api/mob/search")
+    def api_mob_search() -> Response:
+        renderer = _get_mob_renderer(app)
+        if renderer is None:
+            abort(404, "v83 Mob.wz not loaded")
+        query = request.args.get("q", "")
+        try:
+            limit = int(request.args.get("limit", 40))
+        except (TypeError, ValueError):
+            return jsonify({"error": "limit must be an integer"}), 400
+        return jsonify(renderer.search(query, limit=limit))
+
+    @app.route("/api/mob/item/<item_id>/icon.png")
+    def api_mob_item_icon(item_id: str) -> Response:
+        renderer = _get_mob_renderer(app)
+        if renderer is None:
+            abort(404, "v83 Mob.wz not loaded")
+        try:
+            png = renderer.item_icon_png(item_id)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        if png is None:
+            abort(404, f"item {item_id} has no icon in the loaded v83 bundle")
+        response = Response(png, mimetype="image/png")
+        response.headers["Cache-Control"] = "public, max-age=86400"
+        return response
+
+    @app.route("/api/mob/<mob_id>/animation.png")
+    def api_mob_animation(mob_id: str) -> Response:
+        renderer = _get_mob_renderer(app)
+        if renderer is None:
+            abort(404, "v83 Mob.wz not loaded")
+        action = request.args.get("action", "stand")
+        flip = request.args.get("flip", "0").strip().lower() not in (
+            "0", "false", "no", "off", "",
+        )
+        try:
+            started = time.perf_counter()
+            png = renderer.animation_png(mob_id, action, flip=flip)
+        except KeyError as exc:
+            return jsonify({"error": str(exc)}), 404
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+        response = Response(png, mimetype="image/png")
+        response.headers["Server-Timing"] = (
+            f"mob;dur={(time.perf_counter() - started) * 1000:.1f}"
+        )
+        response.headers["Cache-Control"] = "public, max-age=3600"
+        return response
+
+    @app.route("/api/mob/<mob_id>")
+    def api_mob_info(mob_id: str) -> Response:
+        renderer = _get_mob_renderer(app)
+        if renderer is None:
+            abort(404, "v83 Mob.wz not loaded")
+        try:
+            return jsonify(renderer.describe(mob_id))
+        except KeyError as exc:
+            return jsonify({"error": str(exc)}), 404
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
 
     @app.route("/api/map/search")
     def api_map_search() -> Response:
@@ -3677,6 +3921,10 @@ def main() -> None:
                         help="open in Map Builder mode. PATH may be Map.wz / Map/ "
                              "or a parent directory containing Map plus optional "
                              "String, Mob, Npc, and Reactor siblings.")
+    parser.add_argument("--mob", default=None, metavar="PATH",
+                        help="open the legacy v83 Mob Browser. PATH may be Mob.wz "
+                             "or the v83 directory containing Mob.wz, String.wz, "
+                             "Item.wz, and Character.wz.")
     parser.add_argument("--region", default="auto",
                         choices=["auto", "GMS", "EMS", "BMS"],
                         help="MapleStory region (default: auto — pick the "
@@ -3688,8 +3936,8 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
-    if args.char and args.map:
-        parser.error("--char and --map are mutually exclusive")
+    if sum(bool(value) for value in (args.char, args.map, args.mob)) > 1:
+        parser.error("--char, --map, and --mob are mutually exclusive")
 
     initial_path: Optional[str] = None
     if args.char:
@@ -3704,6 +3952,12 @@ def main() -> None:
             print(f"--map error: {err}", file=sys.stderr)
             sys.exit(2)
         initial_path = map_path
+    elif args.mob:
+        mob_path, _paths, err = _discover_mob_root(args.mob)
+        if err:
+            print(f"--mob error: {err}", file=sys.stderr)
+            sys.exit(2)
+        initial_path = mob_path
     elif args.wz:
         initial_path = args.wz[0]
 
@@ -3715,12 +3969,15 @@ def main() -> None:
         recent = [args.char] + list(args.wz)
     elif args.map:
         recent = [args.map] + list(args.wz)
+    elif args.mob:
+        recent = [args.mob] + list(args.wz)
     else:
         recent = list(args.wz[1:])
 
     app = create_app(
         initial_path, region=args.region, version=args.version,
         recent_paths=recent, char_mode=bool(args.char), map_mode=bool(args.map),
+        mob_mode=bool(args.mob),
     )
     print(f"\n  -> open http://{args.host}:{args.port}\n")
     app.run(host=args.host, port=args.port, debug=args.debug)
