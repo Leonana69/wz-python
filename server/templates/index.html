@@ -17,6 +17,9 @@
     {% if has_character %}
     <a class="char-link" href="{{ url_for('character_builder') }}">Character Builder →</a>
     {% endif %}
+    {% if has_map %}
+    <a class="char-link" href="{{ url_for('map_builder') }}">Map Builder →</a>
+    {% endif %}
     <div id="save-slot"></div>
   </header>
 

@@ -278,12 +278,11 @@ def _encode_property_body(prop: Any, reader: Any) -> bytes:
         ext_type = "Shape2D#Convex2D"
         inner = encode_compressed_int(len(prop.points))
         for v in prop.points:
-            # Each child is a Vector property without a named header — the
-            # parser reads <name string-block> + tag + body, so we emit a
-            # nameless entry to mirror what came in.
-            inner += encode_string_block(reader, v.name)
-            inner += bytes([_TAG["Extended"]])
-            inner += _encode_property_body(v, reader)
+            # Convex children contain an extended type followed directly by
+            # its payload, without the normal property name and tag envelope.
+            inner += encode_image_type_string(reader, "Shape2D#Vector2D")
+            inner += encode_compressed_int(int(v.x))
+            inner += encode_compressed_int(int(v.y))
     elif isinstance(prop, WzSoundProperty):
         ext_type = "Sound_DX8"
         inner = b"\x00"

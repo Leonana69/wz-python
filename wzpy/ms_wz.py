@@ -239,12 +239,13 @@ class _BodyParser:
             cnt, o = self._cint(o)
             pts = []
             for _ in range(cnt):
-                _nm, o = self._sblock(o)
-                tag = self.d[o]
-                o += 1
-                val, o = self.value(o, tag)
-                if val[0] == "vector":
-                    pts.append(val[1])
+                etype, o = self._sblock(o)
+                child_type = etype[1] if isinstance(etype, tuple) else etype
+                if child_type != "Shape2D#Vector2D":
+                    raise ValueError(f"unsupported convex child {child_type!r} @ {o}")
+                x, o = self._cint(o)
+                y, o = self._cint(o)
+                pts.append((x, y))
             return ("convex", pts)
         # Unknown (file-specific) ext-type offset — dispatch by structure, but
         # cache the classification per offset so it's only trialed once a file.

@@ -12,6 +12,11 @@ scratch against the format documentation in
 - Character builder with your local wz data and export images.
 ![Character Builder screenshot](docs/character_builder.png)
 
+- Legacy Map Builder with map-name/ID search, eight-layer composition,
+  backgrounds, mobs/NPCs/reactors, editor overlays, minimap preview, and PNG
+  export. The first milestone is verified with v83 data; see
+  [Map Builder](docs/map_builder.md).
+
 Out of scope for now (the format docs cover them but they require more code):
 
 - `.ms` Snowcrypt pack files (v220+)
@@ -44,6 +49,7 @@ Run directly with wz data:
 ```sh
 python run.py path/to/Character           # hierarchical (latest GMS)
 python run.py path/to/Character.wz        # legacy MS
+python run.py --map data/v83 --region GMS # legacy Map Builder bundle
 ```
 
 Region is auto-detected by default. Override it if you see garbled text.
@@ -128,6 +134,23 @@ with WzPackage.open("Data/Character") as pkg:
          "01000000", "01040002"],
         ear_type="humanEar",
     ).save("character.png")
+```
+
+Composing a legacy map:
+
+```python
+from wzpy import MapRenderer, WzFile
+
+root = "data/v83"
+with WzFile.open(f"{root}/Map.wz", region="GMS") as maps, \
+     WzFile.open(f"{root}/Mob.wz", region="GMS") as mobs, \
+     WzFile.open(f"{root}/Npc.wz", region="GMS") as npcs, \
+     WzFile.open(f"{root}/Reactor.wz", region="GMS") as reactors:
+    renderer = MapRenderer(
+        maps, mob_source=mobs, npc_source=npcs,
+        reactor_source=reactors, region="GMS",
+    )
+    renderer.compose("100000000", scale=0.5).save("henesys.png")
 ```
 
 A standalone `.img` file:

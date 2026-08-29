@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Map Builder — wzpy</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='map.css') }}">
+</head>
+<body class="map-page" data-initial-map-id="{{ initial_map_id or '' }}">
+  <header>
+    <h1>wzpy <span class="sub">— Map Builder</span></h1>
+    <div class="meta">
+      <span class="badge">{{ wz_region }}</span>
+      <span class="badge">v{{ wz_version }}</span>
+      <span class="path">{{ wz_name }}</span>
+    </div>
+    <div class="header-actions">
+      <button id="map-export" type="button" class="header-btn">Export PNG</button>
+      <a class="open-link" href="{{ url_for('open_file_page') }}">Switch file…</a>
+      <a class="back-link" href="{{ url_for('tree_browser') }}">← Tree browser</a>
+    </div>
+  </header>
+
+  <main class="map-main">
+    <aside class="map-sidebar">
+      <section class="map-search-section">
+        <label for="map-search">Map name or ID</label>
+        <div class="map-search-row">
+          <input id="map-search" type="search" autocomplete="off" spellcheck="false"
+                 placeholder="Henesys or 100000000">
+          <button id="map-load" type="button">Load</button>
+        </div>
+        <ul id="map-suggestions" class="map-suggestions" hidden></ul>
+      </section>
+
+      <section>
+        <h2 id="map-title">Map</h2>
+        <p id="map-street" class="map-muted"></p>
+        <div id="map-bounds" class="map-code"></div>
+        <div id="map-counts" class="map-counts"></div>
+      </section>
+
+      <section>
+        <h3>Render</h3>
+        <label class="map-field">Scale
+          <select id="map-scale">
+            <option value="0.125">12.5%</option>
+            <option value="0.25" selected>25%</option>
+            <option value="0.5">50%</option>
+            <option value="1">100%</option>
+          </select>
+        </label>
+        <label class="map-field">Animation time
+          <span><input id="map-time" type="number" min="0" step="100" value="0"> ms</span>
+        </label>
+        <div class="map-check-grid">
+          <label><input id="map-backgrounds" type="checkbox" checked> Backgrounds</label>
+          <label><input id="map-life" type="checkbox" checked> Mobs &amp; NPCs</label>
+          <label><input id="map-reactors" type="checkbox" checked> Reactors</label>
+          <label><input id="map-portals" type="checkbox"> Portal markers</label>
+          <label><input id="map-footholds" type="checkbox"> Footholds</label>
+          <label><input id="map-ropes" type="checkbox"> Ropes &amp; ladders</label>
+        </div>
+      </section>
+
+      <section>
+        <h3>Layers</h3>
+        <div id="map-layers" class="map-layer-grid"></div>
+      </section>
+
+      <section class="map-minimap-section">
+        <h3>Authored minimap</h3>
+        <img id="map-minimap" alt="authored minimap" hidden>
+      </section>
+    </aside>
+
+    <section class="map-workspace">
+      <div class="map-stage-toolbar">
+        <span id="map-status">Choose a map.</span>
+        <span class="map-stage-hint">Scroll to pan · browser zoom is independent of render scale</span>
+      </div>
+      <div id="map-stage" class="map-stage">
+        <img id="map-image" alt="rendered MapleStory map" hidden>
+      </div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='map.js') }}"></script>
+</body>
+</html>

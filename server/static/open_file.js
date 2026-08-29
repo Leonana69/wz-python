@@ -11,6 +11,16 @@ const $status = document.getElementById("open-status");
 const $browseFile = document.getElementById("open-browse-file");
 const $browseFolder = document.getElementById("open-browse-folder");
 const $charMode = document.getElementById("open-char");
+const $mapMode = document.getElementById("open-map");
+
+if ($charMode && $mapMode) {
+  $charMode.addEventListener("change", () => {
+    if ($charMode.checked) $mapMode.checked = false;
+  });
+  $mapMode.addEventListener("change", () => {
+    if ($mapMode.checked) $charMode.checked = false;
+  });
+}
 
 function setStatus(kind, text) {
   if (!$status) return;
@@ -38,6 +48,7 @@ $form.addEventListener("submit", async (ev) => {
     region: $region.value || "auto",
     version: $version.value ? Number($version.value) : null,
     char: !!($charMode && $charMode.checked),
+    map: !!($mapMode && $mapMode.checked),
   };
   $submit.disabled = true;
   setStatus("info", "Loading…");
@@ -55,7 +66,7 @@ $form.addEventListener("submit", async (ev) => {
     }
     let summary = `Loaded ${data.path} (${data.region}, v${data.version}).`;
     if (data.warning) {
-      // Char-mode partial load: show the warning briefly, but still
+      // Partial bundle load: show the warning briefly, but still
       // redirect — the user can see the situation in the builder.
       summary += " " + data.warning;
     }
@@ -71,8 +82,10 @@ $form.addEventListener("submit", async (ev) => {
     let dest = window._WZPY_REDIRECT_AFTER_LOAD;
     if (dest === "/character" && !data.has_character) {
       dest = "/";
+    } else if (dest === "/map" && !data.has_map) {
+      dest = "/";
     } else if (!dest) {
-      dest = data.has_character ? "/character" : "/";
+      dest = data.has_character ? "/character" : (data.has_map ? "/map" : "/");
     }
     // Brief delay if there's a warning so the user can read it.
     setTimeout(() => { window.location.href = dest; },

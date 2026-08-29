@@ -46,6 +46,10 @@
         <input type="checkbox" id="open-char">
         <span>Open as Character bundle <em>(loads Character + Effect + String together)</em></span>
       </label>
+      <label class="open-char-mode" title="Resolve the path as a Map bundle root and load Map plus its available String, Mob, Npc, and Reactor siblings.">
+        <input type="checkbox" id="open-map">
+        <span>Open as Map bundle <em>(loads Map + String + Mob + Npc + Reactor)</em></span>
+      </label>
       <div id="open-status" class="open-status" hidden></div>
     </form>
 
@@ -74,6 +78,8 @@
     <p class="open-tip">
       Tip: paste any local path. Hierarchical packs (e.g. <code>data/Character</code>)
       should point at the <em>folder</em>, single-file archives at the <code>.wz</code>.
+      For a complete legacy map scene, select Map bundle and point at the folder
+      containing <code>Map.wz</code> and its sibling archives.
     </p>
   </main>
 

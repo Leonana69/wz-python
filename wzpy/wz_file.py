@@ -385,8 +385,12 @@ class WzFile:
                 continue
             if kind == 2:
                 string_offset = r.read_i32()
-                # absolute name location: header.fstart + 1 + string_offset
-                name_pos = (self.header.fstart + 1 + string_offset) & 0xFFFFFFFF
+                # Type-2 directory entries point at the complete shared entry
+                # header (the real kind byte followed by its name), relative
+                # to ``fstart``.  Starting one byte later happens to decode the
+                # name length as a kind and silently drops every shared-name
+                # entry from the directory index.
+                name_pos = (self.header.fstart + string_offset) & 0xFFFFFFFF
                 name_kind_pos = name_pos
                 # peek into the indirected entry header to get the real kind
                 keep = r.position

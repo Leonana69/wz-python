@@ -519,6 +519,14 @@ def _character_supported(wz: "WzFile") -> bool:
     return needed.issubset(set(root.subdirs))
 
 
+def _map_supported(wz: "WzFile") -> bool:
+    """Recognize the logical root layout used by Map.wz."""
+    if wz is None:
+        return False
+    needed = {"Map", "Obj", "Tile"}
+    return needed.issubset(set(wz.root.subdirs))
+
+
 def _get_character_renderer(app: "Flask", region: str):
     """Lazy-build a CharacterRenderer once per Flask app and reuse it.
     Reading zmap + walking dirs is cheap, but calling list_parts() per
@@ -534,6 +542,19 @@ def _get_character_renderer(app: "Flask", region: str):
         wz, region=region, effects=app.config.get("CHARACTER_EFFECTS"),
     )
     app.config["CHARACTER_RENDERER"] = renderer
+    return renderer
+
+
+def _get_map_renderer(app: "Flask"):
+    renderer = app.config.get("MAP_RENDERER")
+    if renderer is not None:
+        return renderer
+    wz = app.config.get("WZ")
+    if not _map_supported(wz):
+        return None
+    from wzpy.map import MapRenderer
+    renderer = MapRenderer(wz, region=app.config.get("WZ_REGION"))
+    app.config["MAP_RENDERER"] = renderer
     return renderer
 
 
@@ -671,6 +692,42 @@ def _discover_char_root(path: str) -> Tuple[Optional[str], Optional[Dict[str, st
     }, None
 
 
+def _discover_map_root(path: str) -> Tuple[Optional[str], Optional[Dict[str, str]], Optional[str]]:
+    """Resolve a Map bundle root and discover its legacy component siblings.
+
+    Only Map itself is mandatory. String enables names/search and Mob, Npc,
+    and Reactor enable their corresponding scene sprites. A partial bundle is
+    still useful and is reported as a warning by the load endpoint.
+    """
+    if not path:
+        return None, None, "path is required"
+    abs_path = os.path.abspath(path)
+    if not os.path.exists(abs_path):
+        return None, None, f"path does not exist: {abs_path}"
+
+    base = os.path.basename(abs_path.rstrip(os.sep)).lower()
+    if base == "map" or base == "map.wz":
+        map_path = abs_path
+        parent = (os.path.dirname(abs_path) if os.path.isfile(abs_path)
+                  else os.path.dirname(abs_path.rstrip(os.sep)))
+    else:
+        if not os.path.isdir(abs_path):
+            return None, None, (
+                f"--map path must be Map.wz / Map/ or a directory containing one: {abs_path}"
+            )
+        parent = abs_path
+        map_path = _find_pack(parent, "Map")
+        if map_path is None:
+            return None, None, f"no Map.wz or Map/ folder found in {abs_path}"
+
+    paths: Dict[str, str] = {"map": map_path}
+    for component in ("String", "Mob", "Npc", "Reactor"):
+        found = _find_pack(parent, component)
+        if found is not None:
+            paths[component.lower()] = found
+    return map_path, paths, None
+
+
 def _try_load_character_effects(
     wz_path: str, region: str, version: Optional[int],
 ):
@@ -746,11 +803,53 @@ def _try_load_character_strings(
     return None
 
 
+def _try_load_map_renderer(
+    map_wz: Any, wz_path: str, region: str, version: Optional[int],
+):
+    """Open optional siblings and build the reusable map compositor."""
+    from wzpy.map import MapRenderer
+
+    _map_path, paths, error = _discover_map_root(wz_path)
+    if error:
+        # A synthetic/in-memory Map source can still render without siblings.
+        return MapRenderer(map_wz, region=region), {"map": wz_path}
+
+    loaded: Dict[str, Any] = {}
+    owned: List[Any] = []
+    for component in ("string", "mob", "npc", "reactor"):
+        component_path = paths.get(component)
+        if component_path is None:
+            continue
+        try:
+            source = open_wz(component_path, region=region, version=version)
+        except Exception as exc:
+            print(f"  map bundle: could not load {component} from {component_path}: {exc}",
+                  flush=True)
+            continue
+        loaded[component] = source
+        owned.append(source)
+        print(f"  loaded map {component} source from {component_path}", flush=True)
+
+    renderer = MapRenderer(
+        map_wz,
+        string_source=loaded.get("string"),
+        mob_source=loaded.get("mob"),
+        npc_source=loaded.get("npc"),
+        reactor_source=loaded.get("reactor"),
+        region=region,
+        owned_sources=owned,
+    )
+    component_paths = {"map": wz_path}
+    component_paths.update({name: paths[name] for name in loaded})
+    return renderer, component_paths
+
+
 def create_app(
     wz_path: Optional[str] = None, region: str = "auto",
     version: Optional[int] = None,
     recent_paths: Optional[List[str]] = None,
     char_mode: bool = False,
+    map_mode: bool = False,
 ) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     # ``recent_paths`` shows up in the welcome page as quick-load
@@ -772,7 +871,10 @@ def create_app(
     app.config["WZ_FORCE_FULL_REWRITE"] = False
     app.config["CHARACTER_STRINGS"] = None
     app.config["CHARACTER_RENDERER"] = None
+    app.config["MAP_RENDERER"] = None
+    app.config["MAP_COMPONENTS"] = {}
     app.config["BUNDLE_ROOT"] = None
+    app.config["BUNDLE_PRIMARY"] = None
 
     # Mutable closure state for the loaded WZ. Routes capture ``wz``,
     # ``wz_path``, ``region``, ``version``, ``hierarchical`` by name;
@@ -788,6 +890,7 @@ def create_app(
         path: str, req_region: str = "auto",
         req_version: Optional[int] = None,
         char_mode: bool = False,
+        map_mode: bool = False,
     ) -> None:
         nonlocal wz, hierarchical, wz_path, region, version
         if not path:
@@ -801,6 +904,7 @@ def create_app(
             from wzpy.ms_file_v2 import is_ms_path
             if is_ms_path(path):
                 old = wz
+                old_map_renderer = app.config.get("MAP_RENDERER")
                 new_wz = open_wz(path)          # MsContainer for a .ms pack
                 wz = new_wz
                 wz_path = path
@@ -815,7 +919,10 @@ def create_app(
                 app.config["CHARACTER_RENDERER"] = None
                 app.config["CHARACTER_STRINGS"] = None
                 app.config["CHARACTER_EFFECTS"] = None
+                app.config["MAP_RENDERER"] = None
+                app.config["MAP_COMPONENTS"] = {}
                 app.config["BUNDLE_ROOT"] = None
+                app.config["BUNDLE_PRIMARY"] = None
                 kind = type(new_wz).__name__
                 n = len(getattr(new_wz, "imgs", {})) or "?"
                 print(f"  loaded {kind} ({n} imgs)" if kind == "MsContainer"
@@ -825,6 +932,8 @@ def create_app(
                         old.close()
                     except Exception:
                         pass
+                if old_map_renderer is not None:
+                    old_map_renderer.close()
                 return
             if req_region == "auto":
                 print(f"auto-detecting region for {path}:")
@@ -834,6 +943,7 @@ def create_app(
                 r = req_region
             is_pack = is_hierarchical_pack(path)
             old = wz
+            old_map_renderer = app.config.get("MAP_RENDERER")
             if is_pack:
                 new_wz = WzPackage.open(path, region=r, version=req_version)
                 print(f"  loaded hierarchical pack with {len(new_wz._files)} .wz file(s)")
@@ -854,6 +964,9 @@ def create_app(
             app.config["WZ_DIRTY_PATHS"] = set()
             app.config["WZ_FORCE_FULL_REWRITE"] = False
             app.config["CHARACTER_RENDERER"] = None
+            app.config["MAP_RENDERER"] = None
+            app.config["MAP_COMPONENTS"] = {}
+            app.config["BUNDLE_PRIMARY"] = None
             # String / Effect sibling auto-discovery is gated on char
             # mode (--char on the CLI, "Open as Character bundle" in
             # the welcome dialog). Loading Character on its own keeps
@@ -897,8 +1010,33 @@ def create_app(
                     "String": strings_obj.root,
                 }
                 app.config["BUNDLE_ROOT"] = bundle
+                app.config["BUNDLE_PRIMARY"] = "Character"
             else:
                 app.config["BUNDLE_ROOT"] = None
+            # Map.wz is independently useful, so sibling discovery happens
+            # whenever a Map root is opened. ``map_mode`` additionally mounts
+            # all successfully loaded components in the tree browser.
+            if _map_supported(wz):
+                map_renderer, map_components = _try_load_map_renderer(
+                    wz, path, r, req_version,
+                )
+                app.config["MAP_RENDERER"] = map_renderer
+                app.config["MAP_COMPONENTS"] = map_components
+                if map_mode:
+                    bundle = WzDirectory(name="", parent=None)
+                    bundle.subdirs = {"Map": wz.root}
+                    for component, source in (
+                        ("String", map_renderer.string),
+                        ("Mob", map_renderer.mob),
+                        ("Npc", map_renderer.npc),
+                        ("Reactor", map_renderer.reactor),
+                    ):
+                        if source is not None:
+                            bundle.subdirs[component] = source.root
+                    app.config["BUNDLE_ROOT"] = bundle
+                    app.config["BUNDLE_PRIMARY"] = "Map"
+            if old_map_renderer is not None:
+                old_map_renderer.close()
             if old is not None and hasattr(old, "close"):
                 try:
                     old.close()
@@ -906,7 +1044,10 @@ def create_app(
                     pass
 
     if wz_path:
-        _do_load(wz_path, region, version, char_mode=char_mode)
+        _do_load(
+            wz_path, region, version,
+            char_mode=char_mode, map_mode=map_mode,
+        )
 
     # ── helpers ──────────────────────────────────────────────────────
     def _browse_root() -> "WzDirectory":
@@ -925,11 +1066,9 @@ def create_app(
         path inside the .img property tree (may be empty).
 
         Bundle mode special-case: when the first segment isn't a direct
-        child of the synthetic root but ``Character/<segment>`` is, we
-        rewrite the path to descend through Character. This preserves
-        the character-builder's legacy URL shape (no ``Character/``
-        prefix on equip-image paths) while still letting the tree
-        browser show Character / Effect / String as top-level peers.
+        child of the synthetic root, retry beneath the bundle's primary
+        component (Character or Map). This preserves existing API paths
+        while the tree browser shows every loaded component as a peer.
         """
         path = path.strip("/")
         root = _browse_root()
@@ -939,9 +1078,10 @@ def create_app(
         if (app.config.get("BUNDLE_ROOT") is not None
                 and isinstance(root, WzDirectory)
                 and root.child(parts[0]) is None):
-            char_dir = root.child("Character")
-            if char_dir is not None and char_dir.child(parts[0]) is not None:
-                parts = ["Character"] + parts
+            primary_name = app.config.get("BUNDLE_PRIMARY")
+            primary_dir = root.child(primary_name) if primary_name else None
+            if primary_dir is not None and primary_dir.child(parts[0]) is not None:
+                parts = [primary_name] + parts
         node: Any = root
         i = 0
         while i < len(parts):
@@ -1098,7 +1238,7 @@ def create_app(
     # Every other request short-circuits with 503 below until the user
     # picks a file via the welcome dialog.
     _NO_WZ_OK_ENDPOINTS = frozenset({
-        "index", "tree_browser", "open_file_page", "character_builder",
+        "index", "tree_browser", "open_file_page", "character_builder", "map_builder",
         "api_load", "api_load_status", "api_load_browse",
     })
 
@@ -1131,23 +1271,24 @@ def create_app(
         # header, and direct navigation to ``/tree`` is also accepted.
         if _character_supported(wz):
             return redirect(url_for("character_builder"))
+        if _map_supported(wz):
+            return redirect(url_for("map_builder"))
         return render_template(
             "index.html",
             wz_name=wz_path,
             wz_version=wz.version,
             wz_region=region,
             has_character=False,
+            has_map=False,
             tree_flat_root=_is_bundle_mode(),
         )
 
     def _is_bundle_mode() -> bool:
-        """True when the synthetic bundle root is active (Character +
-        Effect + String mounted as peers). The tree browser uses this
-        to skip its synthetic wrapper LI so the bundle's children
-        (Character's subdirs + Effect + String) sit directly at the
-        root — otherwise the user sees an extra wrapper level
-        (e.g. ``data/`` or ``Character/``) that doesn't correspond to
-        any real on-disk path."""
+        """True when a Character or Map synthetic bundle root is active.
+
+        The tree browser skips its wrapper LI so logical components sit
+        directly at the root instead of gaining a fake on-disk level.
+        """
         return app.config.get("BUNDLE_ROOT") is not None
 
     @app.route("/tree")
@@ -1167,6 +1308,7 @@ def create_app(
             wz_version=wz.version,
             wz_region=region,
             has_character=_character_supported(wz),
+            has_map=_map_supported(wz),
             tree_flat_root=_is_bundle_mode(),
         )
 
@@ -1200,18 +1342,38 @@ def create_app(
             wz_region=region,
         )
 
+    @app.route("/map")
+    def map_builder() -> str:
+        if wz is None:
+            return render_template(
+                "welcome.html",
+                redirect_after_load="/map",
+                recent_paths=app.config.get("RECENT_PATHS", []),
+            )
+        if not _map_supported(wz):
+            abort(404, "Map builder requires Map.wz")
+        renderer = _get_map_renderer(app)
+        return render_template(
+            "map.html",
+            wz_name=wz_path,
+            wz_version=wz.version,
+            wz_region=region,
+            initial_map_id=renderer.first_map_id() if renderer else None,
+        )
+
     @app.route("/api/load", methods=["POST"])
     def api_load() -> Response:
         """Hot-load a WZ file or hierarchical pack folder. Body:
         ``{"path": "...", "region": "auto|GMS|EMS|BMS",
-           "version": int|null, "char": bool}``.
+           "version": int|null, "char": bool, "map": bool}``.
 
         When ``char`` is true the path is resolved as a Character
         bundle root: it can point at the Character pack itself, or
         at a parent directory containing Character / Effect /
         String alongside each other. Failure modes (missing pack,
         missing siblings) come back as 400 with a human-readable
-        message the welcome dialog renders verbatim."""
+        message the welcome dialog renders verbatim. ``map`` similarly
+        resolves Map plus any available String/Mob/Npc/Reactor siblings."""
         data = request.get_json(silent=True) or {}
         path = (data.get("path") or "").strip()
         region_arg = (data.get("region") or "auto").strip() or "auto"
@@ -1226,6 +1388,9 @@ def create_app(
             except (TypeError, ValueError):
                 return jsonify({"error": "version must be an integer"}), 400
         char_mode = bool(data.get("char"))
+        map_mode = bool(data.get("map"))
+        if char_mode and map_mode:
+            return jsonify({"error": "choose either Character bundle or Map bundle mode"}), 400
         if not path:
             return jsonify({"error": "path is required"}), 400
         if char_mode:
@@ -1233,8 +1398,16 @@ def create_app(
             if err:
                 return jsonify({"error": err, "code": "CHAR_DISCOVERY"}), 400
             path = char_path
+        elif map_mode:
+            map_path, _paths, err = _discover_map_root(path)
+            if err:
+                return jsonify({"error": err, "code": "MAP_DISCOVERY"}), 400
+            path = map_path
         try:
-            _do_load(path, region_arg, version_arg, char_mode=char_mode)
+            _do_load(
+                path, region_arg, version_arg,
+                char_mode=char_mode, map_mode=map_mode,
+            )
         except FileNotFoundError as e:
             return jsonify({"error": str(e)}), 404
         except ValueError as e:
@@ -1257,16 +1430,27 @@ def create_app(
                     "ok": True, "path": wz_path, "region": region,
                     "version": wz.version, "hierarchical": hierarchical,
                     "has_character": _character_supported(wz),
+                    "has_map": _map_supported(wz),
                     "warning": "char-mode partial load: " + "; ".join(missing),
                 })
-        return jsonify({
+        response = {
             "ok": True,
             "path": wz_path,
             "region": region,
             "version": wz.version,
             "hierarchical": hierarchical,
             "has_character": _character_supported(wz),
-        })
+            "has_map": _map_supported(wz),
+        }
+        if map_mode:
+            loaded_components = set(app.config.get("MAP_COMPONENTS", {}))
+            missing = [name for name in ("string", "mob", "npc", "reactor")
+                       if name not in loaded_components]
+            if missing:
+                response["warning"] = (
+                    "map-mode partial load; missing: " + ", ".join(missing)
+                )
+        return jsonify(response)
 
     @app.route("/api/load/browse")
     def api_load_browse() -> Response:
@@ -1321,7 +1505,105 @@ def create_app(
             "version": wz.version,
             "hierarchical": hierarchical,
             "has_character": _character_supported(wz),
+            "has_map": _map_supported(wz),
         })
+
+    @app.route("/api/map/search")
+    def api_map_search() -> Response:
+        renderer = _get_map_renderer(app)
+        if renderer is None:
+            abort(404, "Map.wz not loaded")
+        query = request.args.get("q", "")
+        try:
+            limit = int(request.args.get("limit", 40))
+        except (TypeError, ValueError):
+            return jsonify({"error": "limit must be an integer"}), 400
+        return jsonify(renderer.search(query, limit=limit))
+
+    @app.route("/api/map/<map_id>")
+    def api_map_info(map_id: str) -> Response:
+        renderer = _get_map_renderer(app)
+        if renderer is None:
+            abort(404, "Map.wz not loaded")
+        try:
+            return jsonify(renderer.describe(map_id))
+        except KeyError as exc:
+            return jsonify({"error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+    def _map_render_bool(name: str, default: bool) -> bool:
+        raw = request.args.get(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+    @app.route("/api/map/<map_id>/render.png")
+    def api_map_render(map_id: str) -> Response:
+        renderer = _get_map_renderer(app)
+        if renderer is None:
+            abort(404, "Map.wz not loaded")
+        from wzpy.map import MapBounds
+
+        try:
+            scale = float(request.args.get("scale", "0.25"))
+            time_ms = int(request.args.get("time", "0"))
+            raw_layers = request.args.get("layers")
+            layers = None if raw_layers is None else {
+                int(value) for value in raw_layers.split(",") if value.strip()
+            }
+            viewport_values = [request.args.get(name) for name in ("x", "y", "width", "height")]
+            viewport = None
+            if any(value is not None for value in viewport_values):
+                if not all(value is not None for value in viewport_values):
+                    raise ValueError("viewport requires x, y, width, and height")
+                x, y, width, height = (int(value) for value in viewport_values)
+                if width <= 0 or height <= 0:
+                    raise ValueError("viewport width and height must be positive")
+                viewport = MapBounds(x, y, x + width, y + height)
+            started = time.perf_counter()
+            png = renderer.compose_png(
+                map_id,
+                scale=scale,
+                time_ms=time_ms,
+                layers=layers,
+                backgrounds=_map_render_bool("backgrounds", True),
+                life=_map_render_bool("life", True),
+                reactors=_map_render_bool("reactors", True),
+                portals=_map_render_bool("portals", False),
+                footholds=_map_render_bool("footholds", False),
+                ropes=_map_render_bool("ropes", False),
+                viewport=viewport,
+            )
+        except KeyError as exc:
+            return jsonify({"error": str(exc)}), 404
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+        response = Response(png, mimetype="image/png")
+        response.headers["Server-Timing"] = (
+            f"map;dur={(time.perf_counter() - started) * 1000:.1f}"
+        )
+        response.headers["Cache-Control"] = "no-store"
+        if _map_render_bool("download", False):
+            response.headers["Content-Disposition"] = (
+                f'attachment; filename="map_{map_id}.png"'
+            )
+        return response
+
+    @app.route("/api/map/<map_id>/minimap.png")
+    def api_map_minimap(map_id: str) -> Response:
+        renderer = _get_map_renderer(app)
+        if renderer is None:
+            abort(404, "Map.wz not loaded")
+        try:
+            png = renderer.minimap_png(map_id)
+        except KeyError as exc:
+            return jsonify({"error": str(exc)}), 404
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        if png is None:
+            abort(404, "map has no minimap canvas")
+        return Response(png, mimetype="image/png")
 
     @app.route("/api/character/parts/<category>")
     def api_character_parts(category: str) -> Response:
@@ -3391,6 +3673,10 @@ def main() -> None:
                              "directory containing Character + Effect + String "
                              "alongside each other. Errors out if any of the three "
                              "are missing. Implies --region auto unless overridden.")
+    parser.add_argument("--map", default=None, metavar="PATH",
+                        help="open in Map Builder mode. PATH may be Map.wz / Map/ "
+                             "or a parent directory containing Map plus optional "
+                             "String, Mob, Npc, and Reactor siblings.")
     parser.add_argument("--region", default="auto",
                         choices=["auto", "GMS", "EMS", "BMS"],
                         help="MapleStory region (default: auto — pick the "
@@ -3402,6 +3688,9 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
+    if args.char and args.map:
+        parser.error("--char and --map are mutually exclusive")
+
     initial_path: Optional[str] = None
     if args.char:
         char_path, _paths, err = _discover_char_root(args.char)
@@ -3409,6 +3698,12 @@ def main() -> None:
             print(f"--char error: {err}", file=sys.stderr)
             sys.exit(2)
         initial_path = char_path
+    elif args.map:
+        map_path, _paths, err = _discover_map_root(args.map)
+        if err:
+            print(f"--map error: {err}", file=sys.stderr)
+            sys.exit(2)
+        initial_path = map_path
     elif args.wz:
         initial_path = args.wz[0]
 
@@ -3418,12 +3713,14 @@ def main() -> None:
     # only the trailing ones become quick-picks.
     if args.char:
         recent = [args.char] + list(args.wz)
+    elif args.map:
+        recent = [args.map] + list(args.wz)
     else:
         recent = list(args.wz[1:])
 
     app = create_app(
         initial_path, region=args.region, version=args.version,
-        recent_paths=recent, char_mode=bool(args.char),
+        recent_paths=recent, char_mode=bool(args.char), map_mode=bool(args.map),
     )
     print(f"\n  -> open http://{args.host}:{args.port}\n")
     app.run(host=args.host, port=args.port, debug=args.debug)

@@ -467,9 +467,15 @@ def _parse_extended(
         # Convex
         convex = WzConvexProperty(name, parent)
         count = reader.read_compressed_int()
-        for _ in range(count):
-            sub_name = reader.read_string_block(base_offset)
-            child = _parse_extended_or_basic(reader, base_offset, sub_name, convex, wz_image)
+        for index in range(count):
+            # Convex entries are anonymous extended values. Unlike a normal
+            # property list, there is no property name or tag byte before the
+            # value: the string block here is the extended type itself.
+            child_type = reader.read_string_block(base_offset)
+            child = _parse_extended(
+                reader, base_offset, str(index), child_type,
+                convex, wz_image, end_pos,
+            )
             if isinstance(child, WzVectorProperty):
                 convex.points.append(child)
         return convex
