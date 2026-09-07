@@ -214,3 +214,6 @@ __marimo__/
 Harepacker-resurrected/
 MapleNecrocer/
 data/
+
+# Locally exported/debug images
+/tmp/

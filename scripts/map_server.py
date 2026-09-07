@@ -44,6 +44,7 @@ Endpoints
 * ``GET /api/search?q=<name>``     ``[{code,name,street}]`` map-name autocomplete
 * ``GET /api/map?code=<code>``     footholds / ropes / portals + minimap metadata
 * ``GET /minimap/<code>.png``      the WZ minimap bitmap
+* ``GET /export/map/<code>.img.json`` raw Map.wz image tree as a JSON download
 * ``GET /api/skill_search?q=<s>``  ``{available,results:[{id,name}]}`` skill search
 * ``GET /api/skill?id=<id>``       ``{matches:[{id,name,icon,ranges,range}]}``
 * ``GET /api/skill?name=<name>``   same, for every skill matching a name
@@ -71,6 +72,7 @@ for _p in (REPO_ROOT, SCRIPTS_DIR):
 
 from wzpy.canvas import decode_canvas                       # noqa: E402
 from wzpy.crypto import WzKey                                # noqa: E402
+from wzpy.json_export import node_to_dict                    # noqa: E402
 from wzpy.properties import WzCanvasProperty, WzSubProperty  # noqa: E402
 from wzpy.wz_file import WzFile                              # noqa: E402
 from wzpy.wz_image import WzImage                            # noqa: E402
@@ -325,6 +327,21 @@ class MapData:
                     self._name_by_code[node.name] = (name, street)
 
     # ── map image sourcing (standalone override wins over v83) ────────────
+    def _wz_map_image(self, code: str):
+        """Return the exact map image stored in the loaded Map source."""
+        padded = code.zfill(9)
+        image = self._map.root.get(f"Map/Map{padded[0]}/{padded}.img")
+        if image is not None:
+            return image
+        # Source-agnostic fallback for packs that shard a map differently.
+        mapdir = self._map.root.get("Map")
+        if mapdir is not None:
+            for sub in mapdir.subdirs:
+                candidate = mapdir.child(sub).get(f"{padded}.img")
+                if candidate is not None:
+                    return candidate
+        return None
+
     def _img_root(self, code: str):
         if code in self._img_cache:
             return self._img_cache[code]
@@ -339,16 +356,7 @@ class MapData:
                 root = img.parse()
         # 2. else the map from v83 Map.wz
         if root is None:
-            padded = code.zfill(9)
-            img = self._map.root.get(f"Map/Map{padded[0]}/{padded}.img")
-            if img is None:      # fall back to scanning the Map<N> subdirs
-                mapdir = self._map.root.get("Map")
-                if mapdir is not None:
-                    for sub in mapdir.subdirs:
-                        cand = mapdir.child(sub).get(f"{padded}.img")
-                        if cand is not None:
-                            img = cand
-                            break
+            img = self._wz_map_image(code)
             root = img.parse() if img is not None else None
         self._img_cache[code] = root
         return root
@@ -527,6 +535,24 @@ class MapData:
         pim.save(buf, "PNG")
         return buf.getvalue()
 
+    def map_image_json(self, code: str) -> Optional[bytes]:
+        """Serialize the exact ``<code>.img`` from Map.wz for download.
+
+        This deliberately bypasses ``override_dir``: the export button is for
+        the image read from the loaded WZ source. Its shape matches
+        ``convert_img.py`` and the main web UI's JSON exporter.
+        """
+        self._ensure()
+        if not str(code).strip().isdigit():
+            return None
+        normalized = str(int(str(code).strip()))
+        with self._lock:
+            image = self._wz_map_image(normalized)
+            if image is None:
+                return None
+            payload = node_to_dict(image)
+            return (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
 
 # ── skill overlay payload ────────────────────────────────────────────────
 def _skill_map_payload(skills: SkillData, sid: str) -> dict:
@@ -556,10 +582,13 @@ class MapHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write("  %s - %s\n" % (self.address_string(), fmt % args))
 
-    def _send(self, code: int, body: bytes, ctype: str) -> None:
+    def _send(self, code: int, body: bytes, ctype: str,
+              headers: Optional[Dict[str, str]] = None) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -593,6 +622,17 @@ class MapHandler(BaseHTTPRequestHandler):
                     self._json({"error": "no minimap"}, 404)
                 else:
                     self._send(200, png, "image/png")
+            elif path.startswith("/export/map/") and path.endswith(".img.json"):
+                code = path[len("/export/map/"):-len(".img.json")]
+                payload = self.data.map_image_json(code)
+                if payload is None:
+                    self._json({"error": f"map {code!r} not found in Map.wz"}, 404)
+                else:
+                    filename = f"{str(int(code)).zfill(9)}.img.json"
+                    self._send(
+                        200, payload, "application/json; charset=utf-8",
+                        {"Content-Disposition": f'attachment; filename="{filename}"'},
+                    )
             elif path == "/api/skill_search":
                 if self.skills is None:
                     self._json({"available": False, "results": []})
@@ -652,6 +692,11 @@ INDEX_HTML = r"""<!doctype html>
   input { padding: 7px 10px; font: 13px ui-monospace, monospace; border-radius: 7px;
           border: 1px solid #333846; background: #1b1e27; color: #dfe3ec; width: 320px; }
   input:focus { outline: none; border-color: #5b8cff; }
+  .export-btn { padding: 7px 11px; font: 12px ui-monospace, monospace; border-radius: 7px;
+                border: 1px solid #3c568d; background: #233457; color: #dfe8ff;
+                cursor: pointer; }
+  .export-btn:hover:not(:disabled) { background: #2d4677; }
+  .export-btn:disabled { opacity: 0.45; cursor: default; }
   #suggest { position: absolute; left: 0; right: 0; top: 38px; z-index: 9;
              background: #1b1e27; border: 1px solid #333846; border-radius: 7px;
              overflow: hidden auto; max-height: 320px; display: none; }
@@ -733,6 +778,8 @@ INDEX_HTML = r"""<!doctype html>
              autocomplete="off" spellcheck="false">
       <div id="suggest"></div>
     </div>
+    <button id="exportJson" class="export-btn" type="button" disabled
+            title="Download the selected map IMG from Map.wz as JSON">Export IMG JSON</button>
     <span class="hint">scroll = zoom · drag = pan · hover a line for coords · drag a skill pin to move it</span>
     <span id="status"></span>
   </div>
@@ -787,6 +834,7 @@ const skq = document.getElementById('skq'), sksuggest = document.getElementById(
 
 // ── search ──
 const q = document.getElementById('q'), suggest = document.getElementById('suggest');
+const exportJson = document.getElementById('exportJson');
 q.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(runSuggest, 130); });
 q.addEventListener('keydown', e => {
   if (e.key === 'ArrowDown') { active = Math.min(active+1, items.length-1); paint(); e.preventDefault(); }
@@ -816,10 +864,13 @@ function paint() {
 
 async function load(code) {
   suggest.style.display = 'none';
+  M = null;
+  exportJson.disabled = true;
   document.getElementById('status').textContent = 'loading ' + code + '…';
   const m = await (await fetch('/api/map?code=' + encodeURIComponent(code))).json();
   if (m.error) { document.getElementById('status').textContent = 'error: ' + m.error; return; }
   M = m;
+  exportJson.disabled = false;
   document.getElementById('title').textContent =
     `${m.name || '(map)'} — ${m.code}` + (m.street ? `  ·  ${m.street}` : '');
   document.getElementById('status').textContent =
@@ -838,6 +889,17 @@ async function load(code) {
 }
 
 // ── render ──
+exportJson.addEventListener('click', () => {
+  if (!M || !M.code) return;
+  const code = String(M.code).padStart(9, '0');
+  const anchor = document.createElement('a');
+  anchor.href = '/export/map/' + encodeURIComponent(code) + '.img.json';
+  anchor.download = code + '.img.json';
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+});
+
 function apply() {
   layer.style.transform = `translate(${panX}px, ${panY}px)`;
   if (M) {
