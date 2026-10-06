@@ -508,6 +508,7 @@ from wzpy import (
 )
 from wzpy.canvas import decode_canvas
 from wzpy.wz_file import WzDirectory
+from wzpy.wz_package import _list_pack_files
 
 
 def _character_supported(wz: "WzFile") -> bool:
@@ -610,28 +611,33 @@ def _auto_detect_region(wz_path: str, version: Optional[int]) -> str:
 
     For hierarchical packs we score the structure file alone — same
     cipher applies to every sibling, so detection on the entry point
-    is enough."""
+    is enough. An empty structure file (``String/String.wz`` has no
+    entries) falls through to the first indexed sibling that has some."""
     # Hierarchical packs derive region from the structure file (the
     # ``<base>.wz`` next to the indexed siblings). Scoring just that
     # one file avoids opening dozens of indexed siblings per region.
-    structure_path = wz_path
+    score_paths = [wz_path]
     if os.path.isdir(wz_path):
-        base = os.path.basename(os.path.abspath(wz_path).rstrip(os.sep))
-        candidate = os.path.join(wz_path, f"{base}.wz")
-        if os.path.isfile(candidate):
-            structure_path = candidate
+        folder = os.path.abspath(wz_path).rstrip(os.sep)
+        score_paths = _list_pack_files(folder, os.path.basename(folder)) or [wz_path]
     best: Optional[Tuple[str, float]] = None
-    for r in ("BMS", "GMS", "EMS"):
-        try:
-            wz = WzFile.open(structure_path, region=r, version=version)
-        except Exception as e:
-            print(f"  {r}: open failed ({e})")
-            continue
-        score = _score_root_printability(wz)
-        wz.close()
-        print(f"  {r}: root printability = {score * 100:.1f}%")
-        if best is None or score > best[1]:
-            best = (r, score)
+    for score_path in score_paths:
+        best = None
+        has_entries = False
+        for r in ("BMS", "GMS", "EMS"):
+            try:
+                wz = WzFile.open(score_path, region=r, version=version)
+            except Exception as e:
+                print(f"  {r}: open failed ({e})")
+                continue
+            has_entries = has_entries or bool(wz.root.subdirs or wz.root.images)
+            score = _score_root_printability(wz)
+            wz.close()
+            print(f"  {r}: root printability = {score * 100:.1f}%")
+            if best is None or score > best[1]:
+                best = (r, score)
+        if has_entries:
+            break
     # Below this threshold every candidate looks like noise, so the WZ is
     # using a key we don't have built in.
     if best is None or best[1] < 0.5:

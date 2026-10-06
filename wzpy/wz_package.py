@@ -126,8 +126,10 @@ class WzPackage:
             )
             self._files.append(wz)
             # Pin the version once we detect it so subsequent files in
-            # the same pack reuse it (avoids per-file rescans).
-            if self.version is None:
+            # the same pack reuse it (avoids per-file rescans). An empty
+            # structure file (e.g. ``String.wz``) has no offsets to verify
+            # the version hash against, so its guess isn't pinned.
+            if self.version is None and (wz.root.subdirs or wz.root.images):
                 self.version = wz.version
             _merge_dir(target, wz.root)
 

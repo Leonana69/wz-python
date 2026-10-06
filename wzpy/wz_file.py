@@ -328,9 +328,15 @@ class WzFile:
         return best[0], best[1]
 
     def _score_version(self, body_start: int, version_hash: int, key: WzKey) -> float:
-        """Speculatively decode the root directory; score by printable ratio."""
+        """Speculatively decode the root directory; score by printable ratio.
+
+        Entry names don't depend on the version hash, but offsets do — a
+        wrong hash decodes them to random 32-bit values. Any offset outside
+        the file disqualifies the candidate, otherwise every version that
+        shares the header's check byte ties and the first one wins."""
         r = self._reader
         assert r is not None
+        file_end = len(self._mmap)
         keep = r.position
         r.version_hash = version_hash
         r.seek(body_start)
@@ -355,7 +361,9 @@ class WzFile:
                     return -1.0
                 r.read_compressed_int()  # size
                 r.read_compressed_int()  # checksum
-                r.read_offset()
+                offset = r.read_offset()
+                if not (self.header.fstart <= offset < file_end):
+                    return -1.0
                 for ch in name:
                     total += 1
                     if 0x20 <= ord(ch) < 0x7F:
