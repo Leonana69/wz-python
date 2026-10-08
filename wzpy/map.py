@@ -542,7 +542,11 @@ class MapRenderer:
         if not isinstance(logical, WzCanvasProperty):
             return None
         pixel_canvas = logical
-        if not logical.has_pixels():
+        # Hierarchical packs store a 1×1 placeholder bitmap next to the
+        # link, so having pixels doesn't mean the canvas is the real one.
+        if (not logical.has_pixels()
+                or logical.child("_outlink") is not None
+                or logical.child("_inlink") is not None):
             linked = resolve_canvas_link(logical, source.root)
             if linked is None:
                 return None

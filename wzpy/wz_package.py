@@ -323,7 +323,11 @@ def _navigate_link(root: WzDirectory, path: str) -> Optional[WzProperty]:
     if not parts:
         return None
     candidates = [parts]
-    if parts[0] not in root.subdirs and parts[0] not in root.images:
+    # The prefix can also collide with a real subdir: the Map pack's root
+    # holds a ``Map/`` shard folder, so ``Map/Obj/_Canvas/...`` would only
+    # ever be tried as ``Map/Map/Obj/...``. Fall back to the stripped path
+    # whenever the as-is walk fails.
+    if len(parts) > 1:
         candidates.append(parts[1:])
     for ps in candidates:
         node = _walk_path(root, ps)
