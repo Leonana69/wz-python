@@ -313,12 +313,15 @@ def _construct_property(kind: str, name: str, body: Dict[str, Any], parent):
 
 
 def _walk_canvases(node, current_path: str = "") -> Iterator[Tuple[str, Any]]:
-    """Yield every (path, WzCanvasProperty) with pixels in the subtree."""
+    """Yield every (path, WzCanvasProperty) in the subtree that has pixels
+    or an ``_outlink``/``_inlink`` to a canvas that does."""
     from wzpy.properties import WzCanvasProperty, WzProperty
     from wzpy.wz_file import WzDirectory
     from wzpy.wz_image import WzImage
     if isinstance(node, WzCanvasProperty):
-        if node.has_pixels():
+        if (node.has_pixels()
+                or node.child("_outlink") is not None
+                or node.child("_inlink") is not None):
             yield current_path, node
         for c in node.children():
             yield from _walk_canvases(c, f"{current_path}/{c.name}")
@@ -457,17 +460,29 @@ def _read_sound_bytes(sound) -> bytes:
     return data
 
 
-def _build_image_zip(node, layout: str, region: str) -> bytes:
-    """Decode every Canvas under ``node`` and pack into a ZIP."""
+def _build_image_zip(node, layout: str, region: str, root) -> bytes:
+    """Decode every Canvas under ``node`` and pack into a ZIP.
+
+    ``root`` is the directory ``_outlink`` paths resolve against.
+    Hierarchical packs store a 1×1 placeholder beside each link, so a
+    linked canvas exports its target's pixels, falling back to the
+    placeholder (as the canvas viewer does) when the link won't resolve."""
     buf = io.BytesIO()
     seen_names: Dict[str, int] = {}
     count = 0
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for path, canvas in _walk_canvases(node):
+            if canvas.child("_outlink") is not None or canvas.child("_inlink") is not None:
+                try:
+                    canvas = resolve_canvas_link(canvas, root) or canvas
+                except Exception:
+                    pass
+            if not canvas.has_pixels():
+                continue
             try:
                 img = decode_canvas(canvas, region=region)
             except Exception:
-                continue  # skip undecodable canvases (e.g., outlinked)
+                continue  # skip undecodable canvases
             png_buf = io.BytesIO()
             img.save(png_buf, format="PNG", optimize=False)
             if layout == "flat":
@@ -2930,7 +2945,8 @@ def create_app(
         layout = request.args.get("layout", "nested")
         if layout not in ("nested", "flat"):
             abort(400, "layout must be 'nested' or 'flat'")
-        zip_bytes = _build_image_zip(target, layout=layout, region=app.config["WZ_REGION"])
+        zip_bytes = _build_image_zip(target, layout=layout, region=app.config["WZ_REGION"],
+                                     root=_browse_root())
         if not zip_bytes:
             abort(404, "no decodable images in this subtree")
         return Response(
