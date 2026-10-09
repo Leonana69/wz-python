@@ -717,15 +717,6 @@ function showContextMenuFor(x, y, labelPath, fullPath, kind) {
   label.textContent = labelPath || "(root)";
   contextMenuEl.appendChild(label);
 
-  const triggerDownload = (url, suggestedName) => {
-    const a = document.createElement("a");
-    a.href = url;
-    if (suggestedName) a.download = suggestedName;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-  };
-
   const addItem = (text, onClick) => {
     const it = document.createElement("div");
     it.className = "menu-item";
@@ -837,32 +828,34 @@ function showContextMenuFor(x, y, labelPath, fullPath, kind) {
   }
   if (isDir) {
     addItem("Export data as JSON (one file per .img)",
-      () => runJsonBundleExport(fullPath, labelPath));
+      () => runExportJob("json_bundle", fullPath, labelPath, "JSON"));
   } else {
-    addItem("Export data as JSON", () => triggerDownload(`/api/export/json/${enc}`));
+    addItem("Export data as JSON",
+      () => runDirectExport(`/api/export/json/${enc}`, labelPath, "JSON"));
   }
-  addItem("Export data as XML", () => triggerDownload(`/api/export/xml/${enc}`));
+  addItem("Export data as XML",
+    () => runDirectExport(`/api/export/xml/${enc}`, labelPath, "XML"));
   if (isImg || isDir) {
     addSep();
     if (isImg) {
       // Raw on-disk .img bytes — the same blob HaRepacker's "Save Image"
       // would (try to) write, suitable for re-opening as a loose .img.
       addItem("Export as .img (raw bytes)",
-        () => triggerDownload(`/api/export/img/${enc}`));
+        () => runDirectExport(`/api/export/img/${enc}`, labelPath, ".img"));
     } else {
       addItem("Export .img bundle (.zip)",
-        () => triggerDownload(`/api/export/img/${enc}`));
+        () => runExportJob("img_bundle", fullPath, labelPath, ".img bundle"));
     }
   }
   addSep();
   addItem("Export images (keep tree structure)",
-    () => triggerDownload(`/api/export/images/${enc}?layout=nested`));
+    () => runExportJob("images", fullPath, labelPath, "Images", "layout=nested"));
   addItem("Export images (flatten into one folder)",
-    () => triggerDownload(`/api/export/images/${enc}?layout=flat`));
+    () => runExportJob("images", fullPath, labelPath, "Images", "layout=flat"));
   addItem("Export sounds (keep tree structure)",
-    () => triggerDownload(`/api/export/sounds/${enc}?layout=nested`));
+    () => runExportJob("sounds", fullPath, labelPath, "Sounds", "layout=nested"));
   addItem("Export sounds (flatten into one folder)",
-    () => triggerDownload(`/api/export/sounds/${enc}?layout=flat`));
+    () => runExportJob("sounds", fullPath, labelPath, "Sounds", "layout=flat"));
 
   // Position; clamp to viewport so the menu doesn't get clipped at edges.
   contextMenuEl.hidden = false;
@@ -1702,150 +1695,206 @@ function notifyAncestorVirtualResize(li) {
   requestAnimationFrame(() => meta._virtualList.childResized(meta));
 }
 
-// ── per-image JSON bundle export (with progress modal) ─────────────
-// Backend serializes each .img into its own JSON inside a temp ZIP on a
-// worker thread; we poll status every 250 ms and surface progress here.
+// ── export dock (progress bars pinned to the bottom of the page) ─────
+// ZIP exports run as server-side jobs (/api/export/start/<kind>): the
+// worker scans the subtree, then packs each entry into a temp ZIP, and
+// we poll its status every 250 ms to drive a real progress bar. Single-
+// file exports (JSON / XML / raw .img) are fetched directly behind an
+// indeterminate bar, then handed to the browser as a download.
 
-async function runJsonBundleExport(fullPath, labelPath) {
-  const modal = createProgressModal(labelPath || "(root)");
-  document.body.appendChild(modal.root);
+let exportDockEl = null;
 
+function createExportRow(title, labelText) {
+  if (!exportDockEl) {
+    exportDockEl = document.createElement("div");
+    exportDockEl.className = "export-dock";
+    document.body.appendChild(exportDockEl);
+  }
+  const row = document.createElement("div");
+  row.className = "export-row";
+
+  const titleEl = document.createElement("span");
+  titleEl.className = "export-title";
+  titleEl.textContent = title;
+  const label = document.createElement("span");
+  label.className = "export-label";
+  label.textContent = labelText || "(root)";
+  label.title = labelText || "(root)";
+  const stats = document.createElement("span");
+  stats.className = "export-stats";
+  stats.textContent = "Starting…";
+  const button = document.createElement("button");
+  button.textContent = "Cancel";
+  const bar = document.createElement("div");
+  bar.className = "export-bar";
+  const fill = document.createElement("div");
+  fill.className = "export-fill indeterminate";
+  bar.appendChild(fill);
+  const current = document.createElement("div");
+  current.className = "export-current";
+  row.append(titleEl, label, stats, button, bar, current);
+  exportDockEl.appendChild(row);
+
+  const remove = () => {
+    row.remove();
+    if (exportDockEl && !exportDockEl.childElementCount) {
+      exportDockEl.remove();
+      exportDockEl = null;
+    }
+  };
+  let cancelHandler = null;
+  let finished = false;
+  button.onclick = () => {
+    if (finished) { remove(); return; }
+    button.disabled = true;
+    button.textContent = "Cancelling…";
+    if (cancelHandler) cancelHandler();
+  };
+  const finish = (cls, text, dismissAfterMs) => {
+    finished = true;
+    fill.classList.remove("indeterminate");
+    if (cls) fill.classList.add(cls);
+    stats.textContent = text;
+    current.textContent = "";
+    button.disabled = false;
+    button.textContent = "Dismiss";
+    if (dismissAfterMs) setTimeout(remove, dismissAfterMs);
+  };
+
+  return {
+    onCancel(fn) { cancelHandler = fn; },
+    // ``pct`` null → indeterminate (size of the work not known yet).
+    update({ pct, text, item }) {
+      if (fill.classList.contains("indeterminate") && pct != null) {
+        // Jump straight to the first real value instead of easing down
+        // from the indeterminate stripe's width.
+        fill.style.transition = "none";
+        fill.classList.remove("indeterminate");
+        fill.style.width = `${pct}%`;
+        void fill.offsetWidth;
+        fill.style.transition = "";
+      }
+      fill.classList.toggle("indeterminate", pct == null);
+      fill.style.width = pct == null ? "" : `${pct}%`;
+      stats.textContent = text;
+      current.textContent = item || "";
+    },
+    done(text) {
+      fill.style.width = "100%";
+      finish("done", text, 6000);
+    },
+    cancelled() {
+      finish("", "Cancelled", 3000);
+    },
+    error(msg) {
+      fill.style.width = "100%";
+      finish("error", msg, 0);
+    },
+  };
+}
+
+function startDownload(href, filename) {
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename || "";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+// Flask's abort() answers with a small HTML page; surface its message.
+async function exportErrorText(resp) {
+  let body = "";
+  try { body = await resp.text(); } catch (_) {}
+  const m = body.match(/<p>([\s\S]*?)<\/p>/);
+  return m ? m[1].trim() : `${resp.status} ${resp.statusText}`;
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+async function runExportJob(kind, fullPath, labelPath, title, query) {
+  const row = createExportRow(title, labelPath);
   let jobId;
   try {
-    const startResp = await fetch(`/api/export/json_bundle/start/${encodeURI(fullPath)}`, {
-      method: "POST",
-    });
-    if (!startResp.ok) throw new Error(`start failed: ${startResp.status} ${startResp.statusText}`);
-    ({ job_id: jobId } = await startResp.json());
+    const url = `/api/export/start/${kind}/${encodeURI(fullPath)}${query ? `?${query}` : ""}`;
+    const r = await fetch(url, { method: "POST" });
+    if (!r.ok) throw new Error(await exportErrorText(r));
+    ({ job_id: jobId } = await r.json());
   } catch (err) {
-    modal.error(err.message);
+    row.error(err.message);
     return;
   }
 
-  modal.onCancel(async () => {
-    try {
-      await fetch(`/api/export/json_bundle/cancel/${jobId}`, { method: "POST" });
-    } catch (_) {}
+  row.onCancel(() => {
+    fetch(`/api/export/job/${jobId}/cancel`, { method: "POST" }).catch(() => {});
   });
 
   const poll = async () => {
     let st;
     try {
-      const r = await fetch(`/api/export/json_bundle/status/${jobId}`);
+      const r = await fetch(`/api/export/job/${jobId}`);
       if (!r.ok) throw new Error(`status ${r.status}`);
       st = await r.json();
     } catch (err) {
-      modal.error(err.message);
+      row.error(err.message);
       return;
     }
-    modal.update(st);
     if (st.status === "running") {
+      if (st.phase === "packing") {
+        const pct = st.total > 0 ? Math.min(100, Math.floor((st.progress / st.total) * 100)) : 0;
+        row.update({ pct, text: `${st.progress} / ${st.total} (${pct}%)`, item: st.current });
+      } else {
+        row.update({ pct: null, text: `Scanning… ${st.found} found`, item: st.current });
+      }
       setTimeout(poll, 250);
     } else if (st.status === "done") {
-      // Trigger download. The browser navigation handles the streaming
-      // ZIP response; the server cleans up the temp file once it's read.
-      const a = document.createElement("a");
-      a.href = `/api/export/json_bundle/download/${jobId}`;
-      a.download = "";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      modal.done();
+      // The browser streams the finished ZIP; the server deletes the
+      // temp file once it has been read.
+      startDownload(`/api/export/job/${jobId}/download`);
+      row.done(`${st.count} file${st.count === 1 ? "" : "s"} — download started`);
     } else if (st.status === "cancelled") {
-      modal.cancelled();
-    } else if (st.status === "error") {
-      modal.error(st.error || "unknown error");
+      row.cancelled();
+    } else {
+      row.error(st.error || "unknown error");
     }
   };
   poll();
 }
 
-function createProgressModal(labelText) {
-  const root = document.createElement("div");
-  root.className = "modal-backdrop";
-
-  const card = document.createElement("div");
-  card.className = "modal-card";
-  root.appendChild(card);
-
-  const title = document.createElement("div");
-  title.className = "modal-title";
-  title.textContent = "Exporting JSON";
-  card.appendChild(title);
-
-  const sub = document.createElement("div");
-  sub.className = "modal-sub";
-  sub.textContent = labelText;
-  card.appendChild(sub);
-
-  const barOuter = document.createElement("div");
-  barOuter.className = "progress-bar";
-  const barInner = document.createElement("div");
-  barInner.className = "progress-fill";
-  barOuter.appendChild(barInner);
-  card.appendChild(barOuter);
-
-  const stats = document.createElement("div");
-  stats.className = "modal-stats";
-  stats.textContent = "Preparing…";
-  card.appendChild(stats);
-
-  const current = document.createElement("div");
-  current.className = "modal-current";
-  card.appendChild(current);
-
-  const buttons = document.createElement("div");
-  buttons.className = "modal-buttons";
-  const cancelBtn = document.createElement("button");
-  cancelBtn.textContent = "Cancel";
-  buttons.appendChild(cancelBtn);
-  const closeBtn = document.createElement("button");
-  closeBtn.textContent = "Close";
-  closeBtn.style.display = "none";
-  buttons.appendChild(closeBtn);
-  card.appendChild(buttons);
-
-  let cancelHandler = null;
-  cancelBtn.onclick = () => {
-    cancelBtn.disabled = true;
-    cancelBtn.textContent = "Cancelling…";
-    if (cancelHandler) cancelHandler();
-  };
-  closeBtn.onclick = () => root.remove();
-
-  return {
-    root,
-    onCancel(fn) { cancelHandler = fn; },
-    update(st) {
-      const total = st.total || 0;
-      const done = st.progress || 0;
-      const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
-      barInner.style.width = `${pct}%`;
-      stats.textContent = total > 0
-        ? `${done} / ${total} (${pct}%)`
-        : "Discovering images…";
-      current.textContent = st.current || "";
-    },
-    done() {
-      title.textContent = "Export complete";
-      stats.textContent = `${stats.textContent} — download started`;
-      cancelBtn.style.display = "none";
-      closeBtn.style.display = "";
-      barInner.classList.add("done");
-    },
-    cancelled() {
-      title.textContent = "Export cancelled";
-      cancelBtn.style.display = "none";
-      closeBtn.style.display = "";
-    },
-    error(msg) {
-      title.textContent = "Export failed";
-      stats.textContent = msg;
-      cancelBtn.style.display = "none";
-      closeBtn.style.display = "";
-      barInner.classList.add("error");
-    },
-  };
+async function runDirectExport(url, labelPath, title) {
+  const row = createExportRow(title, labelPath);
+  row.update({ pct: null, text: "Preparing…" });
+  const ctrl = new AbortController();
+  row.onCancel(() => ctrl.abort());
+  try {
+    const r = await fetch(url, { signal: ctrl.signal });
+    if (!r.ok) throw new Error(await exportErrorText(r));
+    const total = Number(r.headers.get("Content-Length")) || 0;
+    const reader = r.body.getReader();
+    const chunks = [];
+    let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      got += value.length;
+      const pct = total > 0 ? Math.min(100, Math.floor((got / total) * 100)) : null;
+      row.update({ pct, text: total > 0 ? `${formatBytes(got)} / ${formatBytes(total)}` : formatBytes(got) });
+    }
+    const blob = new Blob(chunks, { type: r.headers.get("Content-Type") || "application/octet-stream" });
+    const m = /filename="([^"]+)"/.exec(r.headers.get("Content-Disposition") || "");
+    const href = URL.createObjectURL(blob);
+    startDownload(href, m ? m[1] : "");
+    setTimeout(() => URL.revokeObjectURL(href), 60000);
+    row.done(`${formatBytes(got)} — download started`);
+  } catch (err) {
+    if (err.name === "AbortError") row.cancelled();
+    else row.error(err.message);
+  }
 }
 
 // ── animation player ─────────────────────────────────────────────────

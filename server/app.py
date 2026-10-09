@@ -9,6 +9,9 @@ Routes:
   /api/export/json/<p>               - JSON dump of the subtree
   /api/export/xml/<p>                - XML dump of the subtree
   /api/export/images/<p>?layout=...  - ZIP of every Canvas under <p>
+  /api/export/start/<kind>/<p>       - POST: start a background ZIP export
+                                       (images / sounds / json_bundle / img_bundle)
+  /api/export/job/<id>[/cancel|/download] - poll, cancel, or fetch that job
 """
 
 from __future__ import annotations
@@ -341,45 +344,85 @@ def _walk_canvases(node, current_path: str = "") -> Iterator[Tuple[str, Any]]:
             yield from _walk_canvases(c, f"{current_path}/{c.name}" if current_path else c.name)
 
 
-def _run_json_bundle_job(job_id: str, target, label: str, reader_lock: threading.Lock):
-    """Background worker: serialize each .img under ``target`` into its own
-    JSON file inside a temp ZIP, updating the job entry as it progresses."""
-    from wzpy.wz_image import WzImage
-    images: List[Tuple[str, Any]] = list(target.walk_images(label))
-    total = len(images)
-    with _JOBS_LOCK:
-        _JOBS[job_id]["total"] = total
+def _scan_entries(entries: Iterator[Tuple[str, Any]], reader_lock: threading.Lock,
+                  on_item=None) -> Optional[List[Tuple[str, Any]]]:
+    """Drain ``entries`` into a list. Walking parses .imgs, and the reader
+    has shared state (file position + cipher), so each step runs under
+    ``reader_lock`` — one at a time, so tree/canvas requests interleave.
+    ``on_item(found, name)`` returning False cancels (→ ``None``)."""
+    out: List[Tuple[str, Any]] = []
+    it = iter(entries)
+    while True:
+        with reader_lock:
+            item = next(it, None)
+        if item is None:
+            return out
+        out.append(item)
+        if on_item is not None and not on_item(len(out), item[0]):
+            return None
+
+
+def _pack_entries(zf: zipfile.ZipFile, items: List[Tuple[str, Any]], encode,
+                  on_item=None) -> Optional[int]:
+    """Write ``encode(prop)`` for each ``(name, prop)`` into ``zf``,
+    skipping empty payloads and suffixing repeated names. Returns the
+    number of files written; ``on_item(i, name)`` returning False
+    cancels (→ ``None``)."""
+    seen_names: Dict[str, int] = {}
+    count = 0
+    for i, (name, prop) in enumerate(items):
+        if on_item is not None and not on_item(i, name):
+            return None
+        data = encode(prop)
+        if not data:
+            continue
+        # Defensive deduplication (paths *should* be unique but be safe).
+        if name in seen_names:
+            seen_names[name] += 1
+            stem, ext = name.rsplit(".", 1)
+            name = f"{stem}_{seen_names[name]}.{ext}"
+        else:
+            seen_names[name] = 0
+        zf.writestr(name, data)
+        count += 1
+    return count
+
+
+def _run_export_job(job_id: str, entries: Iterator[Tuple[str, Any]], encode,
+                    reader_lock: threading.Lock, compression: int, empty_error: str):
+    """Background worker behind every ZIP export: scan ``entries`` (phase
+    ``scanning``, reporting ``found``), then pack each through ``encode``
+    into a temp ZIP (phase ``packing``, reporting ``progress``/``total``)."""
+
+    def update(**fields) -> bool:
+        with _JOBS_LOCK:
+            j = _JOBS[job_id]
+            if j.get("cancel"):
+                j["status"] = "cancelled"
+                return False
+            j.update(fields)
+            return True
 
     fd, zip_path = tempfile.mkstemp(suffix=".zip", prefix="wzpy_export_")
     os.close(fd)
     try:
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            for i, (rel, img) in enumerate(images):
-                with _JOBS_LOCK:
-                    j = _JOBS[job_id]
-                    if j.get("cancel"):
-                        j["status"] = "cancelled"
-                        return
-                    j["progress"] = i
-                    j["current"] = rel
-                # Reader has shared state (file position + cipher) — serialize
-                # one image at a time so we don't fight tree/canvas requests.
-                try:
-                    with reader_lock:
-                        if isinstance(img, WzImage):
-                            img.parse()
-                        body = json.dumps(_node_to_dict(img), indent=2, ensure_ascii=False)
-                except Exception as e:
-                    body = json.dumps(
-                        {"error": str(e), "name": getattr(img, "name", "")},
-                        indent=2,
-                    )
-                zf.writestr(f"{rel}.json", body)
-
-        with _JOBS_LOCK:
-            _JOBS[job_id]["progress"] = total
-            _JOBS[job_id]["file_path"] = zip_path
-            _JOBS[job_id]["status"] = "done"
+        items = _scan_entries(
+            entries, reader_lock,
+            lambda found, name: update(found=found, current=name))
+        count = None
+        if items is not None and update(phase="packing", total=len(items), current=""):
+            with zipfile.ZipFile(zip_path, "w", compression, compresslevel=6) as zf:
+                count = _pack_entries(
+                    zf, items, encode,
+                    lambda i, name: update(progress=i, current=name))
+        if count is None:
+            os.remove(zip_path)
+        elif count == 0:
+            os.remove(zip_path)
+            update(status="error", error=empty_error)
+        elif not update(progress=len(items), current="", count=count,
+                        file_path=zip_path, status="done"):
+            os.remove(zip_path)
     except Exception as e:
         with _JOBS_LOCK:
             _JOBS[job_id]["status"] = "error"
@@ -413,35 +456,32 @@ def _walk_sounds(node, current_path: str = "") -> Iterator[Tuple[str, Any]]:
             yield from _walk_sounds(c, f"{current_path}/{c.name}" if current_path else c.name)
 
 
-def _build_sound_zip(node, layout: str) -> bytes:
-    """Pack every Sound payload under ``node`` into a ZIP as MP3.
+def _layout_entries(walk: Iterator[Tuple[str, Any]], layout: str,
+                    ext: str) -> Iterator[Tuple[str, Any]]:
+    """Name each ``(path, prop)`` from ``walk`` as a ZIP member: ``nested``
+    keeps the WZ tree as folders, ``flat`` joins it with underscores."""
+    for path, prop in walk:
+        name = path.replace("/", "_") if layout == "flat" else path
+        yield f"{name}.{ext}", prop
 
-    WZ Sound properties carry MP3 audio bytes after a WAVEFORMATEX
+
+def _encode_sound(sound, reader_lock: threading.Lock) -> bytes:
+    """WZ Sound properties carry MP3 audio bytes after a WAVEFORMATEX
     header (see :func:`_default_mp3_header`); we strip the header
     and emit the raw audio so the result is a real, playable .mp3
     file. Unknown / non-MP3 sounds get the raw payload anyway —
     a media player will still recognize MP3 sync bytes if present
     and ignore garbage prefixes."""
+    with reader_lock:
+        return _read_sound_bytes(sound)
+
+
+def _build_sound_zip(node, layout: str, reader_lock: threading.Lock) -> bytes:
+    """Pack every Sound payload under ``node`` into a ZIP as MP3."""
+    items = _scan_entries(_layout_entries(_walk_sounds(node), layout, "mp3"), reader_lock)
     buf = io.BytesIO()
-    seen_names: Dict[str, int] = {}
-    count = 0
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        for path, sound in _walk_sounds(node):
-            data = _read_sound_bytes(sound)
-            if not data:
-                continue
-            if layout == "flat":
-                name = path.replace("/", "_") + ".mp3"
-            else:
-                name = f"{path}.mp3"
-            if name in seen_names:
-                seen_names[name] += 1
-                stem, ext = name.rsplit(".", 1)
-                name = f"{stem}_{seen_names[name]}.{ext}"
-            else:
-                seen_names[name] = 0
-            zf.writestr(name, data)
-            count += 1
+        count = _pack_entries(zf, items, lambda s: _encode_sound(s, reader_lock))
     return buf.getvalue() if count else b""
 
 
@@ -460,46 +500,64 @@ def _read_sound_bytes(sound) -> bytes:
     return data
 
 
-def _build_image_zip(node, layout: str, region: str, root) -> bytes:
-    """Decode every Canvas under ``node`` and pack into a ZIP.
+def _read_img_bytes(img, reader_lock: threading.Lock) -> bytes:
+    """The on-disk WZ slice for one .img, read through the image's own
+    file — a hierarchical pack spreads its images over many .wz files."""
+    r = img.wz_file.reader
+    with reader_lock:
+        keep = r.position
+        r.seek(img.offset)
+        data = r.read(img.size)
+        r.seek(keep)
+    return data
+
+
+def _encode_img_json(img, reader_lock: threading.Lock) -> bytes:
+    """One .img serialized as JSON. A parse failure becomes an error stub
+    so one bad image doesn't sink the whole bundle."""
+    from wzpy.wz_image import WzImage
+    try:
+        with reader_lock:
+            if isinstance(img, WzImage):
+                img.parse()
+            body = json.dumps(_node_to_dict(img), indent=2, ensure_ascii=False)
+    except Exception as e:
+        body = json.dumps({"error": str(e), "name": getattr(img, "name", "")}, indent=2)
+    return body.encode("utf-8")
+
+
+def _encode_canvas_png(canvas, region: str, root, reader_lock: threading.Lock) -> bytes:
+    """Decode one Canvas to PNG bytes (``b""`` when undecodable).
 
     ``root`` is the directory ``_outlink`` paths resolve against.
     Hierarchical packs store a 1×1 placeholder beside each link, so a
     linked canvas exports its target's pixels, falling back to the
     placeholder (as the canvas viewer does) when the link won't resolve."""
-    buf = io.BytesIO()
-    seen_names: Dict[str, int] = {}
-    count = 0
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        for path, canvas in _walk_canvases(node):
-            if canvas.child("_outlink") is not None or canvas.child("_inlink") is not None:
-                try:
-                    canvas = resolve_canvas_link(canvas, root) or canvas
-                except Exception:
-                    pass
-            if not canvas.has_pixels():
-                continue
+    with reader_lock:
+        if canvas.child("_outlink") is not None or canvas.child("_inlink") is not None:
             try:
-                img = decode_canvas(canvas, region=region)
+                canvas = resolve_canvas_link(canvas, root) or canvas
             except Exception:
-                continue  # skip undecodable canvases
-            png_buf = io.BytesIO()
-            img.save(png_buf, format="PNG", optimize=False)
-            if layout == "flat":
-                # Avoid collisions by suffixing with a counter when we've seen
-                # the same final filename before.
-                name = path.replace("/", "_") + ".png"
-            else:
-                name = f"{path}.png"
-            # Defensive deduplication (paths *should* be unique but be safe).
-            if name in seen_names:
-                seen_names[name] += 1
-                stem, ext = name.rsplit(".", 1)
-                name = f"{stem}_{seen_names[name]}.{ext}"
-            else:
-                seen_names[name] = 0
-            zf.writestr(name, png_buf.getvalue())
-            count += 1
+                pass
+        if not canvas.has_pixels():
+            return b""
+        try:
+            img = decode_canvas(canvas, region=region)
+        except Exception:
+            return b""  # skip undecodable canvases
+    png_buf = io.BytesIO()
+    img.save(png_buf, format="PNG", optimize=False)
+    return png_buf.getvalue()
+
+
+def _build_image_zip(node, layout: str, region: str, root,
+                     reader_lock: threading.Lock) -> bytes:
+    """Decode every Canvas under ``node`` and pack into a ZIP."""
+    items = _scan_entries(_layout_entries(_walk_canvases(node), layout, "png"), reader_lock)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        count = _pack_entries(
+            zf, items, lambda c: _encode_canvas_png(c, region, root, reader_lock))
     return buf.getvalue() if count else b""
 
 from flask import Flask, Response, abort, jsonify, redirect, render_template, request, url_for
@@ -2810,41 +2868,83 @@ def create_app(
             headers={"Content-Disposition": f'attachment; filename="{_safe_filename(subpath, "json")}"'},
         )
 
-    @app.route("/api/export/json_bundle/start/", defaults={"subpath": ""}, methods=["POST"])
-    @app.route("/api/export/json_bundle/start/<path:subpath>", methods=["POST"])
-    def api_export_json_bundle_start(subpath: str) -> Response:
-        target = _resolve_target(unquote(subpath))
-        if not isinstance(target, WzDirectory):
-            abort(400, "json_bundle requires a directory target")
+    # ── background export jobs ───────────────────────────────────────
+    # The UI's export dock starts a job, polls its status to drive the
+    # progress bar, then downloads the finished temp ZIP.
+    def _export_job_spec(kind: str, target, subpath: str):
+        """``(entries, encode, compression, filename, empty_error)`` for
+        one export kind. ``entries`` stays lazy — the worker walks it."""
+        lock = app.config["WZ_READER_LOCK"]
+        if kind in ("json_bundle", "img_bundle"):
+            if not isinstance(target, WzDirectory):
+                abort(400, f"{kind} requires a directory target")
+            if kind == "json_bundle":
+                label = subpath.strip("/") or "wz_root"
+                entries = ((f"{rel}.json", img) for rel, img in target.walk_images(label))
+                return (entries, lambda img: _encode_img_json(img, lock),
+                        zipfile.ZIP_DEFLATED, _safe_filename(label, "json_bundle.zip"),
+                        "no .img files in this directory")
+            # ZIP_STORED — the bytes are XOR-encrypted and won't compress
+            # any further; storing skips a CPU-heavy deflate pass.
+            return (target.walk_images(), lambda img: _read_img_bytes(img, lock),
+                    zipfile.ZIP_STORED, _safe_filename(subpath, "img.zip"),
+                    "no .img files in this directory")
+        layout = request.args.get("layout", "nested")
+        if layout not in ("nested", "flat"):
+            abort(400, "layout must be 'nested' or 'flat'")
+        if kind == "images":
+            region, root = app.config["WZ_REGION"], _browse_root()
+            return (_layout_entries(_walk_canvases(target), layout, "png"),
+                    lambda c: _encode_canvas_png(c, region, root, lock),
+                    zipfile.ZIP_DEFLATED, _safe_filename(subpath, f"images_{layout}.zip"),
+                    "no decodable images in this subtree")
+        if kind == "sounds":
+            return (_layout_entries(_walk_sounds(target), layout, "mp3"),
+                    lambda s: _encode_sound(s, lock),
+                    zipfile.ZIP_DEFLATED, _safe_filename(subpath, f"sounds_{layout}.zip"),
+                    "no sounds in this subtree")
+        abort(404, f"unknown export kind {kind!r}")
+
+    @app.route("/api/export/start/<kind>/", defaults={"subpath": ""}, methods=["POST"])
+    @app.route("/api/export/start/<kind>/<path:subpath>", methods=["POST"])
+    def api_export_start(kind: str, subpath: str) -> Response:
+        target = _resolve_target(subpath)
+        entries, encode, compression, filename, empty_error = _export_job_spec(kind, target, subpath)
         job_id = uuid.uuid4().hex
-        label = unquote(subpath).strip("/") or "wz_root"
         with _JOBS_LOCK:
             _JOBS[job_id] = {
                 "status": "running",
+                "phase": "scanning",
+                "found": 0,
                 "progress": 0,
                 "total": 0,
                 "current": "",
-                "label": label,
+                "filename": filename,
             }
         t = threading.Thread(
-            target=_run_json_bundle_job,
-            args=(job_id, target, label, app.config["WZ_READER_LOCK"]),
+            target=_run_export_job,
+            args=(job_id, entries, encode, app.config["WZ_READER_LOCK"],
+                  compression, empty_error),
             daemon=True,
         )
         t.start()
         return jsonify({"job_id": job_id})
 
-    @app.route("/api/export/json_bundle/status/<job_id>")
-    def api_export_json_bundle_status(job_id: str) -> Response:
+    @app.route("/api/export/job/<job_id>")
+    def api_export_job_status(job_id: str) -> Response:
         with _JOBS_LOCK:
             j = _JOBS.get(job_id)
             if not j:
                 abort(404)
+            # Cancelled / failed jobs are reported once, then forgotten;
+            # finished ones are dropped by the download.
+            if j["status"] in ("cancelled", "error"):
+                _JOBS.pop(job_id, None)
             # Strip server-only fields before returning to the client.
-            return jsonify({k: v for k, v in j.items() if k not in ("file_path",)})
+            return jsonify({k: v for k, v in j.items() if k not in ("file_path", "cancel")})
 
-    @app.route("/api/export/json_bundle/cancel/<job_id>", methods=["POST"])
-    def api_export_json_bundle_cancel(job_id: str) -> Response:
+    @app.route("/api/export/job/<job_id>/cancel", methods=["POST"])
+    def api_export_job_cancel(job_id: str) -> Response:
         with _JOBS_LOCK:
             j = _JOBS.get(job_id)
             if not j:
@@ -2852,14 +2952,14 @@ def create_app(
             j["cancel"] = True
         return jsonify({"ok": True})
 
-    @app.route("/api/export/json_bundle/download/<job_id>")
-    def api_export_json_bundle_download(job_id: str) -> Response:
+    @app.route("/api/export/job/<job_id>/download")
+    def api_export_job_download(job_id: str) -> Response:
         with _JOBS_LOCK:
             j = _JOBS.get(job_id)
             if not j or j.get("status") != "done":
                 abort(404)
             zip_path = j["file_path"]
-            label = j["label"]
+            filename = j["filename"]
 
         def stream_and_cleanup():
             try:
@@ -2881,8 +2981,8 @@ def create_app(
             stream_and_cleanup(),
             mimetype="application/zip",
             headers={
-                "Content-Disposition":
-                    f'attachment; filename="{_safe_filename(label, "json_bundle.zip")}"',
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(os.path.getsize(zip_path)),
             },
         )
 
@@ -2904,31 +3004,23 @@ def create_app(
         of every image under a directory). Useful for round-tripping into
         HaRepacker, which can open a loose .img directly."""
         target = _resolve_target(subpath)
-
-        def _read_img_bytes(img: WzImage) -> bytes:
-            r = wz.reader
-            with app.config["WZ_READER_LOCK"]:
-                keep = r.position
-                r.seek(img.offset)
-                data = r.read(img.size)
-                r.seek(keep)
-            return data
+        lock = app.config["WZ_READER_LOCK"]
 
         if isinstance(target, WzImage):
             return Response(
-                _read_img_bytes(target),
+                _read_img_bytes(target, lock),
                 mimetype="application/octet-stream",
                 headers={"Content-Disposition":
                     f'attachment; filename="{target.name}"'},
             )
 
         if isinstance(target, WzDirectory):
+            items = _scan_entries(target.walk_images(), lock)
             buf = io.BytesIO()
             # ZIP_STORED — the bytes are XOR-encrypted and won't compress
             # any further; storing skips a CPU-heavy deflate pass.
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
-                for rel, img in target.walk_images():
-                    zf.writestr(rel, _read_img_bytes(img))
+                _pack_entries(zf, items, lambda img: _read_img_bytes(img, lock))
             return Response(
                 buf.getvalue(),
                 mimetype="application/zip",
@@ -2946,7 +3038,8 @@ def create_app(
         if layout not in ("nested", "flat"):
             abort(400, "layout must be 'nested' or 'flat'")
         zip_bytes = _build_image_zip(target, layout=layout, region=app.config["WZ_REGION"],
-                                     root=_browse_root())
+                                     root=_browse_root(),
+                                     reader_lock=app.config["WZ_READER_LOCK"])
         if not zip_bytes:
             abort(404, "no decodable images in this subtree")
         return Response(
@@ -2969,7 +3062,8 @@ def create_app(
         layout = request.args.get("layout", "nested")
         if layout not in ("nested", "flat"):
             abort(400, "layout must be 'nested' or 'flat'")
-        zip_bytes = _build_sound_zip(target, layout=layout)
+        zip_bytes = _build_sound_zip(target, layout=layout,
+                                     reader_lock=app.config["WZ_READER_LOCK"])
         if not zip_bytes:
             abort(404, "no sounds in this subtree")
         return Response(
