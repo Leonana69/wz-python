@@ -11,6 +11,39 @@ from wzpy.wz_file import WzFile
 V83_ROOT = Path(__file__).resolve().parents[1] / "data" / "v83"
 
 
+class BackgroundParallaxTests(unittest.TestCase):
+    """Fixture-free checks of the client's background camera formula."""
+
+    @staticmethod
+    def _item(**values):
+        class Prop:
+            def __init__(self, value):
+                self.value = value
+
+        class Item:
+            def get(self, key):
+                return Prop(values[key]) if key in values else None
+
+        return Item()
+
+    def test_background_anchor_follows_camera_by_rx_and_ry(self):
+        far = self._item(x=10, y=-438, rx=-5, ry=-5, type=1)
+        self.assertEqual(MapRenderer.background_anchor(far), (10, -438))
+        self.assertEqual(MapRenderer.background_anchor(far, (1000, 1800)), (960, 1272))
+        # rx = -100 moves with the map, i.e. stays at its authored position.
+        world = self._item(x=10, y=20, rx=-100, ry=-100, type=0)
+        self.assertEqual(MapRenderer.background_anchor(world, (1000, 1800)), (10, 20))
+
+    def test_moving_axes_keep_rx_ry_as_scroll_speed(self):
+        horizontal = self._item(x=10, y=20, rx=30, ry=-20, type=4)
+        self.assertEqual(MapRenderer.background_anchor(horizontal, (1000, 1000)), (10, 820))
+        vertical = self._item(x=10, y=20, rx=-20, ry=30, type=5)
+        self.assertEqual(MapRenderer.background_anchor(vertical, (1000, 1000)), (810, 20))
+
+    def test_bounds_center(self):
+        self.assertEqual(MapBounds(-103, 1268, 1993, 2395).center, (945.0, 1831.5))
+
+
 @unittest.skipUnless((V83_ROOT / "Map.wz").is_file(), "data/v83 fixture is not installed")
 class LegacyV83MapRendererTests(unittest.TestCase):
     @classmethod

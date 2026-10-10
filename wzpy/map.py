@@ -57,6 +57,10 @@ class MapBounds:
     def height(self) -> int:
         return max(0, self.bottom - self.top)
 
+    @property
+    def center(self) -> Tuple[float, float]:
+        return ((self.left + self.right) / 2, (self.top + self.bottom) / 2)
+
     def as_dict(self) -> Dict[str, int]:
         return {
             "left": self.left,
@@ -592,6 +596,9 @@ class MapRenderer:
         footholds: bool = False,
         ropes: bool = False,
         viewport: Optional[MapBounds] = None,
+        parallax: bool = False,
+        camera: Optional[Tuple[float, float]] = None,
+        background_offset: Tuple[int, int] = (0, 0),
     ) -> Image.Image:
         """Compose one editor-style map frame.
 
@@ -599,6 +606,14 @@ class MapRenderer:
         HaCreator.  Background tiling/motion follows its MapSimulator so a
         full-map export is useful even though game backgrounds are parallaxed
         against a moving camera.
+
+        ``parallax`` instead places backgrounds where the client would for a
+        camera centred at ``camera`` (default: the centre of the render
+        bounds, i.e. ``viewport`` or the whole map); see
+        :meth:`background_anchor`. Maps whose playfield lies far from the
+        origin need it, or their backgrounds land outside the frame.
+        ``background_offset`` then moves every background layer by the same
+        (x, y) pixels, e.g. to vary training scenes.
         """
         if not math.isfinite(scale) or scale <= 0 or scale > 4:
             raise ValueError("scale must be greater than 0 and at most 4")
@@ -619,13 +634,16 @@ class MapRenderer:
                     "lower scale or request a viewport"
                 )
             output = Image.new("RGBA", (out_width, out_height), (0, 0, 0, 0))
+            camera = (camera or bounds.center) if parallax else None
 
             back = root.get("back")
             back_items = back.children() if back is not None else []
             if backgrounds:
                 for item in back_items:
                     if not bool(_int(item.get("front"))):
-                        self._draw_background(output, bounds, scale, item, time_ms)
+                        self._draw_background(
+                            output, bounds, scale, item, time_ms, camera, background_offset,
+                        )
 
             placements: List[Tuple[Tuple[int, int, int, int], WzCanvasProperty,
                                    int, int, bool, Any]] = []
@@ -707,7 +725,9 @@ class MapRenderer:
             if backgrounds:
                 for item in back_items:
                     if bool(_int(item.get("front"))):
-                        self._draw_background(output, bounds, scale, item, time_ms)
+                        self._draw_background(
+                            output, bounds, scale, item, time_ms, camera, background_offset,
+                        )
 
             # Geometry overlays stay last so they remain legible over front
             # backgrounds.  They are builder aids, not part of the game frame.
@@ -787,6 +807,28 @@ class MapRenderer:
         top = anchor_y - origin_y
         self._paste_scaled(output, bounds, scale, pixels, left, top, alpha)
 
+    @staticmethod
+    def background_anchor(
+        item: WzProperty, camera: Optional[Tuple[float, float]] = None,
+    ) -> Tuple[int, int]:
+        """Return a background's world anchor for a camera centred at ``camera``.
+
+        The client scrolls a background by (100 + rx)% of the camera's x and
+        (100 + ry)% of its y: rx = 0 stays fixed on screen and rx = -100 moves
+        with the map. On a moving axis (types 4/6 for x, 5/7 for y) rx/ry is a
+        scroll speed instead. Without a camera this is the authored x/y, which
+        is where HaCreator's editor draws it.
+        """
+        x, y = _int(item.get("x")), _int(item.get("y"))
+        if camera is None:
+            return x, y
+        bg_type = _int(item.get("type"))
+        if bg_type not in (4, 6):
+            x += round(camera[0] * (100 + _int(item.get("rx"))) / 100)
+        if bg_type not in (5, 7):
+            y += round(camera[1] * (100 + _int(item.get("ry"))) / 100)
+        return x, y
+
     def _draw_background(
         self,
         output: Image.Image,
@@ -794,6 +836,8 @@ class MapRenderer:
         scale: float,
         item: WzProperty,
         time_ms: int,
+        camera: Optional[Tuple[float, float]] = None,
+        offset: Tuple[int, int] = (0, 0),
     ) -> None:
         background_set = _str(item.get("bS"))
         asset = self._asset_root(self.map, f"Back/{background_set}.img")
@@ -808,8 +852,9 @@ class MapRenderer:
         if pixels is None or pixels.width <= 1 or pixels.height <= 1:
             return
         origin_x, origin_y = self._origin(frame)
-        anchor_x = _int(item.get("x"))
-        anchor_y = _int(item.get("y"))
+        anchor_x, anchor_y = self.background_anchor(item, camera)
+        anchor_x += offset[0]
+        anchor_y += offset[1]
         flip = bool(_int(item.get("f")))
         alpha = max(0, min(255, _int(item.get("a"), 255)))
         bg_type = _int(item.get("type"))
